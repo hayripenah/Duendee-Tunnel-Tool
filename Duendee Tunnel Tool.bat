@@ -20,11 +20,23 @@ set "TOOL=%~dp0"
 if "%TOOL:~-1%"=="\" set "TOOL=%TOOL:~0,-1%"
 set "PROJECT="
 set "PORT=8080"
-if exist "%TOOL%\config.json" (
-    for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "(Get-Content -Raw '%TOOL%\config.json' | ConvertFrom-Json).projectPath"`) do set "PROJECT=%%P"
-    for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "$c=Get-Content -Raw '%TOOL%\config.json' | ConvertFrom-Json; if($c.port){$c.port}"`) do set "PORT=%%P"
+if not exist "%TOOL%\config.json" (
+    echo   %RED%%BOLD%[HATA]%RST% config.json bulunamadi. Once config.example.json dosyasini config.json olarak kopyalayip projectPath ayarlayin.
+    pause
+    exit /b 1
 )
-if not defined PROJECT set "PROJECT=%TOOL%\..\Duendee-main"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "(Get-Content -Raw '%TOOL%\config.json' | ConvertFrom-Json).projectPath"`) do set "PROJECT=%%P"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "$c=Get-Content -Raw '%TOOL%\config.json' | ConvertFrom-Json; if($c.port){$c.port}"`) do set "PORT=%%P"
+if not defined PROJECT (
+    echo   %RED%%BOLD%[HATA]%RST% config.json icinde projectPath tanimli degil.
+    pause
+    exit /b 1
+)
+if not exist "%PROJECT%" (
+    echo   %RED%%BOLD%[HATA]%RST% projectPath bulunamadi: %PROJECT%
+    pause
+    exit /b 1
+)
 set "STATE=%TOOL%\.tunnelstate"
 set "PID_FILE=%STATE%\tunnel.pid"
 set "URL_FILE=%STATE%\tunnel.url"
