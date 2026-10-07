@@ -43,6 +43,9 @@ die() {
   exit 1
 }
 
+DUENDEE_REPO_URL="${DT_DUENDEE_REPO_URL:-https://github.com/hayripenah/Duendee.git}"
+DUENDEE_CLONE_NAME="${DT_DUENDEE_CLONE_NAME:-Duendee-main}"
+
 save_config() {
   local proj="$1"
   local port="$2"
@@ -71,6 +74,283 @@ read_config_fields() {
   fi
 }
 
+desktop_dir() {
+  local d=""
+  if [[ -n "${XDG_DESKTOP_DIR:-}" ]]; then
+    d="${XDG_DESKTOP_DIR/#\~/$HOME}"
+  elif [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/user-dirs.dirs" ]]; then
+    # shellcheck disable=SC1090
+    d="$(. "${XDG_CONFIG_HOME:-$HOME/.config}/user-dirs.dirs" >/dev/null 2>&1; printf '%s' "${XDG_DESKTOP_DIR:-}")"
+    d="${d/#\~/$HOME}"
+  fi
+  if [[ -z "$d" || ! -d "$d" ]]; then
+    for cand in "$HOME/Desktop" "$HOME/Masaüstü" "$HOME/desktop"; do
+      if [[ -d "$cand" ]]; then d="$cand"; break; fi
+    done
+  fi
+  if [[ -z "$d" ]]; then
+    d="$HOME/Desktop"
+    mkdir -p "$d"
+  fi
+  printf '%s' "$d"
+}
+
+looks_like_duendee() {
+  local path="$1"
+  [[ -d "$path" ]] || return 1
+  local leaf base pkg remote
+  leaf="$(basename "$path")"
+  local name_hit=0 pkg_hit=0 remote_hit=0
+  [[ "$leaf" =~ ^[Dd]uendee(-main)?$ ]] && name_hit=1
+  pkg="$path/package.json"
+  if [[ -f "$pkg" ]]; then
+    if grep -Eqi 'hayripenah|dev:tunnel|vite_react_shadcn' "$pkg" 2>/dev/null; then
+      pkg_hit=1
+    elif grep -Eq '"dev"[[:space:]]*:[[:space:]]*"vite"' "$pkg" 2>/dev/null && (( name_hit )); then
+      pkg_hit=1
+    fi
+  fi
+  if [[ -d "$path/.git" ]] && command -v git >/dev/null 2>&1; then
+    remote="$(git -C "$path" remote get-url origin 2>/dev/null || true)"
+    if [[ "$remote" =~ [Gg]ithub\.com[:/].*[Hh]ayripenah/[Dd]uendee(\.git)?/?$ ]]; then
+      remote_hit=1
+    elif [[ "$remote" =~ /[Dd]uendee(\.git)?/?$ ]] && [[ ! "$remote" =~ [Tt]unnel-[Tt]ool ]]; then
+      remote_hit=1
+    fi
+  fi
+  (( remote_hit )) && return 0
+  (( name_hit && pkg_hit )) && return 0
+  (( pkg_hit )) && [[ -d "$path/.git" ]] && return 0
+  return 1
+}
+
+update_duendee_safe() {
+  local path="$1"
+  [[ -d "$path/.git" ]] || return 0
+  command -v git >/dev/null 2>&1 || return 0
+  if [[ -n "$(git -C "$path" status --porcelain 2>/dev/null || true)" ]]; then
+    echo -e "  ${DIM}   Git: yerel değişiklikler var — pull atlandı (${path})${RST}" >&2
+    return 0
+  fi
+  echo -e "  ${DIM}   Duendee güncelleniyor (git fetch/pull --ff-only)...${RST}" >&2
+  if git -C "$path" fetch --quiet 2>/dev/null && git -C "$path" pull --ff-only --quiet 2>/dev/null; then
+    echo -e "  ${GRN}   Repo güncel.${RST}" >&2
+  else
+    echo -e "  ${YEL}   Pull atlandı/başarısız (ff-only). Mevcut kopya kullanılacak.${RST}" >&2
+  fi
+}
+
+find_local_duendee() {
+  local desktop home docs
+  desktop="$(desktop_dir)"
+  home="$HOME"
+  docs="${XDG_DOCUMENTS_DIR:-$HOME/Documents}"
+  docs="${docs/#\~/$HOME}"
+  local -a bases=(
+    "$desktop" "$home" "$docs"
+    "$home/YEK/Cursor" "$desktop/YEK/Cursor"
+    "$home/Cursor" "$desktop/Cursor"
+    "$home/YEK" "$desktop/YEK"
+  )
+  local -a names=(Duendee-main Duendee duendee-main duendee)
+  local -a hits=()
+  local seen="" b n p child
+
+  add_hit() {
+    local cand="$1"
+    [[ -d "$cand" ]] || return 0
+    cand="$(cd "$cand" && pwd)"
+    case " $seen " in
+      *" $cand "*) return 0 ;;
+    esac
+    if looks_like_duendee "$cand"; then
+      hits+=("$cand")
+      seen+=" $cand"
+    fi
+  }
+
+  [[ -n "${DT_DUENDEE_DIR:-}" ]] && add_hit "$DT_DUENDEE_DIR"
+  for b in "${bases[@]}"; do
+    [[ -d "$b" ]] || continue
+    for n in "${names[@]}"; do
+      add_hit "$b/$n"
+    done
+    for child in "$b"/*; do
+      [[ -d "$child" ]] || continue
+      n="$(basename "$child")"
+      if [[ "$n" =~ ^[Dd]uendee(-main)?$ ]]; then
+        add_hit "$child"
+      fi
+      if [[ -d "$child/Cursor" ]]; then
+        for n in "${names[@]}"; do
+          add_hit "$child/Cursor/$n"
+        done
+      fi
+    done
+  done
+
+  if ((${#hits[@]})); then
+    printf '%s\n' "${hits[@]}"
+  fi
+}
+
+pick_dir_gui() {
+  local title="${1:-Duendee proje klasörünü seçin}"
+  if command -v zenity >/dev/null 2>&1; then
+    zenity --file-selection --directory --title="$title" 2>/dev/null || true
+  elif command -v kdialog >/dev/null 2>&1; then
+    kdialog --getexistingdirectory "$HOME" --title "$title" 2>/dev/null || true
+  elif command -v yad >/dev/null 2>&1; then
+    yad --file --directory --title="$title" 2>/dev/null || true
+  fi
+}
+
+clone_duendee_to() {
+  local parent="$1"
+  local target
+  if ! command -v git >/dev/null 2>&1; then
+    echo -e "  ${RED}${BOLD}[HATA]${RST} git bulunamadı. Git kurun veya Duendee klasörünü elle seçin." >&2
+    return 1
+  fi
+  mkdir -p "$parent"
+  target="${parent%/}/${DUENDEE_CLONE_NAME}"
+  if [[ -d "$target" ]]; then
+    if looks_like_duendee "$target"; then
+      update_duendee_safe "$target"
+      (cd "$target" && pwd)
+      return 0
+    fi
+    echo -e "  ${YEL}   Klasör zaten var ama Duendee görünmüyor: ${target}${RST}" >&2
+    return 1
+  fi
+  echo -e "  ${DIM}   Klonlanıyor: ${DUENDEE_REPO_URL} -> ${target}${RST}" >&2
+  if git clone --depth 1 "$DUENDEE_REPO_URL" "$target"; then
+    (cd "$target" && pwd)
+    return 0
+  fi
+  echo -e "  ${RED}   Clone başarısız.${RST}" >&2
+  return 1
+}
+
+resolve_project_path_interactive() {
+  local current="${1:-}"
+  local desktop choice picked cloned i path
+  desktop="$(desktop_dir)"
+  echo -e "  ${YEL}${BOLD}[KURULUM]${RST} Duendee proje klasörü (projectPath)." >&2
+  echo -e "  ${DIM}   Varsayılan konum: Desktop (${desktop})${RST}" >&2
+  if [[ -n "$current" && ! -d "$current" ]]; then
+    echo -e "  ${DIM}   Mevcut config değeri geçersiz: ${current}${RST}" >&2
+  fi
+  echo >&2
+
+  mapfile -t found < <(find_local_duendee)
+  if ((${#found[@]})); then
+    echo -e "  ${GRN}   Yerel Duendee bulundu:${RST}" >&2
+    for i in "${!found[@]}"; do
+      echo -e "  ${DIM}   [$((i + 1))] ${found[$i]}${RST}" >&2
+    done
+    echo >&2
+    echo -e "  ${DIM}   Enter = [1] kullan ve güncelle | numara | C = özel yol | B = klasör seç | G = Desktop'a klonla${RST}" >&2
+    printf '  seçim> '
+    read -r choice
+    choice="${choice//\"/}"
+    if [[ -z "$choice" || "$choice" == "1" ]]; then
+      update_duendee_safe "${found[0]}"
+      RESOLVED_PROJECT="${found[0]}"
+      return 0
+    fi
+    if [[ "$choice" =~ ^[0-9]+$ ]]; then
+      i=$((choice - 1))
+      if (( i >= 0 && i < ${#found[@]} )); then
+        update_duendee_safe "${found[$i]}"
+        RESOLVED_PROJECT="${found[$i]}"
+        return 0
+      fi
+    fi
+    if [[ "$choice" =~ ^[Gg]$ ]]; then
+      cloned="$(clone_duendee_to "$desktop" || true)"
+      [[ -n "$cloned" ]] && { RESOLVED_PROJECT="$cloned"; return 0; }
+    fi
+    if [[ "$choice" =~ ^[Bb]$ ]]; then
+      picked="$(pick_dir_gui)"
+      if [[ -n "$picked" && -d "$picked" ]]; then
+        looks_like_duendee "$picked" && update_duendee_safe "$picked"
+        RESOLVED_PROJECT="$(cd "$picked" && pwd)"
+        return 0
+      fi
+    fi
+  else
+    echo -e "  ${YEL}   Yerel Duendee bulunamadı.${RST}" >&2
+    echo -e "  ${DIM}   Enter = Desktop'a klonla (${desktop}/${DUENDEE_CLONE_NAME})${RST}" >&2
+    echo -e "  ${DIM}   C = özel klasör yolu | B = klasör seçici | yol yaz = o dizine klonla/kullan${RST}" >&2
+    printf '  seçim> '
+    read -r choice
+    choice="${choice//\"/}"
+    choice="${choice/#\~/$HOME}"
+    if [[ -z "$choice" || "$choice" =~ ^[Gg]$ ]]; then
+      cloned="$(clone_duendee_to "$desktop" || true)"
+      [[ -n "$cloned" ]] && { RESOLVED_PROJECT="$cloned"; return 0; }
+    elif [[ "$choice" =~ ^[Bb]$ ]]; then
+      picked="$(pick_dir_gui)"
+      if [[ -n "$picked" && -d "$picked" ]]; then
+        if looks_like_duendee "$picked"; then
+          update_duendee_safe "$picked"
+          RESOLVED_PROJECT="$(cd "$picked" && pwd)"
+          return 0
+        fi
+        cloned="$(clone_duendee_to "$picked" || true)"
+        [[ -n "$cloned" ]] && { RESOLVED_PROJECT="$cloned"; return 0; }
+      fi
+    elif [[ ! "$choice" =~ ^[Cc]$ ]]; then
+      if [[ -d "$choice" ]]; then
+        if looks_like_duendee "$choice"; then
+          update_duendee_safe "$choice"
+          RESOLVED_PROJECT="$(cd "$choice" && pwd)"
+          return 0
+        fi
+        cloned="$(clone_duendee_to "$choice" || true)"
+        [[ -n "$cloned" ]] && { RESOLVED_PROJECT="$cloned"; return 0; }
+      fi
+    fi
+  fi
+
+  while true; do
+    echo -e "  ${DIM}   Özel yol: mevcut Duendee klasörü veya klon ana dizini (boş = Desktop)${RST}" >&2
+    printf '  projectPath> '
+    read -r entered
+    entered="${entered//\"/}"
+    entered="${entered/#\~/$HOME}"
+    if [[ -z "$entered" ]]; then
+      entered="$desktop"
+    fi
+    if [[ "$entered" =~ ^[Bb]$ ]]; then
+      picked="$(pick_dir_gui)"
+      [[ -z "$picked" ]] && continue
+      entered="$picked"
+    fi
+    if [[ -d "$entered" ]]; then
+      if looks_like_duendee "$entered"; then
+        update_duendee_safe "$entered"
+        RESOLVED_PROJECT="$(cd "$entered" && pwd)"
+        return 0
+      fi
+      if looks_like_duendee "${entered%/}/${DUENDEE_CLONE_NAME}"; then
+        update_duendee_safe "${entered%/}/${DUENDEE_CLONE_NAME}"
+        RESOLVED_PROJECT="$(cd "${entered%/}/${DUENDEE_CLONE_NAME}" && pwd)"
+        return 0
+      fi
+      cloned="$(clone_duendee_to "$entered" || true)"
+      if [[ -n "$cloned" ]]; then
+        RESOLVED_PROJECT="$cloned"
+        return 0
+      fi
+      echo -e "  ${YEL}   Bu klasör Duendee değil ve klon başarısız.${RST}" >&2
+      continue
+    fi
+    echo -e "  ${YEL}   Klasör bulunamadı: ${entered}${RST}" >&2
+  done
+}
+
 load_config() {
   local cfg="${ROOT}/config.json"
   local example="${ROOT}/config.example.json"
@@ -82,6 +362,9 @@ load_config() {
   fi
   read_config_fields "$cfg"
   PORT="${PORT:-8080}"
+  if [[ -n "${DT_DUENDEE_DIR:-}" && -d "${DT_DUENDEE_DIR}" ]]; then
+    PROJECT="$(cd "${DT_DUENDEE_DIR}" && pwd)"
+  fi
   local needs_setup=0
   if [[ -z "${PROJECT:-}" ]]; then
     needs_setup=1
@@ -91,28 +374,8 @@ load_config() {
     needs_setup=1
   fi
   if (( needs_setup )); then
-    echo -e "  ${YEL}${BOLD}[KURULUM]${RST} projectPath ayarlanmalı."
-    echo -e "  ${DIM}   Yerel web uygulamanızın klasör yolunu girin (npm run dev çalıştırılan dizin).${RST}"
-    if [[ -n "${PROJECT:-}" && ! -d "$PROJECT" ]]; then
-      echo -e "  ${DIM}   Mevcut değer geçersiz: ${PROJECT}${RST}"
-    fi
-    echo
-    while true; do
-      printf '  projectPath> '
-      read -r entered
-      entered="${entered//\"/}"
-      entered="${entered/#\~/$HOME}"
-      if [[ -z "$entered" ]]; then
-        echo -e "  ${YEL}   Boş olamaz.${RST}"
-        continue
-      fi
-      if [[ ! -d "$entered" ]]; then
-        echo -e "  ${YEL}   Klasör bulunamadı: ${entered}${RST}"
-        continue
-      fi
-      PROJECT="$(cd "$entered" && pwd)"
-      break
-    done
+    resolve_project_path_interactive "${PROJECT:-}"
+    PROJECT="$RESOLVED_PROJECT"
     printf '  port [%s]> ' "$PORT"
     read -r port_in
     if [[ "$port_in" =~ ^[0-9]+$ ]]; then
@@ -120,7 +383,10 @@ load_config() {
     fi
     save_config "$PROJECT" "$PORT"
     echo -e "  ${GRN}   Kaydedildi: ${cfg}${RST}"
+    echo -e "  ${GRN}   projectPath = ${PROJECT}${RST}"
     echo
+  elif looks_like_duendee "$PROJECT"; then
+    update_duendee_safe "$PROJECT"
   fi
   [[ -d "$PROJECT" ]] || die "projectPath bulunamadı: $PROJECT"
   PORT="${PORT:-8080}"

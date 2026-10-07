@@ -116,13 +116,23 @@ function Install-ShimAndUserPath {
     Write-Host "User PATH already contains: $Bin"
   }
 
-  # Current process so `duendee-tunnel` works immediately after re-run / same session
+  # Current process: irm|iex runs in this session — prepend so `duendee-tunnel` works next
   $envParts = @($env:Path -split ';' | Where-Object { $_ -and $_.Trim() -ne '' })
   if ($envParts -notcontains $Bin) {
-    $env:Path = "$env:Path;$Bin"
+    $env:Path = "$Bin;$env:Path"
+  } else {
+    # Move bin to the front for this session
+    $rest = ($envParts | Where-Object { $_ -ne $Bin }) -join ';'
+    $env:Path = if ($rest) { "$Bin;$rest" } else { $Bin }
   }
-  if ($windowsApps -and ($envParts -notcontains $windowsApps) -and (Test-Path $windowsApps)) {
-    # WindowsApps usually already present; ensure current session sees our shim there too
+  if ($windowsApps -and (Test-Path -LiteralPath (Join-Path $windowsApps 'duendee-tunnel.cmd'))) {
+    if ($env:Path -notlike "*${windowsApps}*") {
+      $env:Path = "$windowsApps;$env:Path"
+    }
+  }
+
+  if (-not (Test-Path -LiteralPath $shimCmd)) {
+    throw "Failed to create shim: $shimCmd"
   }
 
   return @{ Shim = $shimCmd; PathChanged = $changed; BinDir = $Bin }
@@ -216,15 +226,22 @@ if (-not $NoDesktopShortcut) {
   }
 }
 
+# Ensure this session (irm|iex) can resolve the command immediately
+$env:Path = "$BinDir;$env:Path"
+$cmdCheck = Get-Command duendee-tunnel -ErrorAction SilentlyContinue
+
 Write-Host ""
 Write-Host "Install OK ($($info.Tag))"
 Write-Host "  Location : $InstallDir"
 Write-Host "  Shim     : $(if ($shimInfo) { $shimInfo.Shim } else { Join-Path $BinDir 'duendee-tunnel.cmd' })"
 Write-Host "  Run      : duendee-tunnel"
+if ($cmdCheck) {
+  Write-Host "  Verified : $($cmdCheck.Source)  (same terminal OK)"
+} else {
+  Write-Host "  Note     : run: `$env:Path = '$BinDir;' + `$env:Path; duendee-tunnel"
+}
 Write-Host ""
-Write-Host "PATH tip (this terminal):"
-Write-Host "  `$env:Path += ';$BinDir'"
-Write-Host "  Or open a NEW PowerShell / Terminal window, then:"
-Write-Host "  duendee-tunnel"
+Write-Host "Same-session one-liner:"
+Write-Host "  irm https://raw.githubusercontent.com/hayripenah/Duendee-Tunnel-Tool/main/scripts/install-windows.ps1 | iex; duendee-tunnel"
 Write-Host "  Edit     : $InstallDir\config.json"
 Write-Host "  WhatsApp : first send shows QR (WhatsApp > Linked Devices); session saved in .whatsapp-session"

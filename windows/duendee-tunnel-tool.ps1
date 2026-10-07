@@ -58,10 +58,260 @@ $SALMON = "$Esc[38;2;232;113;90m"
 
 $configPath = Join-Path $Root 'config.json'
 $configExample = Join-Path $Root 'config.example.json'
+$script:DuendeeRepoUrl = if ($env:DT_DUENDEE_REPO_URL) { $env:DT_DUENDEE_REPO_URL } else { 'https://github.com/hayripenah/Duendee.git' }
+$script:DuendeeCloneName = if ($env:DT_DUENDEE_CLONE_NAME) { $env:DT_DUENDEE_CLONE_NAME } else { 'Duendee-main' }
 
 function Save-ToolConfig([string]$ProjectPath, [int]$PortNum) {
   $obj = [ordered]@{ projectPath = $ProjectPath; port = $PortNum }
   ($obj | ConvertTo-Json -Depth 4) + "`n" | Set-Content -LiteralPath $configPath -Encoding UTF8 -NoNewline
+}
+
+function Get-UserDesktopPath {
+  try {
+    $p = [Environment]::GetFolderPath('Desktop')
+    if ($p -and (Test-Path -LiteralPath $p)) { return $p }
+  } catch {}
+  $fallback = Join-Path $env:USERPROFILE 'Desktop'
+  if (-not (Test-Path -LiteralPath $fallback)) {
+    New-Item -ItemType Directory -Force -Path $fallback | Out-Null
+  }
+  return $fallback
+}
+
+function Test-LooksLikeDuendeeRepo([string]$Path) {
+  if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Container)) { return $false }
+  $leaf = Split-Path -Leaf $Path
+  $nameHit = $leaf -match '^(?i)duendee(-main)?$'
+  $pkg = Join-Path $Path 'package.json'
+  $pkgHit = $false
+  if (Test-Path -LiteralPath $pkg) {
+    try {
+      $raw = Get-Content -LiteralPath $pkg -Raw -Encoding UTF8
+      if ($raw -match 'hayripenah' -or $raw -match 'dev:tunnel' -or $raw -match 'vite_react_shadcn' -or
+          ($raw -match '"dev"\s*:\s*"vite"' -and $nameHit)) { $pkgHit = $true }
+    } catch {}
+  }
+  $remoteHit = $false
+  $gitDir = Join-Path $Path '.git'
+  if (Test-Path -LiteralPath $gitDir) {
+    try {
+      $remote = (& git -C $Path remote get-url origin 2>$null)
+      if ($remote -and ($remote -match '(?i)github\.com[:/].*hayripenah/Duendee(\.git)?/?$' -or
+          ($remote -match '(?i)/Duendee(\.git)?/?$' -and $remote -notmatch '(?i)Tunnel-Tool'))) {
+        $remoteHit = $true
+      }
+    } catch {}
+  }
+  return ($remoteHit -or ($nameHit -and $pkgHit) -or ($pkgHit -and (Test-Path -LiteralPath $gitDir)))
+}
+
+function Update-DuendeeRepoSafe([string]$Path) {
+  if (-not (Test-Path -LiteralPath (Join-Path $Path '.git'))) { return }
+  if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return }
+  try {
+    $dirty = (& git -C $Path status --porcelain 2>$null)
+    if ($dirty) {
+      Write-UiLine "  $DIM   Git: yerel değişiklikler var — pull atlandı ($Path)$RST"
+      return
+    }
+    Write-UiLine "  $DIM   Duendee güncelleniyor (git fetch/pull --ff-only)...$RST"
+    & git -C $Path fetch --quiet 2>$null | Out-Null
+    & git -C $Path pull --ff-only --quiet 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+      Write-UiLine "  $GRN   Repo güncel.$RST"
+    } else {
+      Write-UiLine "  $YEL   Pull atlandı/başarısız (ff-only). Mevcut kopya kullanılacak.$RST"
+    }
+  } catch {
+    Write-UiLine "  $YEL   Git güncelleme atlandı: $($_.Exception.Message)$RST"
+  }
+}
+
+function Find-LocalDuendeeRepos {
+  $desktop = Get-UserDesktopPath
+  $userHome = $env:USERPROFILE
+  $docs = [Environment]::GetFolderPath('MyDocuments')
+  $candidates = New-Object System.Collections.Generic.List[string]
+  $add = {
+    param([string]$p)
+    if (-not [string]::IsNullOrWhiteSpace($p) -and (Test-Path -LiteralPath $p -PathType Container)) {
+      $full = (Resolve-Path -LiteralPath $p).Path
+      if (-not $candidates.Contains($full)) { [void]$candidates.Add($full) }
+    }
+  }
+  if ($env:DT_DUENDEE_DIR) { & $add $env:DT_DUENDEE_DIR }
+  foreach ($base in @($desktop, $userHome, $docs, (Join-Path $userHome 'YEK\Cursor'), (Join-Path $desktop 'YEK\Cursor'), (Join-Path $userHome 'Cursor'), (Join-Path $desktop 'Cursor'))) {
+    if (-not $base) { continue }
+    foreach ($name in @('Duendee-main', 'Duendee', 'duendee-main', 'duendee')) {
+      & $add (Join-Path $base $name)
+    }
+  }
+  foreach ($scanRoot in @($desktop, $docs, $userHome, (Join-Path $userHome 'YEK'), (Join-Path $desktop 'YEK'))) {
+    if (-not $scanRoot -or -not (Test-Path -LiteralPath $scanRoot)) { continue }
+    try {
+      Get-ChildItem -LiteralPath $scanRoot -Directory -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -match '^(?i)duendee(-main)?$'
+      } | ForEach-Object { & $add $_.FullName }
+      Get-ChildItem -LiteralPath $scanRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        $cursor = Join-Path $_.FullName 'Cursor'
+        if (Test-Path -LiteralPath $cursor) {
+          Get-ChildItem -LiteralPath $cursor -Directory -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -match '^(?i)duendee(-main)?$'
+          } | ForEach-Object { & $add $_.FullName }
+        }
+      }
+    } catch {}
+  }
+  $hits = @()
+  foreach ($c in $candidates) {
+    if (Test-LooksLikeDuendeeRepo $c) { $hits += $c }
+  }
+  return $hits
+}
+
+function Select-FolderBrowser([string]$Description) {
+  try {
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dlg.Description = $Description
+    $dlg.ShowNewFolderButton = $true
+    $dlg.SelectedPath = (Get-UserDesktopPath)
+    $res = $dlg.ShowDialog()
+    if ($res -eq [System.Windows.Forms.DialogResult]::OK -and $dlg.SelectedPath) {
+      return $dlg.SelectedPath
+    }
+  } catch {}
+  return $null
+}
+
+function Clone-DuendeeTo([string]$ParentDir) {
+  if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST git bulunamadı. Git kurun veya Duendee klasörünü elle seçin."
+    return $null
+  }
+  if (-not (Test-Path -LiteralPath $ParentDir)) {
+    New-Item -ItemType Directory -Force -Path $ParentDir | Out-Null
+  }
+  $target = Join-Path $ParentDir $script:DuendeeCloneName
+  if (Test-Path -LiteralPath $target) {
+    if (Test-LooksLikeDuendeeRepo $target) {
+      Update-DuendeeRepoSafe $target
+      return (Resolve-Path -LiteralPath $target).Path
+    }
+    Write-UiLine "  $YEL   Klasör zaten var ama Duendee görünmüyor: $target$RST"
+    return $null
+  }
+  Write-UiLine "  $DIM   Klonlanıyor: $($script:DuendeeRepoUrl) -> $target$RST"
+  & git clone --depth 1 $script:DuendeeRepoUrl $target
+  if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $target)) {
+    Write-UiLine "  $RED   Clone başarısız.$RST"
+    return $null
+  }
+  return (Resolve-Path -LiteralPath $target).Path
+}
+
+function Resolve-ProjectPathInteractive([string]$CurrentProj) {
+  $desktop = Get-UserDesktopPath
+  Write-UiLine "  $YEL$BOLD[KURULUM]$RST Duendee proje klasörü (projectPath)."
+  Write-UiLine "  $DIM   Varsayılan konum: Desktop ($desktop)$RST"
+  if (-not [string]::IsNullOrWhiteSpace($CurrentProj) -and -not (Test-Path -LiteralPath $CurrentProj)) {
+    Write-UiLine "  $DIM   Mevcut config değeri geçersiz: $CurrentProj$RST"
+  }
+  Write-UiLine ''
+
+  $found = @(Find-LocalDuendeeRepos)
+  if ($found.Count -gt 0) {
+    Write-UiLine "  $GRN   Yerel Duendee bulundu:$RST"
+    for ($i = 0; $i -lt $found.Count; $i++) {
+      Write-UiLine ("  $DIM   [{0}] {1}$RST" -f ($i + 1), $found[$i])
+    }
+    Write-UiLine ''
+    Write-UiLine "  $DIM   Enter = [1] kullan ve güncelle | numara | C = özel yol | B = klasör seç | G = Desktop'a klonla$RST"
+    Write-Ui '  seçim> '
+    $choice = (Read-Host).Trim()
+    if ([string]::IsNullOrWhiteSpace($choice) -or $choice -eq '1') {
+      $path = $found[0]
+      Update-DuendeeRepoSafe $path
+      return $path
+    }
+    if ($choice -match '^\d+$') {
+      $idx = [int]$choice - 1
+      if ($idx -ge 0 -and $idx -lt $found.Count) {
+        Update-DuendeeRepoSafe $found[$idx]
+        return $found[$idx]
+      }
+    }
+    if ($choice -match '^(?i)g$') {
+      $cloned = Clone-DuendeeTo $desktop
+      if ($cloned) { return $cloned }
+    }
+    if ($choice -match '^(?i)b$') {
+      $picked = Select-FolderBrowser 'Duendee proje klasörünü seçin'
+      if ($picked -and (Test-Path -LiteralPath $picked -PathType Container)) {
+        if (Test-LooksLikeDuendeeRepo $picked) { Update-DuendeeRepoSafe $picked }
+        return (Resolve-Path -LiteralPath $picked).Path
+      }
+    }
+    # fall through to custom path prompt
+  } else {
+    Write-UiLine "  $YEL   Yerel Duendee bulunamadı.$RST"
+    Write-UiLine "  $DIM   Enter = Desktop'a klonla ($desktop\$($script:DuendeeCloneName))$RST"
+    Write-UiLine "  $DIM   C = özel klasör yolu | B = klasör seçici | yol yaz = o dizine klonla/kullan$RST"
+    Write-Ui '  seçim> '
+    $choice = (Read-Host).Trim().Trim('"')
+    if ([string]::IsNullOrWhiteSpace($choice) -or $choice -match '^(?i)g$') {
+      $cloned = Clone-DuendeeTo $desktop
+      if ($cloned) { return $cloned }
+    } elseif ($choice -match '^(?i)b$') {
+      $picked = Select-FolderBrowser 'Duendee proje klasörünü seçin (veya klon ana klasörü)'
+      if ($picked) {
+        if (Test-LooksLikeDuendeeRepo $picked) {
+          Update-DuendeeRepoSafe $picked
+          return (Resolve-Path -LiteralPath $picked).Path
+        }
+        $cloned = Clone-DuendeeTo $picked
+        if ($cloned) { return $cloned }
+      }
+    } elseif ($choice -notmatch '^(?i)c$') {
+      if (Test-Path -LiteralPath $choice -PathType Container) {
+        if (Test-LooksLikeDuendeeRepo $choice) {
+          Update-DuendeeRepoSafe $choice
+          return (Resolve-Path -LiteralPath $choice).Path
+        }
+        $cloned = Clone-DuendeeTo $choice
+        if ($cloned) { return $cloned }
+      }
+    }
+  }
+
+  while ($true) {
+    Write-UiLine "  $DIM   Özel yol: mevcut Duendee klasörü veya klon ana dizini (boş = Desktop)$RST"
+    Write-Ui '  projectPath> '
+    $entered = (Read-Host).Trim().Trim('"')
+    if ([string]::IsNullOrWhiteSpace($entered)) { $entered = $desktop }
+    if ($entered -match '^(?i)b$') {
+      $picked = Select-FolderBrowser 'Duendee proje klasörünü seçin'
+      if (-not $picked) { continue }
+      $entered = $picked
+    }
+    if (Test-Path -LiteralPath $entered -PathType Container) {
+      if (Test-LooksLikeDuendeeRepo $entered) {
+        Update-DuendeeRepoSafe $entered
+        return (Resolve-Path -LiteralPath $entered).Path
+      }
+      # Parent dir: clone into it
+      $maybeChild = Join-Path $entered $script:DuendeeCloneName
+      if (Test-LooksLikeDuendeeRepo $maybeChild) {
+        Update-DuendeeRepoSafe $maybeChild
+        return (Resolve-Path -LiteralPath $maybeChild).Path
+      }
+      $cloned = Clone-DuendeeTo $entered
+      if ($cloned) { return $cloned }
+      Write-UiLine "  $YEL   Bu klasör Duendee değil ve klon başarısız.$RST"
+      continue
+    }
+    Write-UiLine "  $YEL   Klasör bulunamadı: $entered$RST"
+  }
 }
 
 function Ensure-ToolConfig {
@@ -86,41 +336,24 @@ function Ensure-ToolConfig {
 
   $proj = [string]$cfgLocal.projectPath
   $portNum = if ($cfgLocal.port) { [int]$cfgLocal.port } else { 8080 }
+  if ($env:DT_DUENDEE_DIR -and (Test-Path -LiteralPath $env:DT_DUENDEE_DIR -PathType Container)) {
+    $proj = (Resolve-Path -LiteralPath $env:DT_DUENDEE_DIR).Path
+  }
   $placeholder = [string]::IsNullOrWhiteSpace($proj) -or
     $proj -match '[\\/]path[\\/]to[\\/]your[\\/]app' -or
     -not (Test-Path -LiteralPath $proj)
 
   if ($placeholder) {
-    Write-UiLine "  $YEL$BOLD[KURULUM]$RST projectPath ayarlanmalı."
-    Write-UiLine "  $DIM   Yerel web uygulamanızın klasör yolunu girin (npm run dev çalıştırılan dizin).$RST"
-    if (-not [string]::IsNullOrWhiteSpace($proj) -and -not (Test-Path -LiteralPath $proj)) {
-      Write-UiLine "  $DIM   Mevcut değer geçersiz: $proj$RST"
-    }
-    Write-UiLine ''
-    while ($true) {
-      Write-Ui '  projectPath> '
-      $entered = (Read-Host).Trim().Trim('"')
-      if ([string]::IsNullOrWhiteSpace($entered)) {
-        Write-UiLine "  $YEL   Boş olamaz.$RST"
-        continue
-      }
-      if (-not (Test-Path -LiteralPath $entered)) {
-        Write-UiLine "  $YEL   Klasör bulunamadı: $entered$RST"
-        continue
-      }
-      if (-not (Test-Path -LiteralPath $entered -PathType Container)) {
-        Write-UiLine "  $YEL   Bir klasör yolu girin.$RST"
-        continue
-      }
-      $proj = (Resolve-Path -LiteralPath $entered).Path
-      break
-    }
+    $proj = Resolve-ProjectPathInteractive -CurrentProj $proj
     Write-Ui "  port [$portNum]> "
     $portIn = (Read-Host).Trim()
     if ($portIn -match '^\d+$') { $portNum = [int]$portIn }
     Save-ToolConfig -ProjectPath $proj -PortNum $portNum
     Write-UiLine "  $GRN   Kaydedildi: $configPath$RST"
+    Write-UiLine "  $GRN   projectPath = $proj$RST"
     Write-UiLine ''
+  } elseif (Test-LooksLikeDuendeeRepo $proj) {
+    Update-DuendeeRepoSafe $proj
   }
 
   return @{ Project = $proj; Port = $portNum }

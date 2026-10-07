@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 # Install Duendee Tunnel Tool portable (Linux) and put `duendee-tunnel` on PATH.
-# Usage (one-liner):
-#   curl -fsSL https://raw.githubusercontent.com/hayripenah/Duendee-Tunnel-Tool/main/scripts/install-linux.sh | bash
+#
+# Recommended (same terminal session — PATH fix for parent shell after pipe):
+#   curl -fsSL https://raw.githubusercontent.com/hayripenah/Duendee-Tunnel-Tool/main/scripts/install-linux.sh | bash; export PATH="$HOME/.local/bin:$PATH"; hash -r; duendee-tunnel
+#
+# Or source into the current shell (PATH export applies immediately):
+#   source <(curl -fsSL https://raw.githubusercontent.com/hayripenah/Duendee-Tunnel-Tool/main/scripts/install-linux.sh); duendee-tunnel
 set -euo pipefail
+
+# Detect `source` / `.` so PATH export applies to the caller shell.
+_DT_SOURCED=0
+if (return 0 2>/dev/null); then _DT_SOURCED=1; fi
 
 REPO="${DT_REPO:-hayripenah/Duendee-Tunnel-Tool}"
 TAG="${DT_TAG:-latest}"
@@ -10,10 +18,21 @@ INSTALL_DIR="${DT_INSTALL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/duendee-tunn
 BIN_DIR="${DT_BIN_DIR:-$HOME/.local/bin}"
 ASSET="Duendee-Tunnel-Tool-Linux-portable.tar.gz"
 SKIP_NPM="${DT_SKIP_NPM:-0}"
+PATH_MARKER="# Duendee Tunnel Tool PATH"
+PATH_EXPORT_LINE="export PATH=\"${BIN_DIR}:\$PATH\""
+SHIM_PRIMARY=""
+SHIM_EXTRA=""
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing required command: $1" >&2; exit 1; }; }
 need curl
 need tar
+
+path_has_bin_dir() {
+  case ":${PATH}:" in
+    *":${BIN_DIR}:"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 api_url() {
   if [[ "$TAG" == "latest" ]]; then
@@ -23,45 +42,101 @@ api_url() {
   fi
 }
 
+ensure_path_in_rc() {
+  local rc="$1"
+  touch "$rc"
+  # Already configured by us or already mentions this exact bin dir
+  if grep -Fqs "$PATH_MARKER" "$rc" 2>/dev/null; then
+    return 0
+  fi
+  if grep -Fqs "$BIN_DIR" "$rc" 2>/dev/null; then
+    return 0
+  fi
+  # Common Ubuntu/Debian idiom: "$HOME/.local/bin" (not expanded)
+  if [[ "$BIN_DIR" == "$HOME/.local/bin" ]] && grep -Eqs '(^|[^[:alnum:]_])\$HOME/\.local/bin([^[:alnum:]_]|$)' "$rc" 2>/dev/null; then
+    return 0
+  fi
+  if [[ "$BIN_DIR" == "$HOME/.local/bin" ]] && grep -Eqs '(^|[^[:alnum:]_])~/\.local/bin([^[:alnum:]_]|$)' "$rc" 2>/dev/null; then
+    return 0
+  fi
+  printf '\n%s\n%s\n' "$PATH_MARKER" "$PATH_EXPORT_LINE" >>"$rc"
+  echo "Added ${BIN_DIR} to PATH in ${rc}"
+}
+
+write_launcher() {
+  local dest="$1"
+  # Portable launcher: finds install dir; printf avoids CRLF from Windows checkouts.
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -euo pipefail'
+    printf '%s\n' "ROOT=\"${INSTALL_DIR}\""
+    printf '%s\n' 'TOOL="${ROOT}/linux/duendee-tunnel-tool.sh"'
+    printf '%s\n' 'if [[ ! -f "$TOOL" ]]; then'
+    printf '%s\n' '  echo "Duendee Tunnel Tool not found at: $TOOL" >&2'
+    printf '%s\n' '  echo "Re-run the installer, or set DT_INSTALL_DIR." >&2'
+    printf '%s\n' '  exit 1'
+    printf '%s\n' 'fi'
+    printf '%s\n' 'cd "$ROOT"'
+    printf '%s\n' 'exec bash "$TOOL" "$@"'
+  } >"$dest"
+  chmod +x "$dest"
+}
+
 install_shim_and_path() {
   mkdir -p "$BIN_DIR"
   local shim="${BIN_DIR}/duendee-tunnel"
-  cat >"$shim" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-ROOT="${INSTALL_DIR}"
-cd "\$ROOT"
-exec bash "\$ROOT/linux/duendee-tunnel-tool.sh" "\$@"
-EOF
-  chmod +x "$shim"
+  local tool_sh="${INSTALL_DIR}/linux/duendee-tunnel-tool.sh"
 
-  # Ensure current shell session can find it if this script was sourced
-  case ":${PATH}:" in
-    *":${BIN_DIR}:"*) ;;
-    *) export PATH="${BIN_DIR}:${PATH}" ;;
-  esac
+  if [[ ! -f "$tool_sh" ]]; then
+    echo "ERROR: portable tool missing at ${tool_sh}" >&2
+    return 1
+  fi
+  chmod +x "$tool_sh" "${INSTALL_DIR}/linux/scripts/"*.sh 2>/dev/null || true
 
-  # Persist for bash/zsh login shells when missing
-  local line="export PATH=\"${BIN_DIR}:\$PATH\""
-  for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-    if [[ -f "$rc" ]] || [[ "$rc" == "$HOME/.profile" ]]; then
-      touch "$rc"
-      if ! grep -Fqs "${BIN_DIR}" "$rc" 2>/dev/null; then
-        printf '\n# Duendee Tunnel Tool\n%s\n' "$line" >>"$rc"
-        echo "Added ${BIN_DIR} to ${rc}"
-        break
-      fi
+  write_launcher "$shim"
+  if [[ ! -x "$shim" ]]; then
+    echo "ERROR: failed to create executable shim at ${shim}" >&2
+    return 1
+  fi
+  SHIM_PRIMARY="$shim"
+
+  # Prefer a dir already on default PATH when writable (helps curl|bash parent shells)
+  if [[ -d /usr/local/bin && -w /usr/local/bin ]]; then
+    write_launcher /usr/local/bin/duendee-tunnel
+    SHIM_EXTRA="/usr/local/bin/duendee-tunnel"
+    echo "Also installed: ${SHIM_EXTRA} (usually already on PATH)"
+  fi
+
+  # Persist for bash / zsh / login shells (update every relevant rc — do not stop at first)
+  local rc
+  for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile" "$HOME/.bash_profile"; do
+    if [[ -f "$rc" ]] || [[ "$rc" == "$HOME/.profile" ]] || [[ "$rc" == "$HOME/.bashrc" ]]; then
+      ensure_path_in_rc "$rc"
     fi
   done
 
-  case ":${PATH}:" in
-    *":${BIN_DIR}:"*) ;;
-    *)
-      echo
-      echo "Note: open a new terminal, or run:"
-      echo "  export PATH=\"${BIN_DIR}:\$PATH\""
-      ;;
-  esac
+  # Current process + when sourced into caller
+  if ! path_has_bin_dir; then
+    export PATH="${BIN_DIR}:${PATH}"
+  fi
+  hash -r 2>/dev/null || true
+
+  echo "Shim OK: ${shim}"
+}
+
+print_path_help() {
+  echo
+  echo "════════════════════════════════════════════════════════════"
+  echo " SAME TERMINAL (curl|bash is a subshell — run this next):"
+  echo "   export PATH=\"${BIN_DIR}:\$PATH\"; hash -r; duendee-tunnel"
+  echo
+  echo " Full one-liner (install + PATH + run):"
+  echo "   curl -fsSL https://raw.githubusercontent.com/hayripenah/Duendee-Tunnel-Tool/main/scripts/install-linux.sh | bash; export PATH=\"\$HOME/.local/bin:\$PATH\"; hash -r; duendee-tunnel"
+  echo
+  echo " Or source (PATH applies in this shell immediately):"
+  echo "   source <(curl -fsSL https://raw.githubusercontent.com/hayripenah/Duendee-Tunnel-Tool/main/scripts/install-linux.sh); duendee-tunnel"
+  echo "════════════════════════════════════════════════════════════"
+  echo " New terminals: ~/.local/bin was added to bashrc/zshrc/profile when missing."
 }
 
 echo "Installing Duendee Tunnel Tool -> ${INSTALL_DIR}"
@@ -83,9 +158,10 @@ fi
 [[ -n "$download_url" ]] || { echo "Could not find release asset: ${ASSET}" >&2; exit 1; }
 
 tmp="$(mktemp -d)"
+SHIM_DONE=0
 cleanup() {
   # Always install shim even if npm/extract partially failed after files exist
-  if [[ -d "$INSTALL_DIR" && -f "${INSTALL_DIR}/linux/duendee-tunnel-tool.sh" ]]; then
+  if [[ "$SHIM_DONE" != "1" && -d "$INSTALL_DIR" && -f "${INSTALL_DIR}/linux/duendee-tunnel-tool.sh" ]]; then
     install_shim_and_path || true
   fi
   rm -rf "$tmp"
@@ -95,8 +171,20 @@ trap cleanup EXIT
 echo "Downloading ${rel_tag:-$TAG}: ${download_url}"
 curl -fsSL -o "${tmp}/${ASSET}" "$download_url"
 tar -xzf "${tmp}/${ASSET}" -C "$tmp"
-extracted="$(find "$tmp" -maxdepth 1 -type d -name 'Duendee-Tunnel-Tool-Linux-portable*' | head -n1)"
-[[ -n "$extracted" ]] || { echo "Archive layout unexpected." >&2; exit 1; }
+
+extracted=""
+if [[ -d "${tmp}/Duendee-Tunnel-Tool-Linux-portable" ]]; then
+  extracted="${tmp}/Duendee-Tunnel-Tool-Linux-portable"
+else
+  # Fallback: first directory that contains the Linux entry script
+  for cand in "$tmp"/*; do
+    if [[ -d "$cand" && -f "${cand}/linux/duendee-tunnel-tool.sh" ]]; then
+      extracted="$cand"
+      break
+    fi
+  done
+fi
+[[ -n "$extracted" ]] || { echo "Archive layout unexpected (linux/duendee-tunnel-tool.sh missing)." >&2; exit 1; }
 
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 
@@ -154,11 +242,29 @@ fi
 
 # Explicit shim now; trap also ensures it on exit
 install_shim_and_path
+SHIM_DONE=1
+
+# Always export for this process; when sourced, caller gets PATH too.
+export PATH="${BIN_DIR}:${PATH}"
+hash -r 2>/dev/null || true
 
 echo
 echo "Install OK (${rel_tag:-$TAG})"
 echo "  Location : ${INSTALL_DIR}"
+echo "  Shim     : ${SHIM_PRIMARY:-${BIN_DIR}/duendee-tunnel}"
+[[ -n "${SHIM_EXTRA:-}" ]] && echo "  Shim+    : ${SHIM_EXTRA}"
 echo "  Run      : duendee-tunnel"
-echo "  (New terminal if PATH was just updated, or: export PATH=\"${BIN_DIR}:\$PATH\")"
+if command -v duendee-tunnel >/dev/null 2>&1; then
+  echo "  Verified : $(command -v duendee-tunnel)"
+else
+  echo "  Verified : shim written; parent shell still needs PATH (see below)"
+fi
 echo "  Edit     : ${INSTALL_DIR}/config.json"
 echo "  WhatsApp : first send shows QR; session saved in .whatsapp-session"
+print_path_help
+
+if [[ "$_DT_SOURCED" == "1" ]]; then
+  echo
+  echo "Sourced install: PATH updated in this shell. Try: duendee-tunnel"
+  return 0 2>/dev/null || true
+fi
