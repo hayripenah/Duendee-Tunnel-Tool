@@ -5,13 +5,21 @@ set -u
 export LANG="${LANG:-C.UTF-8}"
 export LC_ALL="${LC_ALL:-C.UTF-8}"
 
-TOOL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STATE="${TOOL}/.tunnelstate"
+OS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "${OS_DIR}/.." && pwd)"
+TOOL="$OS_DIR"
+# Shared runtime (config, state, WhatsApp) lives at repo root.
+STATE="${ROOT}/.tunnelstate"
 PID_FILE="${STATE}/tunnel.pid"
 URL_FILE="${STATE}/tunnel.url"
 LOG="${STATE}/tunnel.log"
 OUT_LOG="${STATE}/tunnel.out.log"
 SERVER_PID="${STATE}/server.pid"
+WHATSAPP_JS="${ROOT}/scripts/send-whatsapp.js"
+# XDG autostart mirrors Windows HKCU\...\Run (opens tool on graphical login).
+AUTO_DESKTOP_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
+AUTO_DESKTOP="${AUTO_DESKTOP_DIR}/duendee-tunnel-tool.desktop"
+# Legacy systemd user unit from earlier Linux builds — cleaned up on toggle.
 AUTO_UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 AUTO_UNIT="${AUTO_UNIT_DIR}/duendee-tunnel-tool.service"
 AUTO=""
@@ -35,7 +43,7 @@ die() {
 }
 
 load_config() {
-  local cfg="${TOOL}/config.json"
+  local cfg="${ROOT}/config.json"
   if [[ ! -f "$cfg" ]]; then
     die "config.json bulunamadı. Önce config.example.json dosyasını config.json olarak kopyalayıp projectPath ayarlayın."
   fi
@@ -125,7 +133,7 @@ http_code() {
 }
 
 extract_url() {
-  bash "${TOOL}/scripts/extract-tunnel-url.sh" "$LOG" "$OUT_LOG" "$URL_FILE" >/dev/null 2>&1 || true
+  bash "${OS_DIR}/scripts/extract-tunnel-url.sh" "$LOG" "$OUT_LOG" "$URL_FILE" >/dev/null 2>&1 || true
 }
 
 refresh_url() {
@@ -182,8 +190,18 @@ autostate() {
 
 start_watcher() {
   local tool_pid="$$"
-  nohup bash "${TOOL}/scripts/tunnel-watcher.sh" "$tool_pid" "$PROJECT" "$TOOL" \
+  # ToolRoot = repo root (shared .tunnelstate)
+  nohup bash "${OS_DIR}/scripts/tunnel-watcher.sh" "$tool_pid" "$PROJECT" "$ROOT" \
     >/dev/null 2>&1 &
+}
+
+tunnel_running() {
+  read_pid
+  if [[ -n "${TPID:-}" ]] && pid_alive "$TPID"; then
+    return 0
+  fi
+  pgrep -f "cloudflared tunnel --url" >/dev/null 2>&1 && return 0
+  return 1
 }
 
 kill_tunnel() {
@@ -193,10 +211,8 @@ kill_tunnel() {
       kill -TERM "$TPID" 2>/dev/null || true
       sleep 0.3
       kill -KILL "$TPID" 2>/dev/null || true
-      echo -e "  ${GRN}   Eski tünel durduruldu - PID ${TPID}.${RST}"
+      echo -e "  ${GRN}   Tünel durduruldu - PID ${TPID}.${RST}"
     fi
-  else
-    echo -e "  ${DIM}   Aktif tünel yok, yeni link başlatılacak.${RST}"
   fi
   pkill -f "cloudflared tunnel --url" 2>/dev/null || true
   killall cloudflared 2>/dev/null || true
@@ -473,7 +489,7 @@ do_start() {
     echo "  Varsayılan tarayıcıda açılıyor..."
     open_url "$URL"
     echo "  WhatsApp'a link gönderiliyor..."
-    node "${TOOL}/scripts/send-whatsapp.js" "$URL_FILE" "+905315162429" || true
+    node "${WHATSAPP_JS}" "$URL_FILE" "+905315162429" || true
   fi
   echo
   wait_key
@@ -536,14 +552,22 @@ do_copylink() {
 do_cancel() {
   clear
   echo
-  echo -e "${CYN}   --- Yeni tünel linki oluşturuluyor ---${RST}"
+  echo -e "${CYN}   --- Tünel servisini iptal et ---${RST}"
   echo
+  if ! tunnel_running; then
+    echo -e "  ${YEL}   Aktif tünel servisi yok.${RST}"
+    echo -e "  ${DIM}   İptal edilecek bir şey yok. Başlatmak için menüden [1] kullanın.${RST}"
+    echo
+    wait_key
+    return 0
+  fi
   kill_tunnel
   URL=""
   TUNNEL_URL=""
   PREV=""
-  sleep 1
-  do_start
+  echo -e "  ${GRN}   Tünel iptal edildi. Yeni tünel otomatik başlatılmadı.${RST}"
+  echo
+  wait_key
 }
 
 do_autostart() {
@@ -592,8 +616,8 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/env bash "${TOOL}/duendee-tunnel-tool.sh"
-WorkingDirectory=${TOOL}
+ExecStart=/usr/bin/env bash "${OS_DIR}/duendee-tunnel-tool.sh"
+WorkingDirectory=${ROOT}
 Restart=no
 
 [Install]
