@@ -198,14 +198,27 @@ function Find-NodeExe {
 function Ensure-WhatsAppDeps {
   $marker = Join-Path $Root 'node_modules\@whiskeysockets\baileys\package.json'
   if (Test-Path -LiteralPath $marker) { return $true }
-  $npm = Get-Command npm -ErrorAction SilentlyContinue
-  if (-not $npm) { return $false }
+  if (-not ((Get-Command npm.cmd -ErrorAction SilentlyContinue) -or (Get-Command npm -ErrorAction SilentlyContinue))) {
+    return $false
+  }
   Write-UiLine "  $DIM   WhatsApp bağımlılıkları kuruluyor (npm install)...$RST"
-  Push-Location $Root
+  $prevEa = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  $prevNative = $null
+  if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+    $prevNative = $PSNativeCommandUseErrorActionPreference
+    $PSNativeCommandUseErrorActionPreference = $false
+  }
   try {
-    & npm install --omit=dev 2>$null
-    if ($LASTEXITCODE -ne 0) { & npm install }
-  } finally { Pop-Location }
+    Push-Location $Root
+    try {
+      & cmd.exe /c "npm.cmd install --omit=dev"
+      if ($LASTEXITCODE -ne 0) { & cmd.exe /c "npm.cmd install" }
+    } finally { Pop-Location }
+  } finally {
+    $ErrorActionPreference = $prevEa
+    if ($null -ne $prevNative) { $PSNativeCommandUseErrorActionPreference = $prevNative }
+  }
   return (Test-Path -LiteralPath $marker)
 }
 
@@ -236,21 +249,38 @@ function Send-TunnelWhatsApp([string]$PublicUrl) {
       $phone = [string]$wc.targetPhone
     } catch {}
   }
+  $sessionCreds = Join-Path $Root '.whatsapp-session\creds.json'
+  if (-not (Test-Path -LiteralPath $sessionCreds)) {
+    Write-UiLine "  $YEL   Ilk WhatsApp baglantisi: QR tarayin (Linked Devices / Bagli Cihazlar).$RST"
+    Write-UiLine "  $DIM   Oturum sonra kaydedilir; sonraki gonderimler otomatik olur.$RST"
+  }
   Write-UiLine "  WhatsApp'a link gönderiliyor..."
   $prevEa = $ErrorActionPreference
   $ErrorActionPreference = 'Continue'
+  $prevNative = $null
+  if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+    $prevNative = $PSNativeCommandUseErrorActionPreference
+    $PSNativeCommandUseErrorActionPreference = $false
+  }
   try {
-    if ($phone) {
-      & $node $waJs $PublicUrl $phone
-    } else {
-      & $node $waJs $PublicUrl
-    }
-    if ($LASTEXITCODE -ne 0) {
-      Write-UiLine "  $YEL   WhatsApp gönderimi başarısız (çıkış $LASTEXITCODE). QR/oturum veya telefon numarasını kontrol edin.$RST"
+    # Avoid PowerShell mangling leading '+' on phone; pass via env instead
+    $env:DT_WA_PHONE = $phone
+    $env:DT_WA_URL = $PublicUrl
+    & $node $waJs $PublicUrl $phone
+    $ec = $LASTEXITCODE
+    if ($ec -ne 0) {
+      Write-UiLine "  $YEL   WhatsApp gönderimi başarısız (çıkış $ec).$RST"
+      Write-UiLine "  $DIM   QR tarayin veya oturumu sifirlayip tekrar deneyin:$RST"
+      Write-UiLine "  $DIM   Remove-Item -Recurse -Force `"$Root\.whatsapp-session`"$RST"
       Write-UiLine "  $DIM   Manuel: node `"$waJs`" `"$PublicUrl`"$RST"
+    } else {
+      Write-UiLine "  $GRN   WhatsApp mesaji gonderildi.$RST"
     }
   } finally {
+    Remove-Item Env:DT_WA_PHONE -ErrorAction SilentlyContinue
+    Remove-Item Env:DT_WA_URL -ErrorAction SilentlyContinue
     $ErrorActionPreference = $prevEa
+    if ($null -ne $prevNative) { $PSNativeCommandUseErrorActionPreference = $prevNative }
   }
 }
 

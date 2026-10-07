@@ -23,6 +23,47 @@ api_url() {
   fi
 }
 
+install_shim_and_path() {
+  mkdir -p "$BIN_DIR"
+  local shim="${BIN_DIR}/duendee-tunnel"
+  cat >"$shim" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="${INSTALL_DIR}"
+cd "\$ROOT"
+exec bash "\$ROOT/linux/duendee-tunnel-tool.sh" "\$@"
+EOF
+  chmod +x "$shim"
+
+  # Ensure current shell session can find it if this script was sourced
+  case ":${PATH}:" in
+    *":${BIN_DIR}:"*) ;;
+    *) export PATH="${BIN_DIR}:${PATH}" ;;
+  esac
+
+  # Persist for bash/zsh login shells when missing
+  local line="export PATH=\"${BIN_DIR}:\$PATH\""
+  for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+    if [[ -f "$rc" ]] || [[ "$rc" == "$HOME/.profile" ]]; then
+      touch "$rc"
+      if ! grep -Fqs "${BIN_DIR}" "$rc" 2>/dev/null; then
+        printf '\n# Duendee Tunnel Tool\n%s\n' "$line" >>"$rc"
+        echo "Added ${BIN_DIR} to ${rc}"
+        break
+      fi
+    fi
+  done
+
+  case ":${PATH}:" in
+    *":${BIN_DIR}:"*) ;;
+    *)
+      echo
+      echo "Note: open a new terminal, or run:"
+      echo "  export PATH=\"${BIN_DIR}:\$PATH\""
+      ;;
+  esac
+}
+
 echo "Installing Duendee Tunnel Tool -> ${INSTALL_DIR}"
 
 json="$(curl -fsSL -H 'Accept: application/vnd.github+json' -H 'User-Agent: DuendeeTunnelTool-Install' "$(api_url)")"
@@ -42,7 +83,13 @@ fi
 [[ -n "$download_url" ]] || { echo "Could not find release asset: ${ASSET}" >&2; exit 1; }
 
 tmp="$(mktemp -d)"
-cleanup() { rm -rf "$tmp"; }
+cleanup() {
+  # Always install shim even if npm/extract partially failed after files exist
+  if [[ -d "$INSTALL_DIR" && -f "${INSTALL_DIR}/linux/duendee-tunnel-tool.sh" ]]; then
+    install_shim_and_path || true
+  fi
+  rm -rf "$tmp"
+}
 trap cleanup EXIT
 
 echo "Downloading ${rel_tag:-$TAG}: ${download_url}"
@@ -88,33 +135,30 @@ chmod +x "${INSTALL_DIR}/linux/duendee-tunnel-tool.sh" \
 if [[ "$SKIP_NPM" != "1" ]]; then
   if command -v npm >/dev/null 2>&1; then
     echo "Running npm install (WhatsApp helper)..."
-    (cd "$INSTALL_DIR" && npm install --omit=dev || npm install)
+    # npm warnings must not abort shim creation (set -e); ignore non-zero only after retry
+    set +e
+    (cd "$INSTALL_DIR" && npm install --omit=dev)
+    npm_ec=$?
+    if [[ $npm_ec -ne 0 ]]; then
+      (cd "$INSTALL_DIR" && npm install)
+      npm_ec=$?
+    fi
+    set -e
+    if [[ $npm_ec -ne 0 ]]; then
+      echo "WARNING: npm install failed (exit ${npm_ec}). WhatsApp may need: npm install in ${INSTALL_DIR}"
+    fi
   else
     echo "npm not found — install Node.js, then run: npm install  (in ${INSTALL_DIR})"
   fi
 fi
 
-shim="${BIN_DIR}/duendee-tunnel"
-cat >"$shim" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-ROOT="${INSTALL_DIR}"
-cd "\$ROOT"
-exec bash "\$ROOT/linux/duendee-tunnel-tool.sh" "\$@"
-EOF
-chmod +x "$shim"
-
-case ":${PATH}:" in
-  *":${BIN_DIR}:"*) ;;
-  *)
-    echo
-    echo "Note: ${BIN_DIR} is not on PATH. Add this to ~/.bashrc or ~/.zshrc:"
-    echo "  export PATH=\"${BIN_DIR}:\$PATH\""
-    ;;
-esac
+# Explicit shim now; trap also ensures it on exit
+install_shim_and_path
 
 echo
 echo "Install OK (${rel_tag:-$TAG})"
 echo "  Location : ${INSTALL_DIR}"
 echo "  Run      : duendee-tunnel"
+echo "  (New terminal if PATH was just updated, or: export PATH=\"${BIN_DIR}:\$PATH\")"
 echo "  Edit     : ${INSTALL_DIR}/config.json"
+echo "  WhatsApp : first send shows QR; session saved in .whatsapp-session"

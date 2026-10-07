@@ -162,16 +162,26 @@ send_tunnel_whatsapp() {
       phone="$(node -e 'const c=require(process.argv[1]); process.stdout.write(String(c.targetPhone||""))' "$wa_cfg" 2>/dev/null || true)"
     fi
   fi
+  if [[ ! -f "${ROOT}/.whatsapp-session/creds.json" ]]; then
+    echo -e "  ${YEL}   Ilk WhatsApp baglantisi: QR tarayin (Linked Devices / Bagli Cihazlar).${RST}"
+    echo -e "  ${DIM}   Oturum sonra kaydedilir; sonraki gonderimler otomatik olur.${RST}"
+  fi
   echo "  WhatsApp'a link gönderiliyor..."
   local ec=0
+  export DT_WA_URL="$public_url"
+  export DT_WA_PHONE="$phone"
   if [[ -n "$phone" ]]; then
     node "$WHATSAPP_JS" "$public_url" "$phone" || ec=$?
   else
     node "$WHATSAPP_JS" "$public_url" || ec=$?
   fi
+  unset DT_WA_URL DT_WA_PHONE
   if (( ec != 0 )); then
-    echo -e "  ${YEL}   WhatsApp gönderimi başarısız (çıkış ${ec}). QR/oturum veya telefon numarasını kontrol edin.${RST}"
+    echo -e "  ${YEL}   WhatsApp gönderimi başarısız (çıkış ${ec}).${RST}"
+    echo -e "  ${DIM}   QR tarayin veya: rm -rf \"${ROOT}/.whatsapp-session\" sonra tekrar.${RST}"
     echo -e "  ${DIM}   Manuel: node \"${WHATSAPP_JS}\" \"${public_url}\"${RST}"
+  else
+    echo -e "  ${GRN}   WhatsApp mesaji gonderildi.${RST}"
   fi
 }
 

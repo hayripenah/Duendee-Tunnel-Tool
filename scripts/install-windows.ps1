@@ -33,12 +33,108 @@ function Get-ReleaseAssetUrl {
   return @{ Url = $asset.browser_download_url; Tag = $rel.tag_name }
 }
 
+function Invoke-NpmInstallSafe {
+  param([string]$WorkDir)
+  # npm.ps1 surfaces "npm warn ..." on stderr as NativeCommandError; with Stop that aborts
+  # before shim/PATH. Always run via cmd + npm.cmd and Continue.
+  $prevEa = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  $prevNative = $null
+  if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+    $prevNative = $PSNativeCommandUseErrorActionPreference
+    $PSNativeCommandUseErrorActionPreference = $false
+  }
+  try {
+    Push-Location $WorkDir
+    try {
+      Write-Host "Running npm install (WhatsApp helper)..."
+      & cmd.exe /c "npm.cmd install --omit=dev"
+      if ($LASTEXITCODE -ne 0) {
+        & cmd.exe /c "npm.cmd install"
+      }
+      if ($LASTEXITCODE -ne 0) {
+        Write-Host "WARNING: npm install failed (exit $LASTEXITCODE). WhatsApp send may need: npm install in $WorkDir"
+      }
+    } finally {
+      Pop-Location
+    }
+  } finally {
+    $ErrorActionPreference = $prevEa
+    if ($null -ne $prevNative) {
+      $PSNativeCommandUseErrorActionPreference = $prevNative
+    }
+  }
+}
+
+function Install-ShimAndUserPath {
+  param([string]$Root, [string]$Bin)
+
+  New-Item -ItemType Directory -Force -Path $Bin | Out-Null
+  $shimCmd = Join-Path $Bin 'duendee-tunnel.cmd'
+  $shimPs1 = Join-Path $Bin 'duendee-tunnel.ps1'
+
+  $cmdShim = @(
+    '@echo off',
+    'setlocal',
+    'set "TOOL_ROOT=%~dp0.."',
+    'cd /d "%TOOL_ROOT%"',
+    'call "%TOOL_ROOT%\windows\Duendee Tunnel Tool.bat" %*'
+  ) -join "`r`n"
+  Set-Content -Path $shimCmd -Value $cmdShim -Encoding ASCII
+
+  # Avoid expandable here-strings eating %~dp0 / $vars; write literal lines
+  $psShim = "#Requires -Version 5.1`r`n" +
+    '$Root = Split-Path -Parent $PSScriptRoot' + "`r`n" +
+    'Set-Location -LiteralPath $Root' + "`r`n" +
+    '& (Join-Path $Root ''windows\duendee-tunnel-tool.ps1'') @args' + "`r`n"
+  Set-Content -Path $shimPs1 -Value $psShim -Encoding UTF8
+
+  # Also drop a shim into WindowsApps (often already on User PATH) as a belt-and-suspenders fallback
+  $windowsApps = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps'
+  if (Test-Path $windowsApps) {
+    $waShim = Join-Path $windowsApps 'duendee-tunnel.cmd'
+    $waBody = @(
+      '@echo off',
+      'setlocal',
+      ('set "TOOL_ROOT={0}"' -f $Root),
+      'cd /d "%TOOL_ROOT%"',
+      'call "%TOOL_ROOT%\windows\Duendee Tunnel Tool.bat" %*'
+    ) -join "`r`n"
+    Set-Content -Path $waShim -Value $waBody -Encoding ASCII
+  }
+
+  $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+  if (-not $userPath) { $userPath = '' }
+  $parts = @($userPath -split ';' | Where-Object { $_ -and $_.Trim() -ne '' })
+  $changed = $false
+  if ($parts -notcontains $Bin) {
+    $newPath = if ($userPath.TrimEnd(';')) { "$userPath;$Bin" } else { $Bin }
+    [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+    $changed = $true
+    Write-Host "Added to user PATH: $Bin"
+  } else {
+    Write-Host "User PATH already contains: $Bin"
+  }
+
+  # Current process so `duendee-tunnel` works immediately after re-run / same session
+  $envParts = @($env:Path -split ';' | Where-Object { $_ -and $_.Trim() -ne '' })
+  if ($envParts -notcontains $Bin) {
+    $env:Path = "$env:Path;$Bin"
+  }
+  if ($windowsApps -and ($envParts -notcontains $windowsApps) -and (Test-Path $windowsApps)) {
+    # WindowsApps usually already present; ensure current session sees our shim there too
+  }
+
+  return @{ Shim = $shimCmd; PathChanged = $changed; BinDir = $Bin }
+}
+
 Write-Host "Installing Duendee Tunnel Tool -> $InstallDir"
 
 $info = Get-ReleaseAssetUrl -Repository $Repo -ReleaseTag $Tag -Name $AssetName
 $tmp = Join-Path $env:TEMP ("duendee-tunnel-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 $zip = Join-Path $tmp $AssetName
+$shimInfo = $null
 
 try {
   Write-Host "Downloading $($info.Tag): $($info.Url)"
@@ -81,76 +177,54 @@ try {
   if (-not (Test-Path $cfgEx)) { throw 'Portable zip missing config.example.json' }
   if (-not (Test-Path $cfg)) {
     Copy-Item $cfgEx $cfg -Force
-    Write-Host "Created config.json from example — first run will ask for projectPath if needed."
+    Write-Host "Created config.json from example - first run will ask for projectPath if needed."
   }
 
   if (-not $SkipNpm) {
-    Push-Location $InstallDir
-    try {
-      if (Get-Command npm -ErrorAction SilentlyContinue) {
-        Write-Host "Running npm install (WhatsApp helper)..."
-        & npm install --omit=dev 2>$null
-        if ($LASTEXITCODE -ne 0) { & npm install }
-      } else {
-        Write-Host "npm not found — install Node.js, then run: npm install  (in $InstallDir)"
-      }
-    } finally { Pop-Location }
-  }
-
-  New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
-  $bat = Join-Path $InstallDir 'windows\Duendee Tunnel Tool.bat'
-  $shimCmd = Join-Path $BinDir 'duendee-tunnel.cmd'
-  $shimPs1 = Join-Path $BinDir 'duendee-tunnel.ps1'
-  @"
-@echo off
-setlocal
-set "TOOL_ROOT=%~dp0.."
-cd /d "%TOOL_ROOT%"
-call "%TOOL_ROOT%\windows\Duendee Tunnel Tool.bat" %*
-"@ | Set-Content -Path $shimCmd -Encoding ASCII
-
-  @"
-#Requires -Version 5.1
-`$Root = Split-Path -Parent `$PSScriptRoot
-Set-Location -LiteralPath `$Root
-& (Join-Path `$Root 'windows\duendee-tunnel-tool.ps1') @args
-"@ | Set-Content -Path $shimPs1 -Encoding UTF8
-
-  # Ensure user PATH contains bin
-  $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-  if (-not $userPath) { $userPath = '' }
-  $parts = $userPath -split ';' | Where-Object { $_ -and $_.Trim() -ne '' }
-  if ($parts -notcontains $BinDir) {
-    $newPath = if ($userPath.TrimEnd(';')) { "$userPath;$BinDir" } else { $BinDir }
-    [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
-    $env:Path = "$env:Path;$BinDir"
-    Write-Host "Added to user PATH: $BinDir"
-  }
-
-  if (-not $NoDesktopShortcut) {
-    try {
-      $desktop = [Environment]::GetFolderPath('Desktop')
-      $lnkPath = Join-Path $desktop 'Duendee Tunnel Tool.lnk'
-      $w = New-Object -ComObject WScript.Shell
-      $sc = $w.CreateShortcut($lnkPath)
-      $sc.TargetPath = $bat
-      $sc.WorkingDirectory = $InstallDir
-      $ico = Join-Path $InstallDir 'windows\Duendee Tunnel Logo.ico'
-      if (Test-Path $ico) { $sc.IconLocation = $ico }
-      $sc.Description = 'Duendee Tunnel Tool'
-      $sc.Save()
-      Write-Host "Desktop shortcut: $lnkPath"
-    } catch {
-      Write-Host "Desktop shortcut skipped: $($_.Exception.Message)"
+    if ((Get-Command npm.cmd -ErrorAction SilentlyContinue) -or (Get-Command npm -ErrorAction SilentlyContinue)) {
+      Invoke-NpmInstallSafe -WorkDir $InstallDir
+    } else {
+      Write-Host "npm not found - install Node.js, then run: npm install  (in $InstallDir)"
     }
   }
-
-  Write-Host ""
-  Write-Host "Install OK ($($info.Tag))"
-  Write-Host "  Location : $InstallDir"
-  Write-Host "  Run      : duendee-tunnel"
-  Write-Host "  (Open a new terminal if PATH was just updated.)"
-  Write-Host "  Edit     : $InstallDir\config.json"
 } finally {
+  # Shim + PATH must happen even if npm warnings aborted the install body
+  try {
+    $shimInfo = Install-ShimAndUserPath -Root $InstallDir -Bin $BinDir
+  } catch {
+    Write-Host "WARNING: shim/PATH setup failed: $($_.Exception.Message)"
+  }
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+if (-not $NoDesktopShortcut) {
+  try {
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    $lnkPath = Join-Path $desktop 'Duendee Tunnel Tool.lnk'
+    $bat = Join-Path $InstallDir 'windows\Duendee Tunnel Tool.bat'
+    $w = New-Object -ComObject WScript.Shell
+    $sc = $w.CreateShortcut($lnkPath)
+    $sc.TargetPath = $bat
+    $sc.WorkingDirectory = $InstallDir
+    $ico = Join-Path $InstallDir 'windows\Duendee Tunnel Logo.ico'
+    if (Test-Path $ico) { $sc.IconLocation = $ico }
+    $sc.Description = 'Duendee Tunnel Tool'
+    $sc.Save()
+    Write-Host "Desktop shortcut: $lnkPath"
+  } catch {
+    Write-Host "Desktop shortcut skipped: $($_.Exception.Message)"
+  }
+}
+
+Write-Host ""
+Write-Host "Install OK ($($info.Tag))"
+Write-Host "  Location : $InstallDir"
+Write-Host "  Shim     : $(if ($shimInfo) { $shimInfo.Shim } else { Join-Path $BinDir 'duendee-tunnel.cmd' })"
+Write-Host "  Run      : duendee-tunnel"
+Write-Host ""
+Write-Host "PATH tip (this terminal):"
+Write-Host "  `$env:Path += ';$BinDir'"
+Write-Host "  Or open a NEW PowerShell / Terminal window, then:"
+Write-Host "  duendee-tunnel"
+Write-Host "  Edit     : $InstallDir\config.json"
+Write-Host "  WhatsApp : first send shows QR (WhatsApp > Linked Devices); session saved in .whatsapp-session"

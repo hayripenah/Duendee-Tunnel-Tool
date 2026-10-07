@@ -1,4 +1,4 @@
-import { default as makeWASocket, useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
+import { default as makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import qrcodeTerminal from 'qrcode-terminal';
 import QRCode from 'qrcode';
 import pino from 'pino';
@@ -23,10 +23,11 @@ function assertDeps() {
     require.resolve('@whiskeysockets/baileys');
   } catch {
     fail(
-      'WhatsApp bağımlılıkları eksik. Kurulum:\n' +
+      'WhatsApp bağımlılıkları eksik / WhatsApp dependencies missing.\n' +
         `  cd "${toolRoot}"\n` +
         '  npm install\n' +
-        'Sonra tüneli yeniden başlatın veya: node scripts/send-whatsapp.js <url>'
+        'Sonra tüneli yeniden başlatın / Then restart the tunnel:\n' +
+        '  node scripts/send-whatsapp.js <url>'
     );
   }
 }
@@ -55,16 +56,20 @@ function resolveUrl(raw) {
   return String(value || '').replace(/[\r\n\s]+/g, '').replace(/\/+$/, '');
 }
 
-const url = resolveUrl(process.argv[2]);
-const phone = String(process.argv[3] || config.targetPhone || '').trim();
+const url = resolveUrl(process.argv[2] || process.env.DT_WA_URL || '');
+const phone = String(process.argv[3] || process.env.DT_WA_PHONE || config.targetPhone || '').trim();
 
 if (!url || !/^https:\/\//i.test(url)) {
-  fail('Kullanim: node send-whatsapp.js <tunnel-url|tunnel.url-dosyasi> [phone]\nURL yok veya gecersiz.');
+  fail(
+    'Kullanim / Usage: node send-whatsapp.js <tunnel-url|tunnel.url-file> [phone]\n' +
+      'URL yok veya gecersiz / missing or invalid URL.'
+  );
 }
 
 if (!phone) {
   fail(
-    'Hedef telefon yok. scripts/whatsapp-config.json icinde targetPhone ayarlayin veya arguman verin.\n' +
+    'Hedef telefon yok / No target phone.\n' +
+      'scripts/whatsapp-config.json icinde targetPhone ayarlayin veya arguman verin.\n' +
       'Ornek: node send-whatsapp.js "' + url + '" "+905xxxxxxxxx"'
   );
 }
@@ -73,16 +78,26 @@ const sessionDir = path.isAbsolute(config.sessionDir)
   ? config.sessionDir
   : path.join(toolRoot, config.sessionDir || '.whatsapp-session');
 const qrImage = path.join(os.tmpdir(), 'duendee-whatsapp-qr.png');
-let attempts = 0;
-const MAX_ATTEMPTS = 3;
+const credsPath = path.join(sessionDir, 'creds.json');
+const hasSession = fs.existsSync(credsPath);
+
+const CONNECT_TIMEOUT_MS = 120000;
+const MAX_RECONNECT = 4;
 
 function showQr(qr) {
-  console.log('\n  WhatsApp QR kodu, terminalde de gorunuyor.');
-  console.log('  WhatsApp > Bagli Cihazlar > Cihaz Bagla [Link a Device]\n');
+  console.log('');
+  console.log('  ============================================================');
+  console.log('  WhatsApp oturumu yok — QR ile baglayin / Scan QR to link');
+  console.log('  WhatsApp > Bagli Cihazlar > Cihaz Bagla');
+  console.log('  WhatsApp > Linked Devices > Link a Device');
+  console.log('  ============================================================');
+  console.log('');
   qrcodeTerminal.generate(qr, { small: true });
   QRCode.toFile(qrImage, qr, { width: 400, margin: 2 })
     .then(() => {
-      console.log('\n  QR pencerede acildi. Acilmadiysa: ' + qrImage);
+      console.log('');
+      console.log('  QR resmi acildi / QR image opened: ' + qrImage);
+      console.log('  Tarama sonrasi mesaj otomatik gidecek / Message sends after scan.');
       try {
         if (process.platform === 'win32') {
           spawn('cmd', ['/c', 'start', '', qrImage], { detached: true, stdio: 'ignore' }).unref();
@@ -91,78 +106,181 @@ function showQr(qr) {
         } else {
           spawn('xdg-open', [qrImage], { detached: true, stdio: 'ignore' }).unref();
         }
-      } catch {}
+      } catch {
+        /* ignore open failures */
+      }
     })
     .catch(() => {});
 }
 
-async function send() {
-  fs.mkdirSync(sessionDir, { recursive: true });
-  const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
-
-  const sock = makeWASocket({
-    auth: state,
-    logger: pino({ level: 'silent' }),
-    browser: ['Duendee Tunnel Tool', 'Chrome', '1.0.0'],
-    syncFullHistory: false,
-    markOnlineOnConnect: false
-  });
-
-  sock.ev.on('creds.update', saveCreds);
-
-  let sent = false;
-
-  sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr) showQr(qr);
-
-    if (connection === 'close') {
-      const code = lastDisconnect?.error?.output?.statusCode;
-      if (code === DisconnectReason.loggedOut) {
-        console.log('  Oturum silindi, yeniden taramaniz gerekiyor.');
-        fs.rmSync(sessionDir, { recursive: true, force: true });
-        process.exit(1);
-      }
-      if (code === DisconnectReason.badSession) {
-        console.log('  Bozuk oturum, temizleniyor...');
-        fs.rmSync(sessionDir, { recursive: true, force: true });
-        process.exit(1);
-      }
-      if (attempts >= MAX_ATTEMPTS) {
-        console.log('  Baglanti 3 kez kesildi, cikiliyor.');
-        process.exit(1);
-      }
-      attempts += 1;
-      setTimeout(send, 2000);
-    }
-
-    if (connection === 'open' && !sent) {
-      sent = true;
-      const digits = phone.replace(/[^0-9]/g, '');
-      if (!digits) {
-        console.error('Telefon numarasi gecersiz:', phone);
-        process.exit(1);
-      }
-      const jid = digits + '@s.whatsapp.net';
-      const message = String(config.messageTemplate || 'Duendee tunnel linki: {url}').replace('{url}', url);
-
-      sock.sendMessage(jid, { text: message })
-        .then(() => {
-          console.log('WhatsApp mesaji gonderildi -> ' + phone + ' | ' + url);
-          try { sock.end(undefined); } catch {}
-          setTimeout(() => process.exit(0), 400);
-        })
-        .catch((err) => {
-          console.error('Mesaj gonderilemedi:', err?.message || err);
-          console.error('Kontrol: targetPhone dogru mu, WhatsApp oturumu bagli mi?');
-          process.exit(1);
-        });
-    }
-  });
+function toDigits(raw) {
+  return String(raw || '').replace(/[^0-9]/g, '');
 }
 
-send().catch((err) => {
-  console.error('WhatsApp baslatilamadi:', err?.message || err);
+async function resolveJid(sock, rawPhone) {
+  const digits = toDigits(rawPhone);
+  if (!digits) {
+    throw new Error('Telefon numarasi gecersiz / Invalid phone: ' + rawPhone);
+  }
+  const bare = digits + '@s.whatsapp.net';
+  try {
+    const results = await sock.onWhatsApp(digits);
+    const hit = Array.isArray(results) ? results.find((r) => r && (r.exists || r.jid)) : null;
+    if (hit?.jid) return hit.jid;
+  } catch {
+    /* fall through */
+  }
+  return bare;
+}
+
+async function deliver(sock) {
+  const jid = await resolveJid(sock, phone);
+  const message = String(config.messageTemplate || 'Duendee tunnel linki: {url}').replace('{url}', url);
+  await sock.sendMessage(jid, { text: message });
+  console.log('WhatsApp mesaji gonderildi / Message sent -> ' + phone + ' | ' + url);
+}
+
+async function main() {
+  fs.mkdirSync(sessionDir, { recursive: true });
+
+  if (hasSession) {
+    console.log('  WhatsApp oturumu bulundu, baglaniliyor...');
+    console.log('  Existing WhatsApp session found, connecting...');
+  } else {
+    console.log('  Ilk kurulum: QR taramaniz istenecek (oturum sonra saklanir).');
+    console.log('  First run: scan QR once; session is saved for later sends.');
+  }
+
+  let finished = false;
+  let sent = false;
+  let attempts = 0;
+  let sock = null;
+  let timer = null;
+
+  const finish = (code, msg) => {
+    if (finished) return;
+    finished = true;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (msg) {
+      if (code === 0) console.log(msg);
+      else console.error(msg);
+    }
+    try {
+      if (sock) sock.end(undefined);
+    } catch {
+      /* ignore */
+    }
+    setTimeout(() => process.exit(code), 350);
+  };
+
+  timer = setTimeout(() => {
+    finish(
+      1,
+      'WhatsApp zaman asimi / timed out (' +
+        Math.round(CONNECT_TIMEOUT_MS / 1000) +
+        's).\n' +
+        'QR tarandi mi? Oturumu sifirlamak icin:\n' +
+        '  rmdir /s /q "' +
+        sessionDir +
+        '"   (Windows)\n' +
+        '  rm -rf "' +
+        sessionDir +
+        '"   (Linux)\n' +
+        'Sonra tekrar: node scripts/send-whatsapp.js "' +
+        url +
+        '"'
+    );
+  }, CONNECT_TIMEOUT_MS);
+
+  const connect = async () => {
+    if (finished || sent) return;
+
+    const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+    let version;
+    try {
+      ({ version } = await fetchLatestBaileysVersion());
+    } catch {
+      version = undefined;
+    }
+
+    sock = makeWASocket({
+      auth: state,
+      version,
+      logger: pino({ level: 'silent' }),
+      browser: ['Duendee Tunnel Tool', 'Chrome', '120.0.0'],
+      syncFullHistory: false,
+      markOnlineOnConnect: false,
+      printQRInTerminal: false
+    });
+
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', async (update) => {
+      if (finished) return;
+      const { connection, lastDisconnect, qr } = update;
+
+      if (qr && !sent) showQr(qr);
+
+      if (connection === 'open' && !sent) {
+        sent = true;
+        try {
+          await deliver(sock);
+          finish(0);
+        } catch (err) {
+          finish(
+            1,
+            'Mesaj gonderilemedi / send failed: ' +
+              (err?.message || err) +
+              '\nKontrol: targetPhone dogru mu? WhatsApp oturumu bagli mi?\n' +
+              'Check targetPhone in scripts/whatsapp-config.json and re-scan QR if needed.'
+          );
+        }
+        return;
+      }
+
+      if (connection === 'close') {
+        // Successful send already called finish(); ignore teardown close.
+        if (sent || finished) return;
+
+        const code = lastDisconnect?.error?.output?.statusCode;
+        const loggedOut = code === DisconnectReason.loggedOut;
+        const badSession = code === DisconnectReason.badSession;
+
+        if (loggedOut || badSession) {
+          console.error(
+            loggedOut
+              ? '  Oturum dusuruldu — QR yeniden taranmali / Logged out — re-scan QR.'
+              : '  Bozuk oturum temizleniyor / Bad session, clearing...'
+          );
+          try {
+            fs.rmSync(sessionDir, { recursive: true, force: true });
+          } catch {
+            /* ignore */
+          }
+          finish(1, 'WhatsApp oturumu sifirlandi. Tüneli yeniden baslatin / Session cleared; restart tunnel.');
+          return;
+        }
+
+        attempts += 1;
+        if (attempts > MAX_RECONNECT) {
+          finish(1, 'Baglanti ' + MAX_RECONNECT + ' kez kesildi / connection dropped repeatedly.');
+          return;
+        }
+        console.log('  Yeniden baglaniliyor (' + attempts + '/' + MAX_RECONNECT + ')...');
+        setTimeout(() => {
+          connect().catch((err) => finish(1, 'WhatsApp baslatilamadi: ' + (err?.message || err)));
+        }, 2000);
+      }
+    });
+  };
+
+  await connect();
+}
+
+main().catch((err) => {
+  console.error('WhatsApp baslatilamadi / failed to start:', err?.message || err);
   process.exit(1);
 });
