@@ -1,0 +1,7 @@
+node_modules/
+.tunnelstate/
+.whatsapp-session/
+config.json
+*.log
+.DS_Store
+*.pem
