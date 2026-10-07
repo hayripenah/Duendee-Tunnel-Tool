@@ -6,33 +6,72 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { spawn } from 'child_process';
+import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const toolRoot = path.resolve(__dirname, '..');
+const require = createRequire(import.meta.url);
 
-const config = JSON.parse(fs.readFileSync(path.join(__dirname, 'whatsapp-config.json'), 'utf8'));
-const urlFile = path.join(__dirname, '..', '.tunnelstate', 'tunnel.url');
+function fail(msg, code = 1) {
+  console.error(msg);
+  process.exit(code);
+}
+
+function assertDeps() {
+  try {
+    require.resolve('@whiskeysockets/baileys');
+  } catch {
+    fail(
+      'WhatsApp bağımlılıkları eksik. Kurulum:\n' +
+        `  cd "${toolRoot}"\n` +
+        '  npm install\n' +
+        'Sonra tüneli yeniden başlatın veya: node scripts/send-whatsapp.js <url>'
+    );
+  }
+}
+
+assertDeps();
+
+const configPath = path.join(__dirname, 'whatsapp-config.json');
+if (!fs.existsSync(configPath)) {
+  fail('whatsapp-config.json bulunamadı: ' + configPath);
+}
+
+const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+const urlFile = path.join(toolRoot, '.tunnelstate', 'tunnel.url');
 
 function resolveUrl(raw) {
   let fromFile = '';
   const arg = String(raw || '').trim();
-  const filePath = arg && !/^https?:\/\//i.test(arg) && fs.existsSync(arg) ? arg : urlFile;
+  if (arg && /^https?:\/\//i.test(arg)) {
+    return arg.replace(/[\r\n\s]+/g, '').replace(/\/+$/, '');
+  }
+  const filePath = arg && fs.existsSync(arg) ? arg : urlFile;
   if (fs.existsSync(filePath)) {
     fromFile = fs.readFileSync(filePath, 'utf8').trim();
   }
   const value = fromFile || arg;
-  return value.replace(/[\r\n\s]+/g, '').replace(/\/+$/, '');
+  return String(value || '').replace(/[\r\n\s]+/g, '').replace(/\/+$/, '');
 }
 
 const url = resolveUrl(process.argv[2]);
-const phone = process.argv[3] || config.targetPhone;
+const phone = String(process.argv[3] || config.targetPhone || '').trim();
 
 if (!url || !/^https:\/\//i.test(url)) {
-  console.error('Kullanim: node send-whatsapp.js <tunnel-url> [phone]');
-  process.exit(1);
+  fail('Kullanim: node send-whatsapp.js <tunnel-url|tunnel.url-dosyasi> [phone]\nURL yok veya gecersiz.');
 }
 
-const sessionDir = path.join(__dirname, '..', config.sessionDir);
+if (!phone) {
+  fail(
+    'Hedef telefon yok. scripts/whatsapp-config.json icinde targetPhone ayarlayin veya arguman verin.\n' +
+      'Ornek: node send-whatsapp.js "' + url + '" "+905xxxxxxxxx"'
+  );
+}
+
+const sessionDir = path.isAbsolute(config.sessionDir)
+  ? config.sessionDir
+  : path.join(toolRoot, config.sessionDir || '.whatsapp-session');
 const qrImage = path.join(os.tmpdir(), 'duendee-whatsapp-qr.png');
 let attempts = 0;
 const MAX_ATTEMPTS = 3;
@@ -58,13 +97,15 @@ function showQr(qr) {
 }
 
 async function send() {
+  fs.mkdirSync(sessionDir, { recursive: true });
   const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
 
   const sock = makeWASocket({
     auth: state,
     logger: pino({ level: 'silent' }),
     browser: ['Duendee Tunnel Tool', 'Chrome', '1.0.0'],
-    syncFullHistory: false
+    syncFullHistory: false,
+    markOnlineOnConnect: false
   });
 
   sock.ev.on('creds.update', saveCreds);
@@ -93,26 +134,35 @@ async function send() {
         process.exit(1);
       }
       attempts += 1;
-      setTimeout(send, 3000);
+      setTimeout(send, 2000);
     }
 
     if (connection === 'open' && !sent) {
       sent = true;
-      const jid = phone.replace(/[^0-9]/g, '') + '@s.whatsapp.net';
-      const message = config.messageTemplate.replace('{url}', url);
+      const digits = phone.replace(/[^0-9]/g, '');
+      if (!digits) {
+        console.error('Telefon numarasi gecersiz:', phone);
+        process.exit(1);
+      }
+      const jid = digits + '@s.whatsapp.net';
+      const message = String(config.messageTemplate || 'Duendee tunnel linki: {url}').replace('{url}', url);
 
       sock.sendMessage(jid, { text: message })
         .then(() => {
           console.log('WhatsApp mesaji gonderildi -> ' + phone + ' | ' + url);
-          sock.end();
-          setTimeout(() => process.exit(0), 500);
+          try { sock.end(undefined); } catch {}
+          setTimeout(() => process.exit(0), 400);
         })
         .catch((err) => {
-          console.error('Mesaj gonderilemedi:', err.message);
+          console.error('Mesaj gonderilemedi:', err?.message || err);
+          console.error('Kontrol: targetPhone dogru mu, WhatsApp oturumu bagli mi?');
           process.exit(1);
         });
     }
   });
 }
 
-send();
+send().catch((err) => {
+  console.error('WhatsApp baslatilamadi:', err?.message || err);
+  process.exit(1);
+});

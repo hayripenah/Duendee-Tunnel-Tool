@@ -73,9 +73,13 @@ for name in config.json .whatsapp-session .tunnelstate; do
   fi
 done
 
+if [[ ! -f "${INSTALL_DIR}/config.example.json" ]]; then
+  echo "Portable archive missing config.example.json" >&2
+  exit 1
+fi
 if [[ ! -f "${INSTALL_DIR}/config.json" ]]; then
   cp "${INSTALL_DIR}/config.example.json" "${INSTALL_DIR}/config.json"
-  echo "Created config.json from example — edit projectPath before starting."
+  echo "Created config.json from example — first run will ask for projectPath if needed."
 fi
 
 chmod +x "${INSTALL_DIR}/linux/duendee-tunnel-tool.sh" \

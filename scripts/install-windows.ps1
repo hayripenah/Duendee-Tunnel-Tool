@@ -76,9 +76,12 @@ try {
     }
   }
 
-  if (-not (Test-Path (Join-Path $InstallDir 'config.json'))) {
-    Copy-Item (Join-Path $InstallDir 'config.example.json') (Join-Path $InstallDir 'config.json') -Force
-    Write-Host "Created config.json from example — edit projectPath before starting."
+  $cfgEx = Join-Path $InstallDir 'config.example.json'
+  $cfg = Join-Path $InstallDir 'config.json'
+  if (-not (Test-Path $cfgEx)) { throw 'Portable zip missing config.example.json' }
+  if (-not (Test-Path $cfg)) {
+    Copy-Item $cfgEx $cfg -Force
+    Write-Host "Created config.json from example — first run will ask for projectPath if needed."
   }
 
   if (-not $SkipNpm) {

@@ -33,7 +33,7 @@ curl -fsSL https://raw.githubusercontent.com/hayripenah/Duendee-Tunnel-Tool/main
 
 Installs to `~/.local/share/duendee-tunnel-tool` and places `duendee-tunnel` in `~/.local/bin`.
 
-Then edit `config.json` (`projectPath` / `port`) before first use.
+On first run the tool copies `config.example.json` → `config.json` and interactively asks for `projectPath` / `port` if needed. You can also edit `config.json` manually anytime.
 
 ## Run
 
@@ -66,9 +66,9 @@ From a git clone:
 
 Shared pieces (repo root):
 
-- `config.example.json` → copy to `config.json` and set `projectPath` / `port`
-- `scripts/send-whatsapp.js` + `scripts/whatsapp-config.json`
-- `npm install` (WhatsApp helper)
+- `config.example.json` → auto-copied to `config.json` on first run (or copy manually)
+- `scripts/send-whatsapp.js` + `scripts/whatsapp-config.json` (`targetPhone`)
+- `npm install` in the tool root (WhatsApp helper; installers / first send also try this)
 - Runtime: `.tunnelstate/`, `.whatsapp-session/` (gitignored)
 
 ## Quick start (from source)

@@ -11,7 +11,7 @@ $qrPng = Join-Path $env:TEMP "duendee-whatsapp-qr.png"
 $devPattern = "*cd /d $Project*"
 
 while (Get-Process -Id $ToolPid -ErrorAction SilentlyContinue) {
-  Start-Sleep -Seconds 1
+  Start-Sleep -Milliseconds 500
 }
 
 taskkill /IM cloudflared.exe /F 2>$null | Out-Null

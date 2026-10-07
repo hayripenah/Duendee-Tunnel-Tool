@@ -10,7 +10,7 @@ SERVER_PID_FILE="${STATE}/server.pid"
 QR_PNG="${TMPDIR:-/tmp}/duendee-whatsapp-qr.png"
 
 while kill -0 "$TOOL_PID" 2>/dev/null; do
-  sleep 1
+  sleep 0.5
 done
 
 pkill -f "cloudflared tunnel --url" 2>/dev/null || true

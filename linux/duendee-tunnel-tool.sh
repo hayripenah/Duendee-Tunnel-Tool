@@ -43,11 +43,23 @@ die() {
   exit 1
 }
 
-load_config() {
+save_config() {
+  local proj="$1"
+  local port="$2"
   local cfg="${ROOT}/config.json"
-  if [[ ! -f "$cfg" ]]; then
-    die "config.json bulunamadı. Önce config.example.json dosyasını config.json olarak kopyalayıp projectPath ayarlayın."
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json,sys; json.dump({"projectPath":sys.argv[1],"port":int(sys.argv[2])}, open(sys.argv[3],"w",encoding="utf-8"), indent=2); open(sys.argv[3],"a",encoding="utf-8").write("\n")' \
+      "$proj" "$port" "$cfg"
+  elif command -v node >/dev/null 2>&1; then
+    node -e 'const fs=require("fs"); const o={projectPath:process.argv[1],port:Number(process.argv[2])||8080}; fs.writeFileSync(process.argv[3], JSON.stringify(o,null,2)+"\n")' \
+      "$proj" "$port" "$cfg"
+  else
+    printf '{\n  "projectPath": "%s",\n  "port": %s\n}\n' "$proj" "$port" >"$cfg"
   fi
+}
+
+read_config_fields() {
+  local cfg="$1"
   if command -v python3 >/dev/null 2>&1; then
     PROJECT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get("projectPath",""))' "$cfg")"
     PORT="$(python3 -c 'import json,sys; c=json.load(open(sys.argv[1],encoding="utf-8")); print(c.get("port") or 8080)' "$cfg")"
@@ -57,9 +69,110 @@ load_config() {
   else
     die "config.json okumak için python3 veya node gerekli."
   fi
-  [[ -n "${PROJECT:-}" ]] || die "config.json içinde projectPath tanımlı değil."
+}
+
+load_config() {
+  local cfg="${ROOT}/config.json"
+  local example="${ROOT}/config.example.json"
+  if [[ ! -f "$cfg" ]]; then
+    [[ -f "$example" ]] || die "config.example.json bulunamadı. Portable paket bozuk olabilir."
+    cp "$example" "$cfg"
+    echo -e "  ${GRN}   config.json oluşturuldu (config.example.json kopyası).${RST}"
+    echo
+  fi
+  read_config_fields "$cfg"
+  PORT="${PORT:-8080}"
+  local needs_setup=0
+  if [[ -z "${PROJECT:-}" ]]; then
+    needs_setup=1
+  elif [[ "$PROJECT" == *"/path/to/your/app"* || "$PROJECT" == *"\\path\\to\\your\\app"* ]]; then
+    needs_setup=1
+  elif [[ ! -d "$PROJECT" ]]; then
+    needs_setup=1
+  fi
+  if (( needs_setup )); then
+    echo -e "  ${YEL}${BOLD}[KURULUM]${RST} projectPath ayarlanmalı."
+    echo -e "  ${DIM}   Yerel web uygulamanızın klasör yolunu girin (npm run dev çalıştırılan dizin).${RST}"
+    if [[ -n "${PROJECT:-}" && ! -d "$PROJECT" ]]; then
+      echo -e "  ${DIM}   Mevcut değer geçersiz: ${PROJECT}${RST}"
+    fi
+    echo
+    while true; do
+      printf '  projectPath> '
+      read -r entered
+      entered="${entered//\"/}"
+      entered="${entered/#\~/$HOME}"
+      if [[ -z "$entered" ]]; then
+        echo -e "  ${YEL}   Boş olamaz.${RST}"
+        continue
+      fi
+      if [[ ! -d "$entered" ]]; then
+        echo -e "  ${YEL}   Klasör bulunamadı: ${entered}${RST}"
+        continue
+      fi
+      PROJECT="$(cd "$entered" && pwd)"
+      break
+    done
+    printf '  port [%s]> ' "$PORT"
+    read -r port_in
+    if [[ "$port_in" =~ ^[0-9]+$ ]]; then
+      PORT="$port_in"
+    fi
+    save_config "$PROJECT" "$PORT"
+    echo -e "  ${GRN}   Kaydedildi: ${cfg}${RST}"
+    echo
+  fi
   [[ -d "$PROJECT" ]] || die "projectPath bulunamadı: $PROJECT"
   PORT="${PORT:-8080}"
+}
+
+ensure_whatsapp_deps() {
+  local marker="${ROOT}/node_modules/@whiskeysockets/baileys/package.json"
+  [[ -f "$marker" ]] && return 0
+  command -v npm >/dev/null 2>&1 || return 1
+  echo -e "  ${DIM}   WhatsApp bağımlılıkları kuruluyor (npm install)...${RST}"
+  (cd "$ROOT" && npm install --omit=dev) || (cd "$ROOT" && npm install) || return 1
+  [[ -f "$marker" ]]
+}
+
+send_tunnel_whatsapp() {
+  local public_url="${1:-}"
+  if [[ ! -f "$WHATSAPP_JS" ]]; then
+    echo -e "  ${YEL}   WhatsApp scripti yok: ${WHATSAPP_JS}${RST}"
+    return 0
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    echo -e "  ${YEL}   node bulunamadı — WhatsApp gönderilemedi. Node.js kurup tekrar deneyin.${RST}"
+    return 0
+  fi
+  if ! ensure_whatsapp_deps; then
+    echo -e "  ${YEL}   WhatsApp paketleri eksik. Kurulum: cd \"${ROOT}\" && npm install${RST}"
+    return 0
+  fi
+  if [[ -z "$public_url" || "$public_url" != https://* ]]; then
+    echo -e "  ${YEL}   Geçerli tünel URL'si yok; WhatsApp atlandı.${RST}"
+    return 0
+  fi
+  local phone=""
+  local wa_cfg="${ROOT}/scripts/whatsapp-config.json"
+  if [[ -f "$wa_cfg" ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+      phone="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get("targetPhone",""))' "$wa_cfg" 2>/dev/null || true)"
+    elif command -v node >/dev/null 2>&1; then
+      phone="$(node -e 'const c=require(process.argv[1]); process.stdout.write(String(c.targetPhone||""))' "$wa_cfg" 2>/dev/null || true)"
+    fi
+  fi
+  echo "  WhatsApp'a link gönderiliyor..."
+  local ec=0
+  if [[ -n "$phone" ]]; then
+    node "$WHATSAPP_JS" "$public_url" "$phone" || ec=$?
+  else
+    node "$WHATSAPP_JS" "$public_url" || ec=$?
+  fi
+  if (( ec != 0 )); then
+    echo -e "  ${YEL}   WhatsApp gönderimi başarısız (çıkış ${ec}). QR/oturum veya telefon numarasını kontrol edin.${RST}"
+    echo -e "  ${DIM}   Manuel: node \"${WHATSAPP_JS}\" \"${public_url}\"${RST}"
+  fi
 }
 
 find_cloudflared() {
@@ -412,15 +525,15 @@ do_start() {
       if port_listening "$PORT"; then
         break
       fi
-      if (( tries >= 20 )); then
+      if (( tries >= 80 )); then
         echo -e "  ${RED}${BOLD}[HATA]${RST} Dev server ${PORT} portunda açılamadı."
         echo -e "  ${DIM}   npm run dev çıktısını ayrı bir terminalde deneyin.${RST}"
         wait_key
         return
       fi
-      sleep 1
+      sleep 0.25
     done
-    echo -e "  ${CYN}[2/4]${RST} Dev server http://localhost:${PORT} hazır."
+    echo -e "  ${CYN}[2/4]${RST} Dev server http://127.0.0.1:${PORT} hazır."
   fi
 
   echo -e "  ${CYN}[3/4]${RST} Cloudflare tünel başlatılıyor..."
@@ -430,8 +543,9 @@ do_start() {
   URL=""
   TUNNEL_URL=""
   PREV=""
-  local target="http://localhost:${PORT}"
-  setsid "$CF" tunnel --url "$target" --no-autoupdate >"$OUT_LOG" 2>"$LOG" &
+  # 127.0.0.1 + IPv4 edge avoids localhost/IPv6 happy-eyeballs delay
+  local target="http://127.0.0.1:${PORT}"
+  setsid "$CF" tunnel --url "$target" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 3 >"$OUT_LOG" 2>"$LOG" &
   echo $! >"$PID_FILE"
   read_pid
   if [[ -z "${TPID:-}" ]]; then
@@ -439,7 +553,7 @@ do_start() {
     wait_key
     return
   fi
-  sleep 1
+  sleep 0.3
   if ! pid_alive "$TPID"; then
     echo -e "  ${RED}${BOLD}[HATA]${RST} Tünel açılır açılmaz çıktı. Son log:"
     logtail
@@ -448,15 +562,15 @@ do_start() {
     return
   fi
 
-  echo -e "  ${CYN}[4/4]${RST} Yayın linki bekleniyor - 60 sn'ye kadar..."
+  echo -e "  ${CYN}[4/4]${RST} Yayın linki bekleniyor..."
   URL=""
   local tries=0
   while true; do
     refresh_url
     [[ -n "${URL:-}" ]] && break
     tries=$((tries + 1))
-    if (( tries % 5 == 0 )); then
-      echo -e "  ${DIM}   ... ${tries} saniye beklendi${RST}"
+    if (( tries % 20 == 0 )); then
+      echo -e "  ${DIM}   ... $((tries / 4)) saniye beklendi${RST}"
     fi
     if ! pid_alive "$TPID"; then
       echo -e "  ${RED}${BOLD}[HATA]${RST} Tünel çıktı, link alınamadı. Son log:"
@@ -465,62 +579,41 @@ do_start() {
       wait_key
       return
     fi
-    if (( tries >= 60 )); then
-      echo -e "  ${RED}${BOLD}[HATA]${RST} Yayın linki alınamadı - 60 sn doldu. Son log:"
+    if (( tries >= 180 )); then
+      echo -e "  ${RED}${BOLD}[HATA]${RST} Yayın linki alınamadı - süre doldu. Son log:"
       logtail
       rm -f "$PID_FILE"
       wait_key
       return
     fi
-    sleep 1
+    sleep 0.25
   done
 
-  echo -e "  ${DIM}   Link alındı, origin sağlığı doğrulanıyor...${RST}"
-  tries=0
-  while true; do
-    local orig
-    orig="$(http_code "http://localhost:${PORT}" 4)"
-    orig="${orig:-000}"
-    if (( orig >= 200 && orig <= 399 )); then
-      echo -e "  ${GRN}   Origin kontrolü başarılı, kod: ${orig}.${RST}"
-      break
-    fi
-    tries=$((tries + 1))
-    if ! pid_alive "$TPID"; then
-      echo -e "  ${RED}${BOLD}[HATA]${RST} Tünel bağlantı sırasında çıktı."
-      logtail
-      rm -f "$PID_FILE" "$URL_FILE"
-      wait_key
-      return
-    fi
-    if (( tries >= 15 )); then
-      echo -e "  ${RED}${BOLD}[HATA]${RST} Dev server origin ${PORT} portunda yanıt vermiyor, son kod: ${orig}."
-      echo -e "  ${DIM}   000 = bağlantı kurulamadı, 4xx/5xx = sunucu hata kodu; npm run dev penceresini kontrol edin.${RST}"
-      logtail
-      rm -f "$PID_FILE" "$URL_FILE"
-      wait_key
-      return
-    fi
-    sleep 1
-  done
+  if ! port_listening "$PORT"; then
+    echo -e "  ${RED}${BOLD}[HATA]${RST} Dev server origin ${PORT} portunda yanıt vermiyor."
+    logtail
+    rm -f "$PID_FILE" "$URL_FILE"
+    wait_key
+    return
+  fi
 
   refresh_url
   tries=0
   while true; do
     local pub
-    pub="$(http_code "${URL}" 6)"
+    pub="$(http_code "${URL}" 3)"
     pub="${pub:-000}"
     if (( pub >= 200 && pub <= 399 )); then
       echo -e "  ${GRN}   Yayın adresi erişilebilir, kod: ${pub} - yayın hazır.${RST}"
       break
     fi
     tries=$((tries + 1))
-    if (( tries >= 3 )); then
+    if (( tries >= 2 )); then
       echo -e "  ${YEL}   Uyarı: halka açık adres henüz doğrulanamadı, son kod: ${pub}.${RST}"
-      echo -e "  ${DIM}   000 = Cloudflare henüz yönlendirmiyor; birkaç saniye içinde erişilebilir olur.${RST}"
+      echo -e "  ${DIM}   Cloudflare yönlendirmesi birkaç saniye içinde hazır olur.${RST}"
       break
     fi
-    sleep 1
+    sleep 0.4
   done
 
   refresh_url
@@ -544,8 +637,7 @@ do_start() {
     echo
     echo "  Varsayılan tarayıcıda açılıyor..."
     open_url "$URL"
-    echo "  WhatsApp'a link gönderiliyor..."
-    node "${WHATSAPP_JS}" "$URL_FILE" "+905315162429" || true
+    send_tunnel_whatsapp "$URL"
   fi
   echo
   wait_key

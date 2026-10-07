@@ -57,32 +57,78 @@ $BLUE = "$Esc[38;2;59;130;246m"; $SKY = "$Esc[38;2;147;197;253m"
 $SALMON = "$Esc[38;2;232;113;90m"
 
 $configPath = Join-Path $Root 'config.json'
-if (-not (Test-Path -LiteralPath $configPath)) {
-  Write-UiLine "  $RED$BOLD[HATA]$RST config.json bulunamadı. Önce config.example.json dosyasını config.json olarak kopyalayıp projectPath ayarlayın."
-  Pause-Enter
-  exit 1
+$configExample = Join-Path $Root 'config.example.json'
+
+function Save-ToolConfig([string]$ProjectPath, [int]$PortNum) {
+  $obj = [ordered]@{ projectPath = $ProjectPath; port = $PortNum }
+  ($obj | ConvertTo-Json -Depth 4) + "`n" | Set-Content -LiteralPath $configPath -Encoding UTF8 -NoNewline
 }
 
-try {
-  $cfg = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
-} catch {
-  Write-UiLine "  $RED$BOLD[HATA]$RST config.json okunamadı: $($_.Exception.Message)"
-  Pause-Enter
-  exit 1
+function Ensure-ToolConfig {
+  if (-not (Test-Path -LiteralPath $configPath)) {
+    if (-not (Test-Path -LiteralPath $configExample)) {
+      Write-UiLine "  $RED$BOLD[HATA]$RST config.example.json bulunamadı. Portable paket bozuk olabilir."
+      Pause-Enter
+      exit 1
+    }
+    Copy-Item -LiteralPath $configExample -Destination $configPath -Force
+    Write-UiLine "  $GRN   config.json oluşturuldu (config.example.json kopyası).$RST"
+    Write-UiLine ''
+  }
+
+  try {
+    $cfgLocal = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
+  } catch {
+    Write-UiLine "  $RED$BOLD[HATA]$RST config.json okunamadı: $($_.Exception.Message)"
+    Pause-Enter
+    exit 1
+  }
+
+  $proj = [string]$cfgLocal.projectPath
+  $portNum = if ($cfgLocal.port) { [int]$cfgLocal.port } else { 8080 }
+  $placeholder = [string]::IsNullOrWhiteSpace($proj) -or
+    $proj -match '[\\/]path[\\/]to[\\/]your[\\/]app' -or
+    -not (Test-Path -LiteralPath $proj)
+
+  if ($placeholder) {
+    Write-UiLine "  $YEL$BOLD[KURULUM]$RST projectPath ayarlanmalı."
+    Write-UiLine "  $DIM   Yerel web uygulamanızın klasör yolunu girin (npm run dev çalıştırılan dizin).$RST"
+    if (-not [string]::IsNullOrWhiteSpace($proj) -and -not (Test-Path -LiteralPath $proj)) {
+      Write-UiLine "  $DIM   Mevcut değer geçersiz: $proj$RST"
+    }
+    Write-UiLine ''
+    while ($true) {
+      Write-Ui '  projectPath> '
+      $entered = (Read-Host).Trim().Trim('"')
+      if ([string]::IsNullOrWhiteSpace($entered)) {
+        Write-UiLine "  $YEL   Boş olamaz.$RST"
+        continue
+      }
+      if (-not (Test-Path -LiteralPath $entered)) {
+        Write-UiLine "  $YEL   Klasör bulunamadı: $entered$RST"
+        continue
+      }
+      if (-not (Test-Path -LiteralPath $entered -PathType Container)) {
+        Write-UiLine "  $YEL   Bir klasör yolu girin.$RST"
+        continue
+      }
+      $proj = (Resolve-Path -LiteralPath $entered).Path
+      break
+    }
+    Write-Ui "  port [$portNum]> "
+    $portIn = (Read-Host).Trim()
+    if ($portIn -match '^\d+$') { $portNum = [int]$portIn }
+    Save-ToolConfig -ProjectPath $proj -PortNum $portNum
+    Write-UiLine "  $GRN   Kaydedildi: $configPath$RST"
+    Write-UiLine ''
+  }
+
+  return @{ Project = $proj; Port = $portNum }
 }
 
-$Project = [string]$cfg.projectPath
-$Port = if ($cfg.port) { [int]$cfg.port } else { 8080 }
-if ([string]::IsNullOrWhiteSpace($Project)) {
-  Write-UiLine "  $RED$BOLD[HATA]$RST config.json içinde projectPath tanımlı değil."
-  Pause-Enter
-  exit 1
-}
-if (-not (Test-Path -LiteralPath $Project)) {
-  Write-UiLine "  $RED$BOLD[HATA]$RST projectPath bulunamadı: $Project"
-  Pause-Enter
-  exit 1
-}
+$boot = Ensure-ToolConfig
+$Project = [string]$boot.Project
+$Port = [int]$boot.Port
 
 $StateDir = Join-Path $Root '.tunnelstate'
 $PidFile = Join-Path $StateDir 'tunnel.pid'
@@ -121,11 +167,91 @@ function Test-PidAlive([int]$ProcessId) {
 }
 
 function Test-PortListening([int]$PortNum) {
+  # TcpClient is much faster than Get-NetTCPConnection on Windows
   try {
-    if (Get-NetTCPConnection -LocalPort $PortNum -State Listen -ErrorAction SilentlyContinue) { return $true }
+    $tcp = [System.Net.Sockets.TcpClient]::new()
+    $iar = $tcp.BeginConnect('127.0.0.1', $PortNum, $null, $null)
+    if ($iar.AsyncWaitHandle.WaitOne(120) -and $tcp.Connected) {
+      try { $tcp.EndConnect($iar) } catch {}
+      $tcp.Close()
+      return $true
+    }
+    $tcp.Close()
   } catch {}
-  $out = netstat -ano 2>$null | Select-String -Pattern ":$PortNum\s" | Select-String 'LISTENING'
-  return [bool]$out
+  return $false
+}
+
+function Find-NodeExe {
+  $cmd = Get-Command node -ErrorAction SilentlyContinue
+  if ($cmd) { return $cmd.Source }
+  $pf86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+  foreach ($c in @(
+      (Join-Path $env:ProgramFiles 'nodejs\node.exe'),
+      $(if ($pf86) { Join-Path $pf86 'nodejs\node.exe' } else { $null }),
+      (Join-Path $env:LOCALAPPDATA 'Programs\nodejs\node.exe')
+    )) {
+    if ($c -and (Test-Path -LiteralPath $c)) { return $c }
+  }
+  return $null
+}
+
+function Ensure-WhatsAppDeps {
+  $marker = Join-Path $Root 'node_modules\@whiskeysockets\baileys\package.json'
+  if (Test-Path -LiteralPath $marker) { return $true }
+  $npm = Get-Command npm -ErrorAction SilentlyContinue
+  if (-not $npm) { return $false }
+  Write-UiLine "  $DIM   WhatsApp bağımlılıkları kuruluyor (npm install)...$RST"
+  Push-Location $Root
+  try {
+    & npm install --omit=dev 2>$null
+    if ($LASTEXITCODE -ne 0) { & npm install }
+  } finally { Pop-Location }
+  return (Test-Path -LiteralPath $marker)
+}
+
+function Send-TunnelWhatsApp([string]$PublicUrl) {
+  $waJs = Join-Path $Root 'scripts\send-whatsapp.js'
+  $waCfg = Join-Path $Root 'scripts\whatsapp-config.json'
+  if (-not (Test-Path -LiteralPath $waJs)) {
+    Write-UiLine "  $YEL   WhatsApp scripti yok: $waJs$RST"
+    return
+  }
+  $node = Find-NodeExe
+  if (-not $node) {
+    Write-UiLine "  $YEL   node bulunamadı — WhatsApp gönderilemedi. Node.js kurup tekrar deneyin.$RST"
+    return
+  }
+  if (-not (Ensure-WhatsAppDeps)) {
+    Write-UiLine "  $YEL   WhatsApp paketleri eksik. Kurulum: cd `"$Root`" && npm install$RST"
+    return
+  }
+  if ([string]::IsNullOrWhiteSpace($PublicUrl) -or $PublicUrl -notmatch '^https://') {
+    Write-UiLine "  $YEL   Geçerli tünel URL'si yok; WhatsApp atlandı.$RST"
+    return
+  }
+  $phone = ''
+  if (Test-Path -LiteralPath $waCfg) {
+    try {
+      $wc = Get-Content -LiteralPath $waCfg -Raw -Encoding UTF8 | ConvertFrom-Json
+      $phone = [string]$wc.targetPhone
+    } catch {}
+  }
+  Write-UiLine "  WhatsApp'a link gönderiliyor..."
+  $prevEa = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    if ($phone) {
+      & $node $waJs $PublicUrl $phone
+    } else {
+      & $node $waJs $PublicUrl
+    }
+    if ($LASTEXITCODE -ne 0) {
+      Write-UiLine "  $YEL   WhatsApp gönderimi başarısız (çıkış $LASTEXITCODE). QR/oturum veya telefon numarasını kontrol edin.$RST"
+      Write-UiLine "  $DIM   Manuel: node `"$waJs`" `"$PublicUrl`"$RST"
+    }
+  } finally {
+    $ErrorActionPreference = $prevEa
+  }
 }
 
 function Find-Cloudflared {
@@ -404,9 +530,9 @@ function Invoke-Start {
       -RedirectStandardOutput $serverOut -RedirectStandardError $serverErr
     if ($p) { Set-Content -LiteralPath $ServerPidFile -Value $p.Id -Encoding Ascii }
     $ready = $false
-    for ($i = 1; $i -le 20; $i++) {
+    for ($i = 1; $i -le 80; $i++) {
       if (Test-PortListening $Port) { $ready = $true; break }
-      Start-Sleep -Seconds 1
+      Start-Sleep -Milliseconds 250
     }
     if (-not $ready) {
       Write-UiLine "  $RED$BOLD[HATA]$RST Dev server $Port portunda açılamadı."
@@ -414,7 +540,7 @@ function Invoke-Start {
       Complete-Action
       return
     }
-    Write-UiLine "  ${CYN}[2/4]$RST Dev server http://localhost:$Port hazır."
+    Write-UiLine "  ${CYN}[2/4]$RST Dev server http://127.0.0.1:$Port hazır."
   } else {
     Write-UiLine "  ${CYN}[2/4]$RST Dev server $Port portunda hazır."
   }
@@ -422,8 +548,10 @@ function Invoke-Start {
   Write-UiLine "  ${CYN}[3/4]$RST Cloudflare tünel başlatılıyor..."
   Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $UrlFile, $LogFile, $OutLogFile -Force -ErrorAction SilentlyContinue
-  $target = "http://localhost:$Port"
-  $tp = Start-Process -FilePath $cf -ArgumentList @('tunnel', '--url', $target, '--no-autoupdate') `
+  # 127.0.0.1 + IPv4 edge avoids localhost/IPv6 happy-eyeballs delay on Windows
+  $target = "http://127.0.0.1:$Port"
+  $cfArgs = @('tunnel', '--url', $target, '--no-autoupdate', '--protocol', 'http2', '--edge-ip-version', '4', '--retries', '3')
+  $tp = Start-Process -FilePath $cf -ArgumentList $cfArgs `
     -WindowStyle Hidden -PassThru -RedirectStandardOutput $OutLogFile -RedirectStandardError $LogFile
   if (-not $tp) {
     Write-UiLine "  $RED$BOLD[HATA]$RST Tünel başlatılamadı. Log: $LogFile"
@@ -431,7 +559,7 @@ function Invoke-Start {
     return
   }
   Set-Content -LiteralPath $PidFile -Value $tp.Id -Encoding Ascii
-  Start-Sleep -Seconds 1
+  Start-Sleep -Milliseconds 300
   if (-not (Test-PidAlive $tp.Id)) {
     Write-UiLine "  $RED$BOLD[HATA]$RST Tünel açılır açılmaz çıktı. Son log:"
     Show-LogTail
@@ -440,9 +568,13 @@ function Invoke-Start {
     return
   }
 
-  Write-UiLine "  ${CYN}[4/4]$RST Yayın linki bekleniyor - 60 sn'ye kadar..."
+  Write-UiLine "  ${CYN}[4/4]$RST Yayın linki bekleniyor..."
   $url = $null
-  for ($tries = 1; $tries -le 60; $tries++) {
+  $waitStart = [datetime]::UtcNow
+  $deadline = $waitStart.AddSeconds(45)
+  $tick = 0
+  while ([datetime]::UtcNow -lt $deadline) {
+    $tick++
     $url = Get-TunnelUrl
     if ($url) { break }
     if (-not (Test-PidAlive $tp.Id)) {
@@ -452,41 +584,23 @@ function Invoke-Start {
       Complete-Action
       return
     }
-    if (($tries % 5) -eq 0) { Write-UiLine "  $DIM   ... $tries saniye beklendi$RST" }
-    Start-Sleep -Seconds 1
+    if (($tick % 20) -eq 0) {
+      $sec = [int]([datetime]::UtcNow - $waitStart).TotalSeconds
+      Write-UiLine "  $DIM   ... $sec saniye beklendi$RST"
+    }
+    Start-Sleep -Milliseconds 250
   }
   if (-not $url) {
-    Write-UiLine "  $RED$BOLD[HATA]$RST Yayın linki alınamadı - 60 sn doldu. Son log:"
+    Write-UiLine "  $RED$BOLD[HATA]$RST Yayın linki alınamadı - süre doldu. Son log:"
     Show-LogTail
     Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
     Complete-Action
     return
   }
 
-  Write-UiLine "  $DIM   Link alındı, origin sağlığı doğrulanıyor...$RST"
-  $origOk = $false
-  $code = '000'
-  for ($tries = 1; $tries -le 15; $tries++) {
-    try { $code = & curl.exe -s -o nul -w '%{http_code}' --max-time 4 "http://localhost:$Port" } catch { $code = '000' }
-    if (-not $code) { $code = '000' }
-    $n = 0
-    if ([int]::TryParse("$code", [ref]$n) -and $n -ge 200 -and $n -le 399) {
-      Write-UiLine "  $GRN   Origin kontrolü başarılı, kod: $code.$RST"
-      $origOk = $true
-      break
-    }
-    if (-not (Test-PidAlive $tp.Id)) {
-      Write-UiLine "  $RED$BOLD[HATA]$RST Tünel bağlantı sırasında çıktı."
-      Show-LogTail
-      Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue
-      Complete-Action
-      return
-    }
-    Start-Sleep -Seconds 1
-  }
-  if (-not $origOk) {
-    Write-UiLine "  $RED$BOLD[HATA]$RST Dev server origin $Port portunda yanıt vermiyor, son kod: $code."
-    Write-UiLine "  $DIM   000 = bağlantı kurulamadı; npm run dev penceresini kontrol edin.$RST"
+  # Origin port was already verified; one quick HTTP check is enough
+  if (-not (Test-PortListening $Port)) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST Dev server origin $Port portunda yanıt vermiyor."
     Show-LogTail
     Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue
     Complete-Action
@@ -495,9 +609,9 @@ function Invoke-Start {
 
   $pub = '000'
   $pubOk = $false
-  for ($tries = 1; $tries -le 3; $tries++) {
+  for ($tries = 1; $tries -le 2; $tries++) {
     $url = Get-TunnelUrl
-    try { $pub = & curl.exe -s -o nul -w '%{http_code}' --max-time 6 $url } catch { $pub = '000' }
+    try { $pub = & curl.exe -s -o nul -w '%{http_code}' --max-time 3 $url } catch { $pub = '000' }
     if (-not $pub) { $pub = '000' }
     $n = 0
     if ([int]::TryParse("$pub", [ref]$n) -and $n -ge 200 -and $n -le 399) {
@@ -505,11 +619,11 @@ function Invoke-Start {
       $pubOk = $true
       break
     }
-    Start-Sleep -Seconds 1
+    Start-Sleep -Milliseconds 400
   }
   if (-not $pubOk) {
-    Write-UiLine "  $YEL   Uyarı: halk adres henüz doğrulanamadı, son kod: $pub.$RST"
-    Write-UiLine "  $DIM   000 = Cloudflare henüz yönlendirmiyor; birkaç saniye içinde erişilebilir olur.$RST"
+    Write-UiLine "  $YEL   Uyarı: halka açık adres henüz doğrulanamadı, son kod: $pub.$RST"
+    Write-UiLine "  $DIM   Cloudflare yönlendirmesi birkaç saniye içinde hazır olur.$RST"
   }
 
   $url = Get-TunnelUrl
@@ -529,8 +643,7 @@ function Invoke-Start {
     Write-UiLine ''
     Write-UiLine '  Varsayılan tarayıcıda açılıyor...'
     Start-Process $url
-    Write-UiLine "  WhatsApp'a link gönderiliyor..."
-    & node (Join-Path $Root 'scripts\send-whatsapp.js') $UrlFile '+905315162429'
+    Send-TunnelWhatsApp -PublicUrl $url
   }
   Complete-Action
 }
