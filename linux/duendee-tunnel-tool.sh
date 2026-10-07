@@ -32,8 +32,9 @@ YEL=$'\033[93m'
 GRN=$'\033[92m'
 RED=$'\033[91m'
 BLUE=$'\033[38;2;59;130;246m'
-DEEP=$'\033[38;2;30;64;175m'
 SKY=$'\033[38;2;147;197;253m'
+# Claude Code–style warm salmon for the DUENDEE banner
+SALMON=$'\033[38;2;232;113;90m'
 
 mkdir -p "$STATE"
 
@@ -208,9 +209,9 @@ kill_tunnel() {
   read_pid
   if [[ -n "${TPID:-}" ]]; then
     if pid_alive "$TPID"; then
-      kill -TERM "$TPID" 2>/dev/null || true
+      kill -TERM "-$TPID" 2>/dev/null || kill -TERM "$TPID" 2>/dev/null || true
       sleep 0.3
-      kill -KILL "$TPID" 2>/dev/null || true
+      kill -KILL "-$TPID" 2>/dev/null || kill -KILL "$TPID" 2>/dev/null || true
       echo -e "  ${GRN}   Tünel durduruldu - PID ${TPID}.${RST}"
     fi
   fi
@@ -219,13 +220,59 @@ kill_tunnel() {
   rm -f "$PID_FILE" "$URL_FILE"
 }
 
+kill_dev_server() {
+  local spid=""
+  local stopped=0
+  if [[ -f "$SERVER_PID" ]]; then
+    spid="$(tr -d '[:space:]' < "$SERVER_PID" || true)"
+  fi
+  if [[ -n "$spid" ]]; then
+    if pid_alive "$spid"; then
+      # Kill process group (setsid npm/node tree)
+      kill -TERM "-$spid" 2>/dev/null || kill -TERM "$spid" 2>/dev/null || true
+      sleep 0.3
+      kill -KILL "-$spid" 2>/dev/null || kill -KILL "$spid" 2>/dev/null || true
+      echo -e "  ${GRN}   Dev server durduruldu - PID ${spid}.${RST}"
+      stopped=1
+    fi
+    rm -f "$SERVER_PID"
+  fi
+  # Fallback: npm run dev started for this project
+  pgrep -af "npm run dev" 2>/dev/null | while read -r line; do
+    if [[ "$line" == *"$PROJECT"* ]]; then
+      local pid="${line%% *}"
+      if [[ "$pid" =~ ^[0-9]+$ ]]; then
+        kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+        sleep 0.2
+        kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+        stopped=1
+      fi
+    fi
+  done
+  if [[ "$stopped" -eq 0 ]]; then
+    echo -e "  ${DIM}   Dev server zaten kapalı.${RST}"
+  fi
+}
+
+kill_tunnel_and_server() {
+  if tunnel_running; then
+    kill_tunnel
+  else
+    echo -e "  ${YEL}   Aktif tünel servisi yok.${RST}"
+    pkill -f "cloudflared tunnel --url" 2>/dev/null || true
+    killall cloudflared 2>/dev/null || true
+    rm -f "$PID_FILE" "$URL_FILE"
+  fi
+  kill_dev_server
+}
+
 kill_all() {
   read_pid
   if [[ -n "${TPID:-}" ]]; then
     if pid_alive "$TPID"; then
-      kill -TERM "$TPID" 2>/dev/null || true
+      kill -TERM "-$TPID" 2>/dev/null || kill -TERM "$TPID" 2>/dev/null || true
       sleep 0.3
-      kill -KILL "$TPID" 2>/dev/null || true
+      kill -KILL "-$TPID" 2>/dev/null || kill -KILL "$TPID" 2>/dev/null || true
       echo -e "  ${GRN}   Tünel servisi durduruldu - PID ${TPID}.${RST}"
     else
       echo -e "  ${DIM}   PID ${TPID} zaten çalışmıyor.${RST}"
@@ -235,24 +282,40 @@ kill_all() {
   fi
   pkill -f "cloudflared tunnel --url" 2>/dev/null || true
   killall cloudflared 2>/dev/null || true
+  kill_dev_server
+  rm -f "$PID_FILE" "$URL_FILE" "${TMPDIR:-/tmp}/duendee-whatsapp-qr.png"
+}
 
+# Quiet cleanup for EXIT/INT/TERM/HUP (and the tunnel-watcher as backup)
+CLEANING_UP=0
+cleanup_quiet() {
+  if [[ "$CLEANING_UP" == "1" ]]; then
+    return 0
+  fi
+  CLEANING_UP=1
+  read_pid
+  if [[ -n "${TPID:-}" ]] && pid_alive "$TPID"; then
+    kill -TERM "-$TPID" 2>/dev/null || kill -TERM "$TPID" 2>/dev/null || true
+    kill -KILL "-$TPID" 2>/dev/null || kill -KILL "$TPID" 2>/dev/null || true
+  fi
+  pkill -f "cloudflared tunnel --url" 2>/dev/null || true
+  killall cloudflared 2>/dev/null || true
   local spid=""
   if [[ -f "$SERVER_PID" ]]; then
     spid="$(tr -d '[:space:]' < "$SERVER_PID" || true)"
   fi
   if [[ -n "$spid" ]]; then
-    if pid_alive "$spid"; then
-      # kill process group if possible
-      kill -TERM "-$spid" 2>/dev/null || kill -TERM "$spid" 2>/dev/null || true
-      sleep 0.3
-      kill -KILL "-$spid" 2>/dev/null || kill -KILL "$spid" 2>/dev/null || true
-      echo -e "  ${GRN}   Dev server penceresi kapatıldı - PID ${spid}.${RST}"
-    else
-      echo -e "  ${DIM}   Dev server zaten kapalı.${RST}"
-    fi
+    kill -TERM "-$spid" 2>/dev/null || kill -TERM "$spid" 2>/dev/null || true
+    kill -KILL "-$spid" 2>/dev/null || kill -KILL "$spid" 2>/dev/null || true
     rm -f "$SERVER_PID"
   fi
-  rm -f "$PID_FILE" "$URL_FILE" "${TMPDIR:-/tmp}/duendee-whatsapp-qr.png"
+  pgrep -af "npm run dev" 2>/dev/null | while read -r line; do
+    if [[ "$line" == *"$PROJECT"* ]]; then
+      local pid="${line%% *}"
+      [[ "$pid" =~ ^[0-9]+$ ]] && kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done
+  rm -f "$PID_FILE" "$URL_FILE" "${TMPDIR:-/tmp}/duendee-whatsapp-qr.png" 2>/dev/null || true
 }
 
 wait_key() {
@@ -266,21 +329,14 @@ wait_key() {
 show_menu() {
   clear
   autostate
+  # FIGlet "ANSI Shadow" — same layered block style as Claude Code
   echo
-  echo -e "${BLUE}${BOLD}    █████ █   █ █████ █   █ █████ █████ █████${RST}"
-  echo -e "${DEEP}      █████ █   █ █████ █   █ █████ █████ █████${RST}"
-  echo -e "${BLUE}${BOLD}    █   █ █   █ █     ██  █ █   █ █     █${RST}"
-  echo -e "${DEEP}      █   █ █   █ █     ██  █ █   █ █     █${RST}"
-  echo -e "${BLUE}${BOLD}    █   █ █   █ █     █ █ █ █   █ █     █${RST}"
-  echo -e "${DEEP}      █   █ █   █ █     █ █ █ █   █ █     █${RST}"
-  echo -e "${BLUE}${BOLD}    █   █ █   █ █████ █  ██ █   █ █████ █████${RST}"
-  echo -e "${DEEP}      █   █ █   █ █████ █  ██ █   █ █████ █████${RST}"
-  echo -e "${BLUE}${BOLD}    █   █ █   █ █     █   █ █   █ █     █${RST}"
-  echo -e "${DEEP}      █   █ █   █ █     █   █ █   █ █     █${RST}"
-  echo -e "${BLUE}${BOLD}    █   █ █   █ █     █   █ █   █ █     █${RST}"
-  echo -e "${DEEP}      █   █ █   █ █     █   █ █   █ █     █${RST}"
-  echo -e "${BLUE}${BOLD}    █████ █████ █████ █   █ █████ █████ █████${RST}"
-  echo -e "${DEEP}      █████ █████ █████ █   █ █████ █████ █████${RST}"
+  echo -e "${SALMON}${BOLD}  ██████╗ ██╗   ██╗███████╗███╗   ██╗██████╗ ███████╗███████╗${RST}"
+  echo -e "${SALMON}${BOLD}  ██╔══██╗██║   ██║██╔════╝████╗  ██║██╔══██╗██╔════╝██╔════╝${RST}"
+  echo -e "${SALMON}${BOLD}  ██║  ██║██║   ██║█████╗  ██╔██╗ ██║██║  ██║█████╗  █████╗  ${RST}"
+  echo -e "${SALMON}${BOLD}  ██║  ██║██║   ██║██╔══╝  ██║╚██╗██║██║  ██║██╔══╝  ██╔══╝  ${RST}"
+  echo -e "${SALMON}${BOLD}  ██████╔╝╚██████╔╝███████╗██║ ╚████║██████╔╝███████╗███████╗${RST}"
+  echo -e "${SALMON}${BOLD}  ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═══╝╚═════╝ ╚══════╝╚══════╝${RST}"
   echo
   echo -e "${DIM}   ───────────────────────────────────────────────────────────${RST}"
   echo -e "${SKY}${BOLD}          D U E N D E E   T U N N E L   T O O L${RST}"
@@ -554,18 +610,28 @@ do_cancel() {
   echo
   echo -e "${CYN}   --- Tünel servisini iptal et ---${RST}"
   echo
-  if ! tunnel_running; then
+  local had_tunnel=0
+  local had_server=0
+  tunnel_running && had_tunnel=1
+  if [[ -f "$SERVER_PID" ]]; then
+    local spid
+    spid="$(tr -d '[:space:]' < "$SERVER_PID" || true)"
+    if [[ -n "$spid" ]] && pid_alive "$spid"; then
+      had_server=1
+    fi
+  fi
+  if [[ "$had_tunnel" -eq 0 && "$had_server" -eq 0 ]]; then
     echo -e "  ${YEL}   Aktif tünel servisi yok.${RST}"
     echo -e "  ${DIM}   İptal edilecek bir şey yok. Başlatmak için menüden [1] kullanın.${RST}"
     echo
     wait_key
     return 0
   fi
-  kill_tunnel
+  kill_tunnel_and_server
   URL=""
   TUNNEL_URL=""
   PREV=""
-  echo -e "  ${GRN}   Tünel iptal edildi. Yeni tünel otomatik başlatılmadı.${RST}"
+  echo -e "  ${GRN}   Tünel ve dev server iptal edildi. Yeni tünel otomatik başlatılmadı.${RST}"
   echo
   wait_key
 }
@@ -651,6 +717,7 @@ do_shutdown() {
   echo
   echo -e "${CYN}   --- Tüm terminaller kapatılıyor ---${RST}"
   kill_all
+  CLEANING_UP=1
   echo -e "${GRN}   Tool'a bağlı terminaller kapatıldı. Çıkılıyor...${RST}"
   echo
   exit 0
@@ -658,6 +725,7 @@ do_shutdown() {
 
 # ---- entry ----
 load_config
+trap cleanup_quiet EXIT INT TERM HUP
 start_watcher
 
 if [[ "${1:-}" != "" ]]; then

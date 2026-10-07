@@ -52,7 +52,9 @@ Initialize-Utf8Console
 $Esc = [char]27
 $RST = "$Esc[0m"; $BOLD = "$Esc[1m"; $DIM = "$Esc[2m"
 $CYN = "$Esc[96m"; $YEL = "$Esc[93m"; $GRN = "$Esc[92m"; $RED = "$Esc[91m"
-$BLUE = "$Esc[38;2;59;130;246m"; $DEEP = "$Esc[38;2;30;64;175m"; $SKY = "$Esc[38;2;147;197;253m"
+$BLUE = "$Esc[38;2;59;130;246m"; $SKY = "$Esc[38;2;147;197;253m"
+# Claude Code–style warm salmon for the DUENDEE banner
+$SALMON = "$Esc[38;2;232;113;90m"
 
 $configPath = Join-Path $Root 'config.json'
 if (-not (Test-Path -LiteralPath $configPath)) {
@@ -152,7 +154,42 @@ function Start-ToolWatcher {
 function Invoke-ExtractUrl {
   $extract = Join-Path $OsDir 'scripts\extract-tunnel-url.ps1'
   if (-not (Test-Path -LiteralPath $extract)) { return }
-  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $extract -Log $LogFile -OutLog $OutLogFile -UrlFile $UrlFile | Out-Null
+  # In-process — avoid flashing a second PowerShell window
+  & $extract -Log $LogFile -OutLog $OutLogFile -UrlFile $UrlFile | Out-Null
+}
+
+function Stop-ProcessTree([int]$ProcessId) {
+  if ($ProcessId -le 0) { return }
+  # /T kills the whole tree (cmd -> npm -> node/vite, etc.)
+  & taskkill.exe /PID $ProcessId /T /F 2>$null | Out-Null
+  try { Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue } catch {}
+}
+
+function Stop-DevServer {
+  $stopped = $false
+  if (Test-Path -LiteralPath $ServerPidFile) {
+    $spidRaw = Get-Content -LiteralPath $ServerPidFile -TotalCount 1 -ErrorAction SilentlyContinue
+    $spid = 0
+    if ([int]::TryParse("$spidRaw".Trim(), [ref]$spid) -and $spid -gt 0) {
+      if (Test-PidAlive $spid) {
+        Stop-ProcessTree $spid
+        $stopped = $true
+        Write-UiLine "  $GRN   Dev server durduruldu - PID $spid.$RST"
+      }
+    }
+    Remove-Item -LiteralPath $ServerPidFile -Force -ErrorAction SilentlyContinue
+  }
+  # Fallback: kill hidden cmd/npm trees started for this project
+  $devPattern = "*cd /d $Project*"
+  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like $devPattern } |
+    ForEach-Object {
+      Stop-ProcessTree ([int]$_.ProcessId)
+      $stopped = $true
+    }
+  if (-not $stopped) {
+    Write-UiLine "  $DIM   Dev server zaten kapalı.$RST"
+  }
 }
 
 function Get-TunnelUrl {
@@ -194,59 +231,60 @@ function Test-TunnelRunning {
 function Stop-TunnelOnly {
   $tpid = Read-TunnelPid
   if ($tpid -and (Test-PidAlive $tpid)) {
-    Stop-Process -Id $tpid -Force -ErrorAction SilentlyContinue
+    Stop-ProcessTree $tpid
     Write-UiLine "  $GRN   Tünel durduruldu - PID $tpid.$RST"
   }
-  Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object { Stop-ProcessTree $_.Id }
   Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue
+}
+
+function Stop-TunnelAndDevServer {
+  # Used by [4] cancel — stop tunnel + the tool-started dev server
+  if (Test-TunnelRunning) {
+    Stop-TunnelOnly
+  } else {
+    Write-UiLine "  $YEL   Aktif tünel servisi yok.$RST"
+    Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object { Stop-ProcessTree $_.Id }
+    Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue
+  }
+  Stop-DevServer
 }
 
 function Stop-AllToolProcesses {
   $tpid = Read-TunnelPid
   if ($tpid -and (Test-PidAlive $tpid)) {
-    Stop-Process -Id $tpid -Force -ErrorAction SilentlyContinue
+    Stop-ProcessTree $tpid
     Write-UiLine "  $GRN   Tünel servisi durduruldu - PID $tpid.$RST"
   } elseif ($tpid) {
     Write-UiLine "  $DIM   PID $tpid zaten çalışmıyor.$RST"
   } else {
     Write-UiLine "  $YEL   Tanımlı çalışan tünel servisi yok.$RST"
   }
-  Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-  if (Test-Path -LiteralPath $ServerPidFile) {
-    $spidRaw = Get-Content -LiteralPath $ServerPidFile -TotalCount 1 -ErrorAction SilentlyContinue
-    $spid = 0
-    if ([int]::TryParse("$spidRaw".Trim(), [ref]$spid) -and (Test-PidAlive $spid)) {
-      Stop-Process -Id $spid -Force -ErrorAction SilentlyContinue
-      Write-UiLine "  $GRN   Dev server penceresi kapatıldı - PID $spid.$RST"
-    } else {
-      Write-UiLine "  $DIM   Dev server zaten kapalı.$RST"
-    }
-    Remove-Item -LiteralPath $ServerPidFile -Force -ErrorAction SilentlyContinue
-  }
+  Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object { Stop-ProcessTree $_.Id }
+  Stop-DevServer
   Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue
   Get-Process PhotosApp -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath (Join-Path $env:TEMP 'duendee-whatsapp-qr.png') -Force -ErrorAction SilentlyContinue
 }
 
 function Show-Logo {
+  # FIGlet "ANSI Shadow" — same layered block style as Claude Code
   $rows = @(
-    '##### #   # ##### #   # ##### ##### #####',
-    '#   # #   # #     ##  # #   # #     #',
-    '#   # #   # #     # # # #   # #     #',
-    '#   # #   # ##### #  ## #   # ##### #####',
-    '#   # #   # #     #   # #   # #     #',
-    '#   # #   # #     #   # #   # #     #',
-    '##### ##### ##### #   # ##### ##### #####'
+    '██████╗ ██╗   ██╗███████╗███╗   ██╗██████╗ ███████╗███████╗',
+    '██╔══██╗██║   ██║██╔════╝████╗  ██║██╔══██╗██╔════╝██╔════╝',
+    '██║  ██║██║   ██║█████╗  ██╔██╗ ██║██║  ██║█████╗  █████╗  ',
+    '██║  ██║██║   ██║██╔══╝  ██║╚██╗██║██║  ██║██╔══╝  ██╔══╝  ',
+    '██████╔╝╚██████╔╝███████╗██║ ╚████║██████╔╝███████╗███████╗',
+    '╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═══╝╚═════╝ ╚══════╝╚══════╝'
   )
   Write-UiLine ''
   foreach ($r in $rows) {
-    Write-UiLine ("$BLUE$BOLD    $r$RST")
-    Write-UiLine ("$DEEP      $r$RST")
+    Write-UiLine ("$SALMON$BOLD  $r$RST")
   }
   Write-UiLine ''
-  Write-UiLine "$DIM   -----------------------------------------------------------$RST"
+  Write-UiLine "$DIM   ───────────────────────────────────────────────────────────$RST"
   Write-UiLine "$SKY$BOLD          D U E N D E E   T U N N E L   T O O L$RST"
-  Write-UiLine "$DIM   -----------------------------------------------------------$RST"
+  Write-UiLine "$DIM   ───────────────────────────────────────────────────────────$RST"
   Write-UiLine ''
 }
 
@@ -358,7 +396,12 @@ function Invoke-Start {
         }
       } finally { Pop-Location }
     }
-    $p = Start-Process -FilePath cmd.exe -ArgumentList '/C', "cd /d `"$Project`" & npm run dev" -WindowStyle Minimized -PassThru
+    $serverOut = Join-Path $StateDir 'server.out.log'
+    $serverErr = Join-Path $StateDir 'server.err.log'
+    $p = Start-Process -FilePath cmd.exe `
+      -ArgumentList '/C', "cd /d `"$Project`" & npm run dev" `
+      -WindowStyle Hidden -PassThru `
+      -RedirectStandardOutput $serverOut -RedirectStandardError $serverErr
     if ($p) { Set-Content -LiteralPath $ServerPidFile -Value $p.Id -Encoding Ascii }
     $ready = $false
     for ($i = 1; $i -le 20; $i++) {
@@ -381,7 +424,7 @@ function Invoke-Start {
   Remove-Item -LiteralPath $UrlFile, $LogFile, $OutLogFile -Force -ErrorAction SilentlyContinue
   $target = "http://localhost:$Port"
   $tp = Start-Process -FilePath $cf -ArgumentList @('tunnel', '--url', $target, '--no-autoupdate') `
-    -WindowStyle Minimized -PassThru -RedirectStandardOutput $OutLogFile -RedirectStandardError $LogFile
+    -WindowStyle Hidden -PassThru -RedirectStandardOutput $OutLogFile -RedirectStandardError $LogFile
   if (-not $tp) {
     Write-UiLine "  $RED$BOLD[HATA]$RST Tünel başlatılamadı. Log: $LogFile"
     Complete-Action
@@ -498,14 +541,21 @@ function Invoke-Cancel {
   Write-UiLine ''
   Write-UiLine "$CYN   --- Tünel servisini iptal et ---$RST"
   Write-UiLine ''
-  if (-not (Test-TunnelRunning)) {
+  $hadTunnel = Test-TunnelRunning
+  $hadServer = $false
+  if (Test-Path -LiteralPath $ServerPidFile) {
+    $spidRaw = Get-Content -LiteralPath $ServerPidFile -TotalCount 1 -ErrorAction SilentlyContinue
+    $spid = 0
+    if ([int]::TryParse("$spidRaw".Trim(), [ref]$spid) -and (Test-PidAlive $spid)) { $hadServer = $true }
+  }
+  if (-not $hadTunnel -and -not $hadServer) {
     Write-UiLine "  $YEL   Aktif tünel servisi yok.$RST"
     Write-UiLine "  $DIM   İptal edilecek bir şey yok. Başlatmak için menüden [1] kullanın.$RST"
     Complete-Action
     return
   }
-  Stop-TunnelOnly
-  Write-UiLine "  $GRN   Tünel iptal edildi. Yeni tünel otomatik başlatılmadı.$RST"
+  Stop-TunnelAndDevServer
+  Write-UiLine "  $GRN   Tünel ve dev server iptal edildi. Yeni tünel otomatik başlatılmadı.$RST"
   Complete-Action
 }
 
@@ -561,27 +611,66 @@ function Invoke-Shutdown {
   exit 0
 }
 
-Start-ToolWatcher
-
-switch ($Action) {
-  '1' { Invoke-Start; exit 0 }
-  '2' { Invoke-Status; exit 0 }
-  '3' { Invoke-CopyLink; exit 0 }
-  '4' { Invoke-Cancel; exit 0 }
-  '5' { Invoke-Shutdown }
-  '6' { Invoke-Autostart; exit 0 }
+# Quiet cleanup when the main console is closed or Ctrl+C ends the process.
+# The hidden tunnel-watcher also cleans up if this process dies abruptly.
+$script:CleanupDone = $false
+function Invoke-ExitCleanup {
+  if ($script:CleanupDone) { return }
+  $script:CleanupDone = $true
+  try {
+    $tpid = Read-TunnelPid
+    if ($tpid -and (Test-PidAlive $tpid)) { Stop-ProcessTree $tpid }
+    Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object { Stop-ProcessTree $_.Id }
+    if (Test-Path -LiteralPath $ServerPidFile) {
+      $spidRaw = Get-Content -LiteralPath $ServerPidFile -TotalCount 1 -ErrorAction SilentlyContinue
+      $spid = 0
+      if ([int]::TryParse("$spidRaw".Trim(), [ref]$spid) -and $spid -gt 0) { Stop-ProcessTree $spid }
+      Remove-Item -LiteralPath $ServerPidFile -Force -ErrorAction SilentlyContinue
+    }
+    $devPattern = "*cd /d $Project*"
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+      Where-Object { $_.CommandLine -like $devPattern } |
+      ForEach-Object { Stop-ProcessTree ([int]$_.ProcessId) }
+    Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue
+  } catch {}
 }
 
-while ($true) {
-  Show-Menu
-  $choice = Get-Choice '123456'
-  Write-UiLine ''
-  switch ($choice) {
-    '1' { Invoke-Start }
-    '2' { Invoke-Status }
-    '3' { Invoke-CopyLink }
-    '4' { Invoke-Cancel }
+try {
+  [Console]::TreatControlCAsInput = $false
+  $null = [Console]::add_CancelKeyPress({
+      param($sender, $e)
+      $e.Cancel = $true
+      Invoke-ExitCleanup
+      [Environment]::Exit(0)
+    })
+} catch {}
+
+Start-ToolWatcher
+
+try {
+  switch ($Action) {
+    '1' { Invoke-Start; exit 0 }
+    '2' { Invoke-Status; exit 0 }
+    '3' { Invoke-CopyLink; exit 0 }
+    '4' { Invoke-Cancel; exit 0 }
     '5' { Invoke-Shutdown }
-    '6' { Invoke-Autostart }
+    '6' { Invoke-Autostart; exit 0 }
   }
+
+  while ($true) {
+    Show-Menu
+    $choice = Get-Choice '123456'
+    Write-UiLine ''
+    switch ($choice) {
+      '1' { Invoke-Start }
+      '2' { Invoke-Status }
+      '3' { Invoke-CopyLink }
+      '4' { Invoke-Cancel }
+      '5' { Invoke-Shutdown }
+      '6' { Invoke-Autostart }
+    }
+  }
+} finally {
+  # Window close / normal exit path — watcher covers hard kills
+  Invoke-ExitCleanup
 }
