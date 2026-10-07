@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Windows tunnel launcher for Duendee with Cloudflare + WhatsApp link notifications",
+  "description": "Windows/Linux tunnel launcher for Duendee with Cloudflare + WhatsApp link notifications",
   "scripts": {
     "whatsapp": "node scripts/send-whatsapp.js"
   },
