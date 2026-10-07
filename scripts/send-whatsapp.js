@@ -43,9 +43,15 @@ function showQr(qr) {
   qrcodeTerminal.generate(qr, { small: true });
   QRCode.toFile(qrImage, qr, { width: 400, margin: 2 })
     .then(() => {
-      console.log('\n  QR pencerede acildi. Acilmadiysa: start ' + qrImage);
+      console.log('\n  QR pencerede acildi. Acilmadiysa: ' + qrImage);
       try {
-        spawn('cmd', ['/c', 'start', '', qrImage], { detached: true, stdio: 'ignore' }).unref();
+        if (process.platform === 'win32') {
+          spawn('cmd', ['/c', 'start', '', qrImage], { detached: true, stdio: 'ignore' }).unref();
+        } else if (process.platform === 'darwin') {
+          spawn('open', [qrImage], { detached: true, stdio: 'ignore' }).unref();
+        } else {
+          spawn('xdg-open', [qrImage], { detached: true, stdio: 'ignore' }).unref();
+        }
       } catch {}
     })
     .catch(() => {});
