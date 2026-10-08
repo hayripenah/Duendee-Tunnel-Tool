@@ -451,6 +451,26 @@ send_tunnel_whatsapp() {
   fi
 }
 
+retract_tunnel_whatsapp() {
+  local wa_js="${WHATSAPP_JS:-${ROOT}/scripts/send-whatsapp.js}"
+  local sent_file="${ROOT}/.whatsapp-session/sent-links.json"
+  local creds="${ROOT}/.whatsapp-session/creds.json"
+  [[ -f "$wa_js" && -f "$sent_file" && -f "$creds" ]] || return 0
+  if [[ ! -s "$sent_file" ]] || grep -q '^\[\][[:space:]]*$' "$sent_file"; then
+    return 0
+  fi
+  command -v node >/dev/null 2>&1 || return 0
+  ensure_whatsapp_deps || return 0
+  echo "  Eski tunnel linki mesajlari kaldiriliyor..."
+  local ec=0
+  DT_WA_ACTION=retract DT_WA_TIMEOUT_MS="${DT_WA_TIMEOUT_MS:-45000}" node "$wa_js" || ec=$?
+  if (( ec != 0 )); then
+    echo -e "  ${YEL}   Eski WhatsApp link mesaji kaldirilamadi (çıkış ${ec}).${RST}"
+  else
+    echo -e "  ${GRN}   Gecersiz tunnel linki mesaji kaldirildi.${RST}"
+  fi
+}
+
 find_cloudflared() {
   if [[ -n "${DT_CF:-}" ]]; then
     CF="$DT_CF"
@@ -735,6 +755,7 @@ cleanup_quiet() {
     return 0
   fi
   CLEANING_UP=1
+  DT_WA_TIMEOUT_MS=20000 retract_tunnel_whatsapp || true
   read_pid
   if [[ -n "${TPID:-}" ]] && pid_alive "$TPID"; then
     kill -TERM "-$TPID" 2>/dev/null || kill -TERM "$TPID" 2>/dev/null || true
@@ -1055,6 +1076,7 @@ do_cancel() {
   URL=""
   TUNNEL_URL=""
   PREV=""
+  retract_tunnel_whatsapp
   echo -e "  ${GRN}   Tünel ve dev server iptal edildi. Yeni tünel otomatik başlatılmadı.${RST}"
   echo
   wait_key
@@ -1437,6 +1459,7 @@ do_shutdown() {
   clear
   echo
   echo -e "${CYN}   --- Tüm terminaller kapatılıyor ---${RST}"
+  retract_tunnel_whatsapp
   kill_all
   CLEANING_UP=1
   echo -e "${GRN}   Tool'a bağlı terminaller kapatıldı. Çıkılıyor...${RST}"

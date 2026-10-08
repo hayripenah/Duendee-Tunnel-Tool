@@ -1,4 +1,4 @@
-import { default as makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
+import { default as makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers } from '@whiskeysockets/baileys';
 import qrcodeTerminal from 'qrcode-terminal';
 import QRCode from 'qrcode';
 import pino from 'pino';
@@ -41,6 +41,7 @@ if (!fs.existsSync(configPath)) {
 
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 const urlFile = path.join(toolRoot, '.tunnelstate', 'tunnel.url');
+const action = String(process.env.DT_WA_ACTION || 'send').trim().toLowerCase() === 'retract' ? 'retract' : 'send';
 
 function resolveUrl(raw) {
   let fromFile = '';
@@ -56,17 +57,22 @@ function resolveUrl(raw) {
   return String(value || '').replace(/[\r\n\s]+/g, '').replace(/\/+$/, '');
 }
 
-const url = resolveUrl(process.argv[2] || process.env.DT_WA_URL || '');
+function sameUrl(a, b) {
+  const norm = (value) => String(value || '').trim().replace(/\/+$/, '').toLowerCase();
+  return norm(a) !== '' && norm(a) === norm(b);
+}
+
+const url = action === 'retract' ? '' : resolveUrl(process.argv[2] || process.env.DT_WA_URL || '');
 const phone = String(process.argv[3] || process.env.DT_WA_PHONE || config.targetPhone || '').trim();
 
-if (!url || !/^https:\/\//i.test(url)) {
+if (action === 'send' && (!url || !/^https:\/\//i.test(url))) {
   fail(
     'Kullanim / Usage: node send-whatsapp.js <tunnel-url|tunnel.url-file> [phone]\n' +
       'URL yok veya gecersiz / missing or invalid URL.'
   );
 }
 
-if (!phone) {
+if (action === 'send' && !phone) {
   fail(
     'Hedef telefon yok / No target phone.\n' +
       'scripts/whatsapp-config.json icinde targetPhone ayarlayin veya arguman verin.\n' +
@@ -77,12 +83,29 @@ if (!phone) {
 const sessionDir = path.isAbsolute(config.sessionDir)
   ? config.sessionDir
   : path.join(toolRoot, config.sessionDir || '.whatsapp-session');
+const sentPath = path.join(sessionDir, 'sent-links.json');
 const qrImage = path.join(os.tmpdir(), 'duendee-whatsapp-qr.png');
 const credsPath = path.join(sessionDir, 'creds.json');
 const hasSession = fs.existsSync(credsPath);
 
-const CONNECT_TIMEOUT_MS = 120000;
+const CONNECT_TIMEOUT_MS = Number(process.env.DT_WA_TIMEOUT_MS) || (action === 'retract' ? 45000 : 90000);
 const MAX_RECONNECT = 4;
+const READY_FALLBACK_MS = 5000;
+const SEND_DELAY_MS = 800;
+
+function loadSent() {
+  try {
+    const rows = JSON.parse(fs.readFileSync(sentPath, 'utf8'));
+    return Array.isArray(rows) ? rows.filter((row) => row && row.id && row.jid) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveSent(rows) {
+  fs.mkdirSync(sessionDir, { recursive: true });
+  fs.writeFileSync(sentPath, JSON.stringify(rows, null, 2));
+}
 
 function showQr(qr) {
   console.log('');
@@ -124,7 +147,7 @@ async function resolveJid(sock, rawPhone) {
   }
   const bare = digits + '@s.whatsapp.net';
   try {
-    const results = await sock.onWhatsApp(digits);
+    const results = await sock.onWhatsApp(bare);
     const hit = Array.isArray(results) ? results.find((r) => r && (r.exists || r.jid)) : null;
     if (hit?.jid) return hit.jid;
   } catch {
@@ -133,27 +156,90 @@ async function resolveJid(sock, rawPhone) {
   return bare;
 }
 
+async function waitUntilUsable(sock) {
+  const start = Date.now();
+  while (Date.now() - start < 8000) {
+    if (sock?.user?.id) return;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+}
+
+async function deleteStored(sock, keepUrl) {
+  const rows = loadSent();
+  const keep = [];
+  for (const row of rows) {
+    if (keepUrl && sameUrl(row.url, keepUrl)) {
+      keep.push(row);
+      continue;
+    }
+    try {
+      await sock.sendMessage(row.jid, {
+        delete: { remoteJid: row.jid, fromMe: true, id: row.id }
+      });
+      console.log('  Eski link mesaji kaldirildi: ' + (row.url || row.id));
+    } catch (err) {
+      console.error('  Mesaj kaldirilamadi, sonra tekrar denenecek: ' + (err?.message || err));
+      keep.push(row);
+    }
+  }
+  saveSent(keep);
+  return keep;
+}
+
 async function deliver(sock) {
+  await waitUntilUsable(sock);
+  try {
+    await sock.sendPresenceUpdate('available');
+  } catch {
+    /* presence is optional */
+  }
+  await deleteStored(sock, url);
+  const already = loadSent().some((row) => sameUrl(row.url, url));
+  if (already) {
+    console.log('WhatsApp mesaji zaten aktif linki tasiyor / already current: ' + url);
+    return;
+  }
   const jid = await resolveJid(sock, phone);
   const message = String(config.messageTemplate || 'Duendee tunnel linki: {url}').replace('{url}', url);
-  await sock.sendMessage(jid, { text: message });
+  const sentMsg = await sock.sendMessage(jid, { text: message });
+  const id = sentMsg?.key?.id;
+  if (!id) {
+    throw new Error('Mesaj anahtari donmedi / WhatsApp did not return a message id');
+  }
+  const rows = loadSent().filter((row) => !sameUrl(row.url, url));
+  rows.push({
+    id,
+    jid: sentMsg.key.remoteJid || jid,
+    url,
+    at: new Date().toISOString()
+  });
+  saveSent(rows);
   console.log('WhatsApp mesaji gonderildi / Message sent -> ' + phone + ' | ' + url);
 }
 
 async function main() {
+  const stored = loadSent();
+  if (action === 'retract' && stored.length === 0) {
+    console.log('  Kaldirilacak eski link mesaji yok.');
+    return;
+  }
+  if (action === 'retract' && !hasSession) {
+    fail('WhatsApp oturumu yok; eski link mesaji kaldirilamadi.');
+  }
+
   fs.mkdirSync(sessionDir, { recursive: true });
 
   if (hasSession) {
     console.log('  WhatsApp oturumu bulundu, baglaniliyor...');
-    console.log('  Existing WhatsApp session found, connecting...');
   } else {
     console.log('  Ilk kurulum: QR taramaniz istenecek (oturum sonra saklanir).');
-    console.log('  First run: scan QR once; session is saved for later sends.');
   }
 
   let finished = false;
-  let sent = false;
+  let delivered = false;
+  let delivering = false;
   let attempts = 0;
+  let generation = 0;
   let sock = null;
   let timer = null;
 
@@ -190,13 +276,48 @@ async function main() {
         sessionDir +
         '"   (Linux)\n' +
         'Sonra tekrar: node scripts/send-whatsapp.js "' +
-        url +
+        (url || '') +
         '"'
     );
   }, CONNECT_TIMEOUT_MS);
 
+  const runDelivery = async (currentSock, gen) => {
+    if (finished || delivered || delivering || gen !== generation) return;
+    delivering = true;
+    try {
+      await waitUntilUsable(currentSock);
+      if (action === 'retract') {
+        await deleteStored(currentSock, '');
+        delivered = true;
+        const left = loadSent().length;
+        finish(left === 0 ? 0 : 1, left === 0 ? 'Eski tunnel linki mesajlari kaldirildi.' : 'Bazi mesajlar kaldirilamadi.');
+        return;
+      }
+      await deliver(currentSock);
+      delivered = true;
+      finish(0);
+    } catch (err) {
+      delivering = false;
+      if (finished || gen !== generation) return;
+      const text = err?.message || String(err);
+      if (/connection closed|timed out|not-authorized|stream errored/i.test(text) && attempts < MAX_RECONNECT) {
+        console.log('  Gonderim hazir degil, yeniden denenecek: ' + text);
+        return;
+      }
+      finish(
+        1,
+        'Mesaj gonderilemedi / send failed: ' +
+          text +
+          '\nKontrol: targetPhone dogru mu? WhatsApp oturumu bagli mi?\n' +
+          'Check targetPhone in scripts/whatsapp-config.json and re-scan QR if needed.'
+      );
+    }
+  };
+
   const connect = async () => {
-    if (finished || sent) return;
+    if (finished || delivered) return;
+    const gen = ++generation;
+    delivering = false;
 
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
     let version;
@@ -206,48 +327,72 @@ async function main() {
       version = undefined;
     }
 
-    sock = makeWASocket({
+    const current = makeWASocket({
       auth: state,
       version,
       logger: pino({ level: 'silent' }),
-      browser: ['Duendee Tunnel Tool', 'Chrome', '120.0.0'],
+      browser: Browsers.ubuntu('Chrome'),
       syncFullHistory: false,
-      markOnlineOnConnect: false,
-      printQRInTerminal: false
+      markOnlineOnConnect: true
     });
+    sock = current;
 
-    sock.ev.on('creds.update', saveCreds);
+    let socketOpen = false;
+    let notificationsReady = false;
+    let readyTimer = null;
 
-    sock.ev.on('connection.update', async (update) => {
-      if (finished) return;
+    const armDelivery = () => {
+      if (finished || delivered || delivering || gen !== generation) return;
+      if (!socketOpen || !notificationsReady) return;
+      if (readyTimer) {
+        clearTimeout(readyTimer);
+        readyTimer = null;
+      }
+      readyTimer = setTimeout(() => {
+        readyTimer = null;
+        void runDelivery(current, gen);
+      }, SEND_DELAY_MS);
+    };
+
+    current.ev.on('creds.update', saveCreds);
+
+    current.ev.on('connection.update', (update) => {
+      if (finished || gen !== generation) return;
       const { connection, lastDisconnect, qr } = update;
 
-      if (qr && !sent) showQr(qr);
+      if (qr && action === 'send' && !delivered) showQr(qr);
 
-      if (connection === 'open' && !sent) {
-        sent = true;
-        try {
-          await deliver(sock);
-          finish(0);
-        } catch (err) {
-          finish(
-            1,
-            'Mesaj gonderilemedi / send failed: ' +
-              (err?.message || err) +
-              '\nKontrol: targetPhone dogru mu? WhatsApp oturumu bagli mi?\n' +
-              'Check targetPhone in scripts/whatsapp-config.json and re-scan QR if needed.'
-          );
-        }
-        return;
+      if (update.receivedPendingNotifications) {
+        notificationsReady = true;
+        armDelivery();
+      }
+
+      if (connection === 'open') {
+        socketOpen = true;
+        if (readyTimer) clearTimeout(readyTimer);
+        readyTimer = setTimeout(() => {
+          readyTimer = null;
+          if (gen !== generation || finished || delivered) return;
+          notificationsReady = true;
+          armDelivery();
+        }, READY_FALLBACK_MS);
+        armDelivery();
       }
 
       if (connection === 'close') {
-        // Successful send already called finish(); ignore teardown close.
-        if (sent || finished) return;
+        socketOpen = false;
+        notificationsReady = false;
+        if (readyTimer) {
+          clearTimeout(readyTimer);
+          readyTimer = null;
+        }
+        if (delivered || finished) return;
+        delivering = false;
 
         const code = lastDisconnect?.error?.output?.statusCode;
         const loggedOut = code === DisconnectReason.loggedOut;
         const badSession = code === DisconnectReason.badSession;
+        const restarting = code === DisconnectReason.restartRequired;
 
         if (loggedOut || badSession) {
           console.error(
@@ -264,7 +409,7 @@ async function main() {
           return;
         }
 
-        attempts += 1;
+        if (!restarting) attempts += 1;
         if (attempts > MAX_RECONNECT) {
           finish(1, 'Baglanti ' + MAX_RECONNECT + ' kez kesildi / connection dropped repeatedly.');
           return;
@@ -272,7 +417,7 @@ async function main() {
         console.log('  Yeniden baglaniliyor (' + attempts + '/' + MAX_RECONNECT + ')...');
         setTimeout(() => {
           connect().catch((err) => finish(1, 'WhatsApp baslatilamadi: ' + (err?.message || err)));
-        }, 2000);
+        }, restarting ? 500 : 2000);
       }
     });
   };

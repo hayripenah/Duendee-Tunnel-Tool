@@ -600,6 +600,43 @@ function Send-TunnelWhatsApp([string]$PublicUrl) {
   }
 }
 
+function Invoke-RetractWhatsApp {
+  $waJs = Join-Path $Root 'scripts\send-whatsapp.js'
+  $sentFile = Join-Path $Root '.whatsapp-session\sent-links.json'
+  $sessionCreds = Join-Path $Root '.whatsapp-session\creds.json'
+  if (-not (Test-Path -LiteralPath $waJs) -or -not (Test-Path -LiteralPath $sentFile) -or -not (Test-Path -LiteralPath $sessionCreds)) {
+    return
+  }
+  $raw = Get-Content -LiteralPath $sentFile -Raw -ErrorAction SilentlyContinue
+  if ([string]::IsNullOrWhiteSpace($raw) -or $raw.Trim() -eq '[]') { return }
+  $node = Find-NodeExe
+  if (-not $node) { return }
+  if (-not (Ensure-WhatsAppDeps)) { return }
+  Write-UiLine "  Eski tunnel linki mesajlari kaldiriliyor..."
+  $prevEa = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  $prevNative = $null
+  if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+    $prevNative = $PSNativeCommandUseErrorActionPreference
+    $PSNativeCommandUseErrorActionPreference = $false
+  }
+  try {
+    $env:DT_WA_ACTION = 'retract'
+    if (-not $env:DT_WA_TIMEOUT_MS) { $env:DT_WA_TIMEOUT_MS = '45000' }
+    & $node $waJs
+    if ($LASTEXITCODE -ne 0) {
+      Write-UiLine "  $YEL   Eski WhatsApp link mesaji kaldirilamadi (çıkış $LASTEXITCODE).$RST"
+    } else {
+      Write-UiLine "  $GRN   Gecersiz tunnel linki mesaji kaldirildi.$RST"
+    }
+  } finally {
+    Remove-Item Env:DT_WA_ACTION -ErrorAction SilentlyContinue
+    Remove-Item Env:DT_WA_TIMEOUT_MS -ErrorAction SilentlyContinue
+    $ErrorActionPreference = $prevEa
+    if ($null -ne $prevNative) { $PSNativeCommandUseErrorActionPreference = $prevNative }
+  }
+}
+
 function Find-Cloudflared {
   if ($env:DT_CF -and (Test-Path -LiteralPath $env:DT_CF)) { return $env:DT_CF }
   $cmd = Get-Command cloudflared -ErrorAction SilentlyContinue
@@ -1049,6 +1086,7 @@ function Invoke-Cancel {
     return
   }
   Stop-TunnelAndDevServer
+  Invoke-RetractWhatsApp
   Write-UiLine "  $GRN   Tünel ve dev server iptal edildi. Yeni tünel otomatik başlatılmadı.$RST"
   Complete-Action
 }
@@ -1438,6 +1476,7 @@ function Invoke-Shutdown {
   Initialize-Utf8Console
   Write-UiLine ''
   Write-UiLine "$CYN   --- Tüm terminaller kapatılıyor ---$RST"
+  Invoke-RetractWhatsApp
   Stop-AllToolProcesses
   Write-UiLine "  $GRN   Tool'a bağlı terminaller kapatıldı. Çıkılıyor...$RST"
   Write-UiLine ''
@@ -1467,6 +1506,9 @@ function Invoke-ExitCleanup {
         ForEach-Object { Stop-ProcessTree ([int]$_.ProcessId) }
     }
     Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue
+    $env:DT_WA_TIMEOUT_MS = '20000'
+    Invoke-RetractWhatsApp
+    Remove-Item Env:DT_WA_TIMEOUT_MS -ErrorAction SilentlyContinue
   } catch {}
 }
 
