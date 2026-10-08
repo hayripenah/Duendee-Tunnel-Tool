@@ -65,21 +65,16 @@ ensure_path_in_rc() {
 
 write_launcher() {
   local dest="$1"
-  # Portable launcher: finds install dir; printf avoids CRLF from Windows checkouts.
-  {
-    printf '%s\n' '#!/usr/bin/env bash'
-    printf '%s\n' 'set -euo pipefail'
-    printf '%s\n' "ROOT=\"${INSTALL_DIR}\""
-    printf '%s\n' 'TOOL="${ROOT}/linux/duendee-tunnel-tool.sh"'
-    printf '%s\n' 'if [[ ! -f "$TOOL" ]]; then'
-    printf '%s\n' '  echo "Duendee Tunnel Tool not found at: $TOOL" >&2'
-    printf '%s\n' '  echo "Re-run the installer, or set DT_INSTALL_DIR." >&2'
-    printf '%s\n' '  exit 1'
-    printf '%s\n' 'fi'
-    printf '%s\n' 'cd "$ROOT"'
-    printf '%s\n' 'exec bash "$TOOL" "$@"'
-  } >"$dest"
-  chmod +x "$dest"
+  local src="${INSTALL_DIR}/linux/stable-launch.sh"
+  local pointer_dir="${XDG_CONFIG_HOME:-$HOME/.config}/duendee-tunnel"
+  if [[ ! -f "$src" ]]; then
+    echo "ERROR: missing ${src}" >&2
+    return 1
+  fi
+  mkdir -p "$pointer_dir" "$(dirname "$dest")"
+  cp "$src" "$dest"
+  chmod +x "$dest" "$src" 2>/dev/null || true
+  printf '%s\n' "$INSTALL_DIR" >"${pointer_dir}/root"
 }
 
 install_shim_and_path() {

@@ -102,10 +102,7 @@ function Install-ShimAndUserPath {
     $waShim = Join-Path $windowsApps 'duendee-tunnel.cmd'
     $waBody = @(
       '@echo off',
-      'setlocal',
-      ('set "TOOL_ROOT={0}"' -f $Root),
-      'cd /d "%TOOL_ROOT%"',
-      'call "%TOOL_ROOT%\windows\Duendee Tunnel Tool.bat" %*'
+      'call "%LOCALAPPDATA%\DuendeeTunnel\launch.cmd" %*'
     ) -join "`r`n"
     Set-Content -Path $waShim -Value $waBody -Encoding ASCII
   }
@@ -214,15 +211,27 @@ try {
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+$stableDir = Join-Path $env:LOCALAPPDATA 'DuendeeTunnel'
+New-Item -ItemType Directory -Force -Path $stableDir | Out-Null
+$stableSrc = Join-Path $InstallDir 'windows\stable-launch.ps1'
+if (Test-Path -LiteralPath $stableSrc) {
+  Copy-Item -LiteralPath $stableSrc -Destination (Join-Path $stableDir 'launch.ps1') -Force
+}
+$stableCmd = Join-Path $stableDir 'launch.cmd'
+@(
+  '@echo off',
+  'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0launch.ps1" %*'
+) -join "`r`n" | Set-Content -LiteralPath $stableCmd -Encoding ASCII
+Set-Content -LiteralPath (Join-Path $stableDir 'root.txt') -Value $InstallDir -Encoding ASCII
+
 if (-not $NoDesktopShortcut) {
   try {
     $desktop = [Environment]::GetFolderPath('Desktop')
     $lnkPath = Join-Path $desktop 'Duendee Tunnel Tool.lnk'
-    $bat = Join-Path $InstallDir 'windows\Duendee Tunnel Tool.bat'
     $w = New-Object -ComObject WScript.Shell
     $sc = $w.CreateShortcut($lnkPath)
-    $sc.TargetPath = $bat
-    $sc.WorkingDirectory = $InstallDir
+    $sc.TargetPath = $stableCmd
+    $sc.WorkingDirectory = $stableDir
     $ico = Join-Path $InstallDir 'windows\Duendee Tunnel Logo.ico'
     if (Test-Path $ico) { $sc.IconLocation = $ico }
     $sc.Description = 'Duendee Tunnel Tool'

@@ -1025,8 +1025,8 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/env bash "${OS_DIR}/duendee-tunnel-tool.sh" ${arg}
-WorkingDirectory=${ROOT}
+ExecStart=${HOME}/.local/bin/duendee-tunnel ${arg}
+WorkingDirectory=${HOME}
 Restart=no
 
 [Install]
@@ -1038,6 +1038,25 @@ EOF
     return 0
   fi
   return 1
+}
+
+register_stable_launch() {
+  local cfg_dir="${XDG_CONFIG_HOME:-$HOME/.config}/duendee-tunnel"
+  local shim="${HOME}/.local/bin/duendee-tunnel"
+  local src="${OS_DIR}/stable-launch.sh"
+  mkdir -p "$cfg_dir" "${HOME}/.local/bin"
+  printf '%s\n' "$ROOT" >"${cfg_dir}/root"
+  if [[ -f "$src" ]]; then
+    cp "$src" "$shim"
+    chmod +x "$shim" "$src" 2>/dev/null || true
+  fi
+  if [[ -f "$AUTO_UNIT" ]]; then
+    local arg=""
+    if grep -q 'boot-tunnel' "$AUTO_UNIT"; then
+      arg="boot-tunnel"
+    fi
+    write_autostart_unit "$arg" || true
+  fi
 }
 
 disable_autostart() {
@@ -1334,6 +1353,7 @@ do_uninstall() {
   done
   remove_shim_file "${HOME}/.local/bin/duendee-tunnel"
   remove_shim_file /usr/local/bin/duendee-tunnel
+  rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/duendee-tunnel" 2>/dev/null || true
 
   if [[ "$mode" == "2" ]]; then
     remove_dependencies
@@ -1388,6 +1408,7 @@ fi
 
 load_config
 trap cleanup_quiet EXIT INT TERM HUP
+register_stable_launch || true
 start_watcher
 
 if [[ "${1:-}" == "boot-tunnel" ]]; then

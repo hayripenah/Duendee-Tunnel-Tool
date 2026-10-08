@@ -407,14 +407,62 @@ function Get-AutoMode {
   return 'tool'
 }
 
+function Get-StableLaunchDir {
+  Join-Path $env:LOCALAPPDATA 'DuendeeTunnel'
+}
+
+function Install-StableLauncher {
+  $dir = Get-StableLaunchDir
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  $src = Join-Path $OsDir 'stable-launch.ps1'
+  if (Test-Path -LiteralPath $src) {
+    Copy-Item -LiteralPath $src -Destination (Join-Path $dir 'launch.ps1') -Force
+  }
+  $cmd = Join-Path $dir 'launch.cmd'
+  @(
+    '@echo off',
+    'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0launch.ps1" %*'
+  ) -join "`r`n" | Set-Content -LiteralPath $cmd -Encoding ASCII
+  Set-Content -LiteralPath (Join-Path $dir 'root.txt') -Value (Get-NormalizedDir $Root) -Encoding ASCII
+
+  $windowsApps = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps'
+  if (Test-Path -LiteralPath $windowsApps) {
+    @(
+      '@echo off',
+      'call "%LOCALAPPDATA%\DuendeeTunnel\launch.cmd" %*'
+    ) -join "`r`n" | Set-Content -LiteralPath (Join-Path $windowsApps 'duendee-tunnel.cmd') -Encoding ASCII
+  }
+
+  try {
+    $lnkPath = Join-Path (Get-UserDesktopPath) 'Duendee Tunnel Tool.lnk'
+    $w = New-Object -ComObject WScript.Shell
+    $sc = $w.CreateShortcut($lnkPath)
+    $sc.TargetPath = $cmd
+    $sc.WorkingDirectory = $dir
+    $sc.Arguments = ''
+    $ico = Join-Path $OsDir 'Duendee Tunnel Logo.ico'
+    if (Test-Path -LiteralPath $ico) { $sc.IconLocation = $ico }
+    $sc.Description = 'Duendee Tunnel Tool'
+    $sc.Save()
+  } catch {}
+
+  if ((Get-AutoMode) -ne 'off') {
+    $mode = Get-AutoMode
+    $val = '"' + $cmd + '"'
+    if ($mode -eq 'tunnel') { $val = $val + ' boot-tunnel' }
+    New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'DuendeeTunnelTool' -Value $val -PropertyType String -Force | Out-Null
+  }
+}
+
 function Set-AutoMode([string]$Mode) {
   $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
   if ($Mode -eq 'off') {
     Remove-ItemProperty -Path $key -Name 'DuendeeTunnelTool' -ErrorAction SilentlyContinue
     return ((Get-AutoMode) -eq 'off')
   }
-  $batLauncher = Join-Path $OsDir 'Duendee Tunnel Tool.bat'
-  $val = '"' + $batLauncher + '"'
+  Install-StableLauncher
+  $cmd = Join-Path (Get-StableLaunchDir) 'launch.cmd'
+  $val = '"' + $cmd + '"'
   if ($Mode -eq 'tunnel') { $val = $val + ' boot-tunnel' }
   New-ItemProperty -Path $key -Name 'DuendeeTunnelTool' -Value $val -PropertyType String -Force | Out-Null
   return ((Get-AutoMode) -eq $Mode)
@@ -1251,6 +1299,8 @@ function Get-UninstallLines([string]$Mode) {
   if (Test-Path -LiteralPath $wa) { [void]$lines.Add("Komut: $wa") }
   $lnk = Join-Path (Get-UserDesktopPath) 'Duendee Tunnel Tool.lnk'
   if (Test-Path -LiteralPath $lnk) { [void]$lines.Add("Masaüstü kısayolu: $lnk") }
+  $stable = Get-StableLaunchDir
+  if (Test-Path -LiteralPath $stable) { [void]$lines.Add("Sabit başlatıcı: $stable") }
   [void]$lines.Add('Açılış kaydı: HKCU\...\Run\DuendeeTunnelTool')
   if ($Mode -eq '2') {
     [void]$lines.Add('Node.js (bu cihazdaki kurulum; diğer programlar da etkilenir)')
@@ -1310,6 +1360,7 @@ function Invoke-Uninstall {
   Remove-Item -LiteralPath $waShim -Force -ErrorAction SilentlyContinue
   $lnk = Join-Path (Get-UserDesktopPath) 'Duendee Tunnel Tool.lnk'
   Remove-Item -LiteralPath $lnk -Force -ErrorAction SilentlyContinue
+  $stableDir = Get-StableLaunchDir
 
   if ($Mode -eq '2') {
     Invoke-RemoveDependencies
@@ -1320,7 +1371,7 @@ function Invoke-Uninstall {
   $immediate = @()
   $deferred = @()
   $seen = @{}
-  foreach ($dir in @($install, $rootFull)) {
+  foreach ($dir in @($install, $rootFull, (Get-NormalizedDir $stableDir))) {
     if (-not $dir -or $seen.ContainsKey($dir.ToLowerInvariant())) { continue }
     $seen[$dir.ToLowerInvariant()] = $true
     if (-not (Test-Path -LiteralPath $dir)) { continue }
@@ -1399,6 +1450,7 @@ try {
 } catch {}
 
 if (-not $script:UninstallCli) {
+  try { Install-StableLauncher } catch {}
   Start-ToolWatcher
 }
 
