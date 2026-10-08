@@ -1,4 +1,4 @@
-import { default as makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers } from '@whiskeysockets/baileys';
+import { default as makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import qrcodeTerminal from 'qrcode-terminal';
 import QRCode from 'qrcode';
 import pino from 'pino';
@@ -88,7 +88,7 @@ const qrImage = path.join(os.tmpdir(), 'duendee-whatsapp-qr.png');
 const credsPath = path.join(sessionDir, 'creds.json');
 const hasSession = fs.existsSync(credsPath);
 
-const CONNECT_TIMEOUT_MS = Number(process.env.DT_WA_TIMEOUT_MS) || (action === 'retract' ? 45000 : 90000);
+const CONNECT_TIMEOUT_MS = Number(process.env.DT_WA_TIMEOUT_MS) || (action === 'retract' ? 45000 : 180000);
 const MAX_RECONNECT = 4;
 const READY_FALLBACK_MS = 5000;
 const SEND_DELAY_MS = 800;
@@ -110,6 +110,7 @@ function saveSent(rows) {
 function showQr(qr) {
   console.log('');
   console.log('  ============================================================');
+  console.log('  ' + phone + ' hattina bagli degil — yeni QR');
   console.log('  WhatsApp oturumu yok — QR ile baglayin / Scan QR to link');
   console.log('  WhatsApp > Bagli Cihazlar > Cihaz Bagla');
   console.log('  WhatsApp > Linked Devices > Link a Device');
@@ -140,20 +141,82 @@ function toDigits(raw) {
   return String(raw || '').replace(/[^0-9]/g, '');
 }
 
-async function resolveJid(sock, rawPhone) {
+function phonesMatch(accountId, target) {
+  const account = toDigits(accountId);
+  const expected = toDigits(target);
+  if (!account || !expected) return false;
+  return account === expected || account.endsWith(expected) || expected.endsWith(account);
+}
+
+function readLinkedId() {
+  try {
+    const creds = JSON.parse(fs.readFileSync(credsPath, 'utf8'));
+    return String(creds?.me?.id || '');
+  } catch {
+    return '';
+  }
+}
+
+function lidFromCache(rawPhone) {
+  const digits = toDigits(rawPhone);
+  if (!digits) return '';
+  const mapFile = path.join(sessionDir, 'lid-mapping-' + digits + '.json');
+  if (!fs.existsSync(mapFile)) return '';
+  try {
+    const raw = JSON.parse(fs.readFileSync(mapFile, 'utf8'));
+    const lid = String(raw || '').replace(/[^0-9]/g, '');
+    return lid ? lid + '@lid' : '';
+  } catch {
+    return '';
+  }
+}
+
+async function resolveSendJid(sock, rawPhone) {
   const digits = toDigits(rawPhone);
   if (!digits) {
-    throw new Error('Telefon numarasi gecersiz / Invalid phone: ' + rawPhone);
+    throw new Error('Telefon numarasi gecersiz: ' + rawPhone);
   }
-  const bare = digits + '@s.whatsapp.net';
+  const pn = digits + '@s.whatsapp.net';
   try {
-    const results = await sock.onWhatsApp(bare);
-    const hit = Array.isArray(results) ? results.find((r) => r && (r.exists || r.jid)) : null;
+    const lid = await sock.signalRepository.lidMapping.getLIDForPN(pn);
+    if (lid) return lid;
+  } catch {
+    /* mapping lookup is optional */
+  }
+  const cached = lidFromCache(rawPhone);
+  if (cached) return cached;
+  try {
+    const results = await sock.onWhatsApp(pn);
+    const hit = Array.isArray(results) ? results.find((row) => row && (row.exists || row.jid)) : null;
+    if (hit?.lid) return hit.lid;
     if (hit?.jid) return hit.jid;
   } catch {
     /* fall through */
   }
-  return bare;
+  return pn;
+}
+
+function waitForServerAck(sock, id, ms) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finishAck = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      sock.ev.off('messages.update', onUpdate);
+      resolve(ok);
+    };
+    const onUpdate = (updates) => {
+      for (const update of updates || []) {
+        const status = update?.update?.status;
+        const statusNo = Number(status);
+        const acked = statusNo >= 2 || status === 'SERVER_ACK' || status === 'DELIVERY_ACK' || status === 'READ' || status === 'PLAYED';
+        if (update?.key?.id === id && acked) finishAck(true);
+      }
+    };
+    sock.ev.on('messages.update', onUpdate);
+    const timer = setTimeout(() => finishAck(false), ms);
+  });
 }
 
 async function waitUntilUsable(sock) {
@@ -186,38 +249,72 @@ async function deleteStored(sock, keepUrl) {
   return keep;
 }
 
+async function sendText(sock, jid, message) {
+  if (typeof sock.assertSessions === 'function') {
+    try {
+      await sock.assertSessions([jid], true);
+    } catch {
+      /* a missing session is retried by sendMessage */
+    }
+  }
+  const sentMsg = await sock.sendMessage(jid, { text: message });
+  const id = sentMsg?.key?.id;
+  if (!id) {
+    throw new Error('Mesaj anahtari donmedi');
+  }
+  const acked = await waitForServerAck(sock, id, 12000);
+  return { sentMsg, id, jid: sentMsg.key?.remoteJid || jid, acked };
+}
+
 async function deliver(sock) {
   await waitUntilUsable(sock);
+  const linked = sock.user?.id || readLinkedId();
+  if (!phonesMatch(linked, phone)) {
+    const error = new Error('WRONG_LINE');
+    error.linked = linked;
+    throw error;
+  }
   try {
     await sock.sendPresenceUpdate('available');
   } catch {
     /* presence is optional */
   }
   await deleteStored(sock, url);
-  const already = loadSent().some((row) => sameUrl(row.url, url));
-  if (already) {
-    console.log('WhatsApp mesaji zaten aktif linki tasiyor / already current: ' + url);
-    return;
-  }
-  const jid = await resolveJid(sock, phone);
+  const lid = await resolveSendJid(sock, phone);
+  const pn = toDigits(phone) + '@s.whatsapp.net';
+  const targets = [...new Set([lid, pn].filter(Boolean))];
   const message = String(config.messageTemplate || 'Duendee tunnel linki: {url}').replace('{url}', url);
-  const sentMsg = await sock.sendMessage(jid, { text: message });
-  const id = sentMsg?.key?.id;
-  if (!id) {
-    throw new Error('Mesaj anahtari donmedi / WhatsApp did not return a message id');
+  let last = null;
+  for (const target of targets) {
+    console.log('  Link gonderiliyor -> ' + phone + ' (' + target + ')');
+    last = await sendText(sock, target, message);
+    if (last.acked) break;
+    console.log('  Sunucu onayi gelmedi, diger adres deneniyor...');
+  }
+  if (!last?.acked) {
+    throw new Error('WhatsApp sunucusu mesaji onaylamadi');
   }
   const rows = loadSent().filter((row) => !sameUrl(row.url, url));
   rows.push({
-    id,
-    jid: sentMsg.key.remoteJid || jid,
+    id: last.id,
+    jid: last.jid,
     url,
     at: new Date().toISOString()
   });
   saveSent(rows);
-  console.log('WhatsApp mesaji gonderildi / Message sent -> ' + phone + ' | ' + url);
+  console.log('WhatsApp mesaji gonderildi -> ' + phone + ' | ' + url);
 }
 
 async function main() {
+  if (action === 'send' && fs.existsSync(credsPath) && !phonesMatch(readLinkedId(), phone)) {
+    console.log('  Kayitli WhatsApp hatti ' + phone + ' degil. Yeni QR olusturuluyor...');
+    try {
+      fs.rmSync(sessionDir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+
   const stored = loadSent();
   if (action === 'retract' && stored.length === 0) {
     console.log('  Kaldirilacak eski link mesaji yok.');
@@ -229,19 +326,49 @@ async function main() {
 
   fs.mkdirSync(sessionDir, { recursive: true });
 
-  if (hasSession) {
-    console.log('  WhatsApp oturumu bulundu, baglaniliyor...');
+  if (fs.existsSync(credsPath) && phonesMatch(readLinkedId(), phone)) {
+    console.log('  WhatsApp hatti kontrol ediliyor: ' + phone);
   } else {
-    console.log('  Ilk kurulum: QR taramaniz istenecek (oturum sonra saklanir).');
+    console.log('  WhatsApp hatti ' + phone + ' bagli degil. Yeni QR olusturuluyor...');
   }
 
   let finished = false;
   let delivered = false;
   let delivering = false;
   let attempts = 0;
+  let qrCycles = 0;
   let generation = 0;
   let sock = null;
   let timer = null;
+
+  const replaceWithQr = (reason) => {
+    if (finished) return;
+    if (qrCycles >= 2) {
+      finish(1, reason);
+      return;
+    }
+    qrCycles += 1;
+    delivered = false;
+    delivering = false;
+    attempts = 0;
+    generation += 1;
+    console.log('  ' + reason);
+    console.log('  WhatsApp hatti ' + phone + ' bagli degil. Yeni QR olusturuluyor...');
+    try {
+      if (sock) sock.end(undefined);
+    } catch {
+      /* ignore */
+    }
+    try {
+      fs.rmSync(sessionDir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+    fs.mkdirSync(sessionDir, { recursive: true });
+    setTimeout(() => {
+      connect().catch((err) => finish(1, 'WhatsApp baslatilamadi: ' + (err?.message || err)));
+    }, 400);
+  };
 
   const finish = (code, msg) => {
     if (finished) return;
@@ -300,6 +427,10 @@ async function main() {
       delivering = false;
       if (finished || gen !== generation) return;
       const text = err?.message || String(err);
+      if (text === 'WRONG_LINE' || /WRONG_LINE/.test(text)) {
+        replaceWithQr('Kayitli hat bu numara degil: ' + (err.linked || readLinkedId() || 'yok'));
+        return;
+      }
       if (/connection closed|timed out|not-authorized|stream errored/i.test(text) && attempts < MAX_RECONNECT) {
         console.log('  Gonderim hazir degil, yeniden denenecek: ' + text);
         return;
@@ -331,9 +462,9 @@ async function main() {
       auth: state,
       version,
       logger: pino({ level: 'silent' }),
-      browser: Browsers.ubuntu('Chrome'),
+      browser: ['Duendee Tunnel Tool', 'Chrome', '120.0.0'],
       syncFullHistory: false,
-      markOnlineOnConnect: true
+      markOnlineOnConnect: false
     });
     sock = current;
 
@@ -368,6 +499,12 @@ async function main() {
       }
 
       if (connection === 'open') {
+        const linked = current.user?.id || '';
+        if (action === 'send' && linked && !phonesMatch(linked, phone)) {
+          replaceWithQr('Acilan oturum ' + linked + ' hattina ait.');
+          return;
+        }
+        console.log('  WhatsApp hatti bagli: ' + (linked || phone));
         socketOpen = true;
         if (readyTimer) clearTimeout(readyTimer);
         readyTimer = setTimeout(() => {
@@ -394,18 +531,12 @@ async function main() {
         const badSession = code === DisconnectReason.badSession;
         const restarting = code === DisconnectReason.restartRequired;
 
+        if ((loggedOut || badSession) && action === 'send') {
+          replaceWithQr(loggedOut ? 'Oturum dusmus.' : 'Oturum bozuk.');
+          return;
+        }
         if (loggedOut || badSession) {
-          console.error(
-            loggedOut
-              ? '  Oturum dusuruldu — QR yeniden taranmali / Logged out — re-scan QR.'
-              : '  Bozuk oturum temizleniyor / Bad session, clearing...'
-          );
-          try {
-            fs.rmSync(sessionDir, { recursive: true, force: true });
-          } catch {
-            /* ignore */
-          }
-          finish(1, 'WhatsApp oturumu sifirlandi. Tüneli yeniden baslatin / Session cleared; restart tunnel.');
+          finish(1, 'WhatsApp oturumu yok; eski link mesaji kaldirilamadi.');
           return;
         }
 

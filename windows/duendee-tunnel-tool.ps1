@@ -566,9 +566,12 @@ function Send-TunnelWhatsApp([string]$PublicUrl) {
     } catch {}
   }
   $sessionCreds = Join-Path $Root '.whatsapp-session\creds.json'
+  $line = if ($phone) { $phone } else { '5315162429' }
   if (-not (Test-Path -LiteralPath $sessionCreds)) {
-    Write-UiLine "  $YEL   Ilk WhatsApp baglantisi: QR tarayin (Linked Devices / Bagli Cihazlar).$RST"
-    Write-UiLine "  $DIM   Oturum sonra kaydedilir; sonraki gonderimler otomatik olur.$RST"
+    Write-UiLine "  $YEL   WhatsApp hatti $line bagli degil. Yeni QR olusturuluyor.$RST"
+    Write-UiLine "  $DIM   WhatsApp > Bagli Cihazlar > Cihaz Bagla. Tarama sonrasi link gider.$RST"
+  } else {
+    Write-UiLine "  WhatsApp hatti kontrol ediliyor ($line)..."
   }
   Write-UiLine "  WhatsApp'a link gönderiliyor..."
   $prevEa = $ErrorActionPreference

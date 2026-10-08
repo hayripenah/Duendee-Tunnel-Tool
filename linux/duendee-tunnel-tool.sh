@@ -429,8 +429,10 @@ send_tunnel_whatsapp() {
     fi
   fi
   if [[ ! -f "${ROOT}/.whatsapp-session/creds.json" ]]; then
-    echo -e "  ${YEL}   Ilk WhatsApp baglantisi: QR tarayin (Linked Devices / Bagli Cihazlar).${RST}"
-    echo -e "  ${DIM}   Oturum sonra kaydedilir; sonraki gonderimler otomatik olur.${RST}"
+    echo -e "  ${YEL}   WhatsApp hatti ${phone:-5315162429} bagli degil. Yeni QR olusturuluyor.${RST}"
+    echo -e "  ${DIM}   WhatsApp > Bagli Cihazlar > Cihaz Bagla. Tarama sonrasi link gider.${RST}"
+  else
+    echo "  WhatsApp hatti kontrol ediliyor (${phone:-5315162429})..."
   fi
   echo "  WhatsApp'a link gönderiliyor..."
   local ec=0
