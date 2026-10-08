@@ -142,6 +142,48 @@ function Install-ShimAndUserPath {
   return @{ Shim = $shimCmd; PathChanged = $changed; BinDir = $Bin }
 }
 
+function Stop-RunningTool {
+  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.CommandLine -and (
+      $_.CommandLine -like '*duendee-tunnel-tool.ps1*' -or
+      $_.CommandLine -like '*Duendee Tunnel Tool.bat*' -or
+      $_.CommandLine -like '*DuendeeTunnel\launch.ps1*'
+    )
+  } | ForEach-Object {
+    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Copy-ToolTree([string]$Source, [string]$Dest) {
+  $root = $Source.TrimEnd('\')
+  Get-ChildItem -LiteralPath $root -Recurse -Force -File | ForEach-Object {
+    $rel = $_.FullName.Substring($root.Length).TrimStart('\')
+    if ($rel -match '(?i)^(\.git|node_modules|dist)\\' -or $rel -match '(?i)\\(\.git|node_modules|dist)\\') { return }
+    $target = Join-Path $Dest $rel
+    $parent = Split-Path -Parent $target
+    if (-not (Test-Path -LiteralPath $parent)) {
+      New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    }
+    Copy-Item -LiteralPath $_.FullName -Destination $target -Force
+  }
+}
+
+function Get-ToolTree([string]$Dir) {
+  if (-not (Test-Path -LiteralPath $Dir)) { return $null }
+  $portable = Get-ChildItem -LiteralPath $Dir -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like 'Duendee-Tunnel-Tool-Windows-portable*' } |
+    Select-Object -First 1
+  if ($portable -and (Test-Path -LiteralPath (Join-Path $portable.FullName 'windows\duendee-tunnel-tool.ps1'))) {
+    return $portable
+  }
+  foreach ($cand in @(Get-ChildItem -LiteralPath $Dir -Directory -ErrorAction SilentlyContinue)) {
+    if (Test-Path -LiteralPath (Join-Path $cand.FullName 'windows\duendee-tunnel-tool.ps1')) {
+      return $cand
+    }
+  }
+  return $null
+}
+
 Write-Host "Installing Duendee Tunnel Tool -> $InstallDir"
 
 $info = Get-ReleaseAssetUrl -Repository $Repo -ReleaseTag $Tag -Name $AssetName
@@ -154,6 +196,8 @@ try {
   Write-Host "Downloading $($info.Tag): $($info.Url)"
   Invoke-WebRequest -Uri $info.Url -OutFile $zip -UseBasicParsing
 
+  Stop-RunningTool
+  Start-Sleep -Milliseconds 400
   if (Test-Path $InstallDir) {
     # Keep user config/session if present
     $keep = @{}
@@ -174,10 +218,30 @@ try {
   }
 
   Expand-Archive -Path $zip -DestinationPath $tmp -Force
-  $extracted = Get-ChildItem $tmp -Directory | Where-Object { $_.Name -like 'Duendee-Tunnel-Tool-Windows-portable*' } | Select-Object -First 1
-  if (-not $extracted) { throw 'Zip layout unexpected (missing portable folder).' }
+  $extracted = Get-ToolTree $tmp
+  $hasStable = $extracted -and (Test-Path -LiteralPath (Join-Path $extracted.FullName 'windows\stable-launch.ps1'))
+  if (-not $hasStable) {
+    Write-Host "Release package has no current launcher. Downloading main source..."
+    $mainZip = Join-Path $tmp 'main.zip'
+    Invoke-WebRequest -Uri "https://github.com/$Repo/archive/refs/heads/main.zip" -OutFile $mainZip -UseBasicParsing
+    $mainDir = Join-Path $tmp 'main-src'
+    New-Item -ItemType Directory -Force -Path $mainDir | Out-Null
+    Expand-Archive -Path $mainZip -DestinationPath $mainDir -Force
+    $extracted = Get-ToolTree $mainDir
+  }
+  if (-not $extracted) { throw 'Zip layout unexpected (windows tool missing).' }
 
-  Copy-Item -Path (Join-Path $extracted.FullName '*') -Destination $InstallDir -Recurse -Force
+  $cmdPath = $MyInvocation.MyCommand.Path
+  if ($cmdPath) {
+    $localRoot = Split-Path -Parent (Split-Path -Parent $cmdPath)
+    $localPs1 = Join-Path $localRoot 'windows\duendee-tunnel-tool.ps1'
+    if ((Test-Path -LiteralPath $localPs1) -and (Select-String -LiteralPath $localPs1 -Pattern 'Invoke-Uninstall' -Quiet)) {
+      $extracted = Get-Item -LiteralPath $localRoot
+      Write-Host "Using local repo: $localRoot"
+    }
+  }
+
+  Copy-ToolTree -Source $extracted.FullName -Dest $InstallDir
 
   foreach ($k in $keep.Keys) {
     $dest = Join-Path $InstallDir $k
@@ -188,6 +252,10 @@ try {
 
   $cfgEx = Join-Path $InstallDir 'config.example.json'
   $cfg = Join-Path $InstallDir 'config.json'
+  $installedPs1 = Join-Path $InstallDir 'windows\duendee-tunnel-tool.ps1'
+  if (-not (Select-String -LiteralPath $installedPs1 -Pattern 'Invoke-Uninstall' -Quiet)) {
+    throw "Installed menu is still missing option 7: $installedPs1"
+  }
   if (-not (Test-Path $cfgEx)) { throw 'Portable zip missing config.example.json' }
   if (-not (Test-Path $cfg)) {
     Copy-Item $cfgEx $cfg -Force
@@ -214,8 +282,9 @@ try {
 $stableDir = Join-Path $env:LOCALAPPDATA 'DuendeeTunnel'
 New-Item -ItemType Directory -Force -Path $stableDir | Out-Null
 $stableSrc = Join-Path $InstallDir 'windows\stable-launch.ps1'
+$launchPs1 = Join-Path $stableDir 'launch.ps1'
 if (Test-Path -LiteralPath $stableSrc) {
-  Copy-Item -LiteralPath $stableSrc -Destination (Join-Path $stableDir 'launch.ps1') -Force
+  Copy-Item -LiteralPath $stableSrc -Destination $launchPs1 -Force
 }
 $stableCmd = Join-Path $stableDir 'launch.cmd'
 @(
@@ -230,8 +299,13 @@ if (-not $NoDesktopShortcut) {
     $lnkPath = Join-Path $desktop 'Duendee Tunnel Tool.lnk'
     $w = New-Object -ComObject WScript.Shell
     $sc = $w.CreateShortcut($lnkPath)
-    $sc.TargetPath = $stableCmd
-    $sc.WorkingDirectory = $stableDir
+    if (Test-Path -LiteralPath $launchPs1) {
+      $sc.TargetPath = $stableCmd
+      $sc.WorkingDirectory = $stableDir
+    } else {
+      $sc.TargetPath = Join-Path $InstallDir 'windows\Duendee Tunnel Tool.bat'
+      $sc.WorkingDirectory = $InstallDir
+    }
     $ico = Join-Path $InstallDir 'windows\Duendee Tunnel Logo.ico'
     if (Test-Path $ico) { $sc.IconLocation = $ico }
     $sc.Description = 'Duendee Tunnel Tool'
