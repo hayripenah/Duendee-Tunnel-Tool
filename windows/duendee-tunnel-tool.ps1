@@ -3,7 +3,9 @@
 [CmdletBinding()]
 param(
   [Parameter(Position = 0)]
-  [string]$Action = ''
+  [string]$Action = '',
+  [Parameter(Position = 1)]
+  [string]$UninstallChoice = ''
 )
 
 $ErrorActionPreference = 'Continue'
@@ -359,9 +361,19 @@ function Ensure-ToolConfig {
   return @{ Project = $proj; Port = $portNum }
 }
 
-$boot = Ensure-ToolConfig
-$Project = [string]$boot.Project
-$Port = [int]$boot.Port
+function Test-UninstallAction([string]$Name) {
+  return $Name -match '^(?i)(7|uninstall|kaldir|kaldır|remove)$'
+}
+
+$script:UninstallCli = Test-UninstallAction $Action
+if ($script:UninstallCli) {
+  $Project = ''
+  $Port = 8080
+} else {
+  $boot = Ensure-ToolConfig
+  $Project = [string]$boot.Project
+  $Port = [int]$boot.Port
+}
 
 $StateDir = Join-Path $Root '.tunnelstate'
 $PidFile = Join-Path $StateDir 'tunnel.pid'
@@ -369,7 +381,7 @@ $UrlFile = Join-Path $StateDir 'tunnel.url'
 $LogFile = Join-Path $StateDir 'tunnel.log'
 $OutLogFile = Join-Path $StateDir 'tunnel.out.log'
 $ServerPidFile = Join-Path $StateDir 'server.pid'
-if (-not (Test-Path -LiteralPath $StateDir)) {
+if (-not $script:UninstallCli -and -not (Test-Path -LiteralPath $StateDir)) {
   New-Item -ItemType Directory -Path $StateDir | Out-Null
 }
 
@@ -569,13 +581,15 @@ function Stop-DevServer {
     Remove-Item -LiteralPath $ServerPidFile -Force -ErrorAction SilentlyContinue
   }
   # Fallback: kill hidden cmd/npm trees started for this project
-  $devPattern = "*cd /d $Project*"
-  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like $devPattern } |
-    ForEach-Object {
-      Stop-ProcessTree ([int]$_.ProcessId)
-      $stopped = $true
-    }
+  if (-not [string]::IsNullOrWhiteSpace($Project)) {
+    $devPattern = "*cd /d $Project*"
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+      Where-Object { $_.CommandLine -like $devPattern } |
+      ForEach-Object {
+        Stop-ProcessTree ([int]$_.ProcessId)
+        $stopped = $true
+      }
+  }
   if (-not $stopped) {
     Write-UiLine "  $DIM   Dev server zaten kapalı.$RST"
   }
@@ -692,10 +706,11 @@ function Show-Menu {
   } else {
     Write-UiLine "  $YEL$BOLD[6]$RST  ${SKY}Cihaz Açılışında Otomatik Başlat$RST  $DIM[KAPALI]$RST"
   }
+  Write-UiLine "  $YEL$BOLD[7]$RST  ${SKY}Aracı Cihazdan Kaldır$RST"
   Write-UiLine ''
   Write-UiLine "$DIM      Kapatmak için pencereyi kapatın, [Ctrl]+[C] ya da [5]$RST"
   Write-UiLine ''
-  Write-Ui "$CYN   Seçim [1-6]: $RST"
+  Write-Ui "$CYN   Seçim [1-7]: $RST"
 }
 
 function Complete-Action {
@@ -976,6 +991,282 @@ function Invoke-Autostart {
   Complete-Action
 }
 
+function Get-NormalizedDir([string]$Path) {
+  if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+  try { return [System.IO.Path]::GetFullPath($Path).TrimEnd('\') } catch { return $Path.TrimEnd('\') }
+}
+
+function Get-ToolInstallDir {
+  if ($env:DT_INSTALL_DIR -and (Test-Path -LiteralPath $env:DT_INSTALL_DIR)) {
+    return (Get-NormalizedDir $env:DT_INSTALL_DIR)
+  }
+  return (Get-NormalizedDir (Join-Path $env:LOCALAPPDATA 'DuendeeTunnelTool'))
+}
+
+function Get-RegisteredProducts([string]$Pattern) {
+  $roots = @(
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+    'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
+  )
+  $found = @()
+  foreach ($root in $roots) {
+    if (-not (Test-Path -LiteralPath $root)) { continue }
+    foreach ($item in (Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)) {
+      $prop = Get-ItemProperty -LiteralPath $item.PSPath -ErrorAction SilentlyContinue
+      if ($prop -and $prop.DisplayName -and ($prop.DisplayName -match $Pattern)) {
+        $found += $prop
+      }
+    }
+  }
+  return $found
+}
+
+function Invoke-ProductUninstall($Entry) {
+  $cmd = [string]$Entry.QuietUninstallString
+  if ([string]::IsNullOrWhiteSpace($cmd)) { $cmd = [string]$Entry.UninstallString }
+  $cmd = $cmd.Trim()
+  if ([string]::IsNullOrWhiteSpace($cmd)) { return $false }
+  if ($cmd -match '(?i)msiexec(\.exe)?' -and $cmd -match '\{[0-9A-Fa-f-]+\}') {
+    $guid = $Matches[0]
+    $proc = Start-Process -FilePath msiexec.exe -ArgumentList @('/x', $guid, '/qn', '/norestart') -Wait -PassThru
+    return ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010)
+  }
+  $exe = $null
+  $arg = ''
+  if ($cmd.StartsWith('"')) {
+    $end = $cmd.IndexOf('"', 1)
+    if ($end -lt 2) { return $false }
+    $exe = $cmd.Substring(1, $end - 1)
+    $arg = $cmd.Substring($end + 1).Trim()
+  } else {
+    $parts = $cmd -split '\s+', 2
+    $exe = $parts[0]
+    if ($parts.Length -gt 1) { $arg = $parts[1] }
+  }
+  if (-not (Test-Path -LiteralPath $exe) -and -not (Get-Command $exe -ErrorAction SilentlyContinue)) { return $false }
+  if ($arg -notmatch '(?i)(/quiet|/qn|/silent|--silent|/VERYSILENT)') {
+    if ($exe -match '(?i)unins\d*\.exe|uninstall\.exe') {
+      $arg = ("$arg /VERYSILENT /NORESTART").Trim()
+    }
+  }
+  $proc = Start-Process -FilePath $exe -ArgumentList $arg -Wait -PassThru
+  return ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010)
+}
+
+function Invoke-WingetIdUninstall([string[]]$Ids) {
+  if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue) -and -not (Get-Command winget -ErrorAction SilentlyContinue)) {
+    return
+  }
+  foreach ($id in $Ids) {
+    & winget uninstall --id $id -e --silent --accept-source-agreements --disable-interactivity 2>&1 | Out-Null
+  }
+}
+
+function Remove-KnownCloudflaredBinary {
+  $candidates = @()
+  $found = Find-Cloudflared
+  if ($found) { $candidates += $found }
+  $candidates += @(
+    'C:\Program Files (x86)\cloudflared\cloudflared.exe',
+    (Join-Path $env:ProgramFiles 'cloudflared\cloudflared.exe'),
+    (Join-Path $env:USERPROFILE '.cloudflared\cloudflared.exe')
+  )
+  foreach ($path in ($candidates | Select-Object -Unique)) {
+    if (-not $path -or -not (Test-Path -LiteralPath $path)) { continue }
+    if ((Split-Path -Leaf $path) -ne 'cloudflared.exe') { continue }
+    Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    $parent = Split-Path -Parent $path
+    $leaf = Split-Path -Leaf $parent
+    if ($leaf -eq 'cloudflared') {
+      $left = @(Get-ChildItem -LiteralPath $parent -Force -ErrorAction SilentlyContinue)
+      if ($left.Count -eq 0) {
+        Remove-Item -LiteralPath $parent -Force -ErrorAction SilentlyContinue
+      }
+    }
+  }
+}
+
+function Remove-UserPathEntry([string]$BinDir) {
+  $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+  if (-not $userPath) { return }
+  $target = (Get-NormalizedDir $BinDir)
+  $kept = @($userPath -split ';' | Where-Object {
+      $_ -and ((Get-NormalizedDir $_.Trim()) -ne $target)
+    })
+  [Environment]::SetEnvironmentVariable('Path', ($kept -join ';'), 'User')
+}
+
+function Start-DeferredDirectoryDelete {
+  param([string[]]$Paths)
+  $list = Join-Path $env:TEMP ("duendee-uninstall-" + [guid]::NewGuid().ToString('N') + '.txt')
+  @($Paths | Where-Object { $_ }) | Set-Content -LiteralPath $list -Encoding UTF8
+  $runner = [System.IO.Path]::ChangeExtension($list, '.ps1')
+  @'
+param([string]$ListFile)
+Start-Sleep -Seconds 2
+if (Test-Path -LiteralPath $ListFile) {
+  foreach ($p in (Get-Content -LiteralPath $ListFile -Encoding UTF8)) {
+    $p = "$p".Trim()
+    if ($p -and (Test-Path -LiteralPath $p)) {
+      Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+  Remove-Item -LiteralPath $ListFile -Force -ErrorAction SilentlyContinue
+}
+Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+'@ | Set-Content -LiteralPath $runner -Encoding UTF8
+  Start-Process -FilePath powershell.exe -WindowStyle Hidden -ArgumentList @(
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runner, '-ListFile', $list
+  ) | Out-Null
+}
+
+function Invoke-RemoveDependencies {
+  $nodeProducts = @(Get-RegisteredProducts '(?i)^Node\.js')
+  $cfProducts = @(Get-RegisteredProducts '(?i)cloudflared')
+  foreach ($entry in @($nodeProducts + $cfProducts)) {
+    $name = [string]$entry.DisplayName
+    Write-UiLine "  $DIM   Kaldırılıyor: $name$RST"
+    if (Invoke-ProductUninstall $entry) {
+      Write-UiLine "  $GRN   $name kaldırıldı.$RST"
+    } else {
+      Write-UiLine "  $YEL   $name kaldırılamadı. Yönetici onayı gerekebilir.$RST"
+    }
+  }
+  if (Get-Command node -ErrorAction SilentlyContinue) {
+    Invoke-WingetIdUninstall @(
+      'OpenJS.NodeJS.LTS',
+      'OpenJS.NodeJS'
+    )
+  }
+  if (Get-Command cloudflared -ErrorAction SilentlyContinue) {
+    Invoke-WingetIdUninstall @('Cloudflare.cloudflared')
+  }
+  Remove-KnownCloudflaredBinary
+  if (Get-Command node -ErrorAction SilentlyContinue) {
+    $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+    Write-UiLine "  $YEL   Node.js hâlâ duruyor: $($nodeCmd.Source)$RST"
+    Write-UiLine "  $DIM   Yönetici PowerShell ile tekrar deneyin veya Windows Ayarlar > Uygulamalar üzerinden kaldırın.$RST"
+  } else {
+    Write-UiLine "  $GRN   Node.js bu oturumda artık yok.$RST"
+  }
+  if (Find-Cloudflared) {
+    Write-UiLine "  $YEL   cloudflared hâlâ duruyor: $(Find-Cloudflared)$RST"
+  } else {
+    Write-UiLine "  $GRN   cloudflared bu oturumda artık yok.$RST"
+  }
+}
+
+function Get-UninstallLines([string]$Mode) {
+  $lines = New-Object System.Collections.Generic.List[string]
+  $install = Get-ToolInstallDir
+  $rootFull = Get-NormalizedDir $Root
+  $seen = @{}
+  foreach ($dir in @($install, $rootFull)) {
+    if (-not $dir -or $seen.ContainsKey($dir.ToLowerInvariant())) { continue }
+    $seen[$dir.ToLowerInvariant()] = $true
+    if (Test-Path -LiteralPath $dir) { [void]$lines.Add("Tool klasörü: $dir") }
+  }
+  $bin = Join-Path $install 'bin'
+  [void]$lines.Add("Komut ve kullanıcı PATH kaydı: $bin")
+  $wa = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\duendee-tunnel.cmd'
+  if (Test-Path -LiteralPath $wa) { [void]$lines.Add("Komut: $wa") }
+  $lnk = Join-Path (Get-UserDesktopPath) 'Duendee Tunnel Tool.lnk'
+  if (Test-Path -LiteralPath $lnk) { [void]$lines.Add("Masaüstü kısayolu: $lnk") }
+  [void]$lines.Add('Açılış kaydı: HKCU\...\Run\DuendeeTunnelTool')
+  if ($Mode -eq '2') {
+    [void]$lines.Add('Node.js (bu cihazdaki kurulum; diğer programlar da etkilenir)')
+    [void]$lines.Add('cloudflared (bu cihazdaki kurulum)')
+  }
+  return $lines
+}
+
+function Invoke-Uninstall {
+  param([string]$Mode = '')
+  Clear-Host
+  Initialize-Utf8Console
+  Write-UiLine ''
+  Write-UiLine "$CYN   --- Aracı Kaldır ---$RST"
+  Write-UiLine ''
+  if ($Mode -notin @('1', '2')) {
+    Write-UiLine "  $YEL$BOLD[1]$RST  ${SKY}Yalnızca Duendee Tunnel Tool$RST"
+    Write-UiLine "  $DIM      Kurulum, komut, PATH, kısayol ve otomatik başlatma silinir.$RST"
+    Write-UiLine "  $YEL$BOLD[2]$RST  ${SKY}Tool ile birlikte Node.js ve cloudflared$RST"
+    Write-UiLine "  $DIM      [1] ile aynı, artı bu cihazdaki Node.js ve cloudflared.$RST"
+    Write-UiLine "  $YEL$BOLD[X]$RST  ${SKY}Vazgeç$RST"
+    Write-UiLine ''
+    Write-Ui "$CYN   Seçim [1/2/X]: $RST"
+    $pick = Get-Choice '12X'
+    Write-UiLine $pick
+    if ($pick -eq 'X') { return }
+    $Mode = $pick
+  }
+
+  Write-UiLine ''
+  Write-UiLine "  $RED$BOLD   Emin misiniz?$RST Bu işlem geri alınamaz."
+  Write-UiLine ''
+  foreach ($line in (Get-UninstallLines $Mode)) {
+    Write-UiLine "  $DIM   - $line$RST"
+  }
+  Write-UiLine ''
+  Write-Ui "$CYN   [E] Evet, kaldır    [H] Hayır: $RST"
+  $yes = Get-Choice 'EH'
+  Write-UiLine $yes
+  if ($yes -ne 'E') {
+    Write-UiLine ''
+    Write-UiLine "  $YEL   Kaldırma iptal edildi.$RST"
+    if (-not $script:UninstallCli) { Complete-Action }
+    return
+  }
+
+  Write-UiLine ''
+  $script:CleanupDone = $true
+  Stop-AllToolProcesses
+  Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'DuendeeTunnelTool' -ErrorAction SilentlyContinue
+
+  $install = Get-ToolInstallDir
+  Remove-UserPathEntry (Join-Path $install 'bin')
+  $waShim = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\duendee-tunnel.cmd'
+  Remove-Item -LiteralPath $waShim -Force -ErrorAction SilentlyContinue
+  $lnk = Join-Path (Get-UserDesktopPath) 'Duendee Tunnel Tool.lnk'
+  Remove-Item -LiteralPath $lnk -Force -ErrorAction SilentlyContinue
+
+  if ($Mode -eq '2') {
+    Invoke-RemoveDependencies
+  }
+
+  $rootFull = Get-NormalizedDir $Root
+  $scriptFull = Get-NormalizedDir $PSCommandPath
+  $immediate = @()
+  $deferred = @()
+  $seen = @{}
+  foreach ($dir in @($install, $rootFull)) {
+    if (-not $dir -or $seen.ContainsKey($dir.ToLowerInvariant())) { continue }
+    $seen[$dir.ToLowerInvariant()] = $true
+    if (-not (Test-Path -LiteralPath $dir)) { continue }
+    $dirPrefix = $dir.TrimEnd('\') + '\'
+    if ($scriptFull.StartsWith($dirPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or ($scriptFull -eq $dir)) {
+      $deferred += $dir
+    } else {
+      $immediate += $dir
+    }
+  }
+  foreach ($dir in $immediate) {
+    Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+    Write-UiLine "  $GRN   Silindi: $dir$RST"
+  }
+  if ($deferred.Count -gt 0) {
+    Start-DeferredDirectoryDelete -Paths $deferred
+    foreach ($dir in $deferred) {
+      Write-UiLine "  $GRN   Silinecek (bu pencere kapanınca): $dir$RST"
+    }
+  }
+  Write-UiLine ''
+  Write-UiLine "  $GRN   Kaldırma tamam.$RST"
+  Write-UiLine ''
+  exit 0
+}
+
 function Invoke-Shutdown {
   Clear-Host
   Initialize-Utf8Console
@@ -1003,10 +1294,12 @@ function Invoke-ExitCleanup {
       if ([int]::TryParse("$spidRaw".Trim(), [ref]$spid) -and $spid -gt 0) { Stop-ProcessTree $spid }
       Remove-Item -LiteralPath $ServerPidFile -Force -ErrorAction SilentlyContinue
     }
-    $devPattern = "*cd /d $Project*"
-    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-      Where-Object { $_.CommandLine -like $devPattern } |
-      ForEach-Object { Stop-ProcessTree ([int]$_.ProcessId) }
+    if (-not [string]::IsNullOrWhiteSpace($Project)) {
+      $devPattern = "*cd /d $Project*"
+      Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -like $devPattern } |
+        ForEach-Object { Stop-ProcessTree ([int]$_.ProcessId) }
+    }
     Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue
   } catch {}
 }
@@ -1021,9 +1314,16 @@ try {
     })
 } catch {}
 
-Start-ToolWatcher
+if (-not $script:UninstallCli) {
+  Start-ToolWatcher
+}
 
 try {
+  if ($script:UninstallCli) {
+    $script:CleanupDone = $true
+    Invoke-Uninstall -Mode $UninstallChoice
+    exit 0
+  }
   switch ($Action) {
     '1' { Invoke-Start; exit 0 }
     '2' { Invoke-Status; exit 0 }
@@ -1035,7 +1335,7 @@ try {
 
   while ($true) {
     Show-Menu
-    $choice = Get-Choice '123456'
+    $choice = Get-Choice '1234567'
     Write-UiLine ''
     switch ($choice) {
       '1' { Invoke-Start }
@@ -1044,6 +1344,7 @@ try {
       '4' { Invoke-Cancel }
       '5' { Invoke-Shutdown }
       '6' { Invoke-Autostart }
+      '7' { Invoke-Uninstall }
     }
   }
 } finally {

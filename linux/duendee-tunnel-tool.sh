@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Duendee Tunnel Tool (Linux)
-# Mirrors the Windows .bat menu: start/status/copy/cancel/shutdown/autostart.
+# Mirrors the Windows .bat menu: start/status/copy/cancel/shutdown/autostart/uninstall.
 set -u
 export LANG="${LANG:-C.UTF-8}"
 export LC_ALL="${LC_ALL:-C.UTF-8}"
@@ -627,17 +627,19 @@ kill_dev_server() {
     rm -f "$SERVER_PID"
   fi
   # Fallback: npm run dev started for this project
-  pgrep -af "npm run dev" 2>/dev/null | while read -r line; do
-    if [[ "$line" == *"$PROJECT"* ]]; then
-      local pid="${line%% *}"
-      if [[ "$pid" =~ ^[0-9]+$ ]]; then
-        kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-        sleep 0.2
-        kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
-        stopped=1
+  if [[ -n "${PROJECT:-}" ]]; then
+    pgrep -af "npm run dev" 2>/dev/null | while read -r line; do
+      if [[ "$line" == *"$PROJECT"* ]]; then
+        local pid="${line%% *}"
+        if [[ "$pid" =~ ^[0-9]+$ ]]; then
+          kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+          sleep 0.2
+          kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+          stopped=1
+        fi
       fi
-    fi
-  done
+    done
+  fi
   if [[ "$stopped" -eq 0 ]]; then
     echo -e "  ${DIM}   Dev server zaten kapalı.${RST}"
   fi
@@ -698,12 +700,14 @@ cleanup_quiet() {
     kill -KILL "-$spid" 2>/dev/null || kill -KILL "$spid" 2>/dev/null || true
     rm -f "$SERVER_PID"
   fi
-  pgrep -af "npm run dev" 2>/dev/null | while read -r line; do
-    if [[ "$line" == *"$PROJECT"* ]]; then
-      local pid="${line%% *}"
-      [[ "$pid" =~ ^[0-9]+$ ]] && kill -TERM "$pid" 2>/dev/null || true
-    fi
-  done
+  if [[ -n "${PROJECT:-}" ]]; then
+    pgrep -af "npm run dev" 2>/dev/null | while read -r line; do
+      if [[ "$line" == *"$PROJECT"* ]]; then
+        local pid="${line%% *}"
+        [[ "$pid" =~ ^[0-9]+$ ]] && kill -TERM "$pid" 2>/dev/null || true
+      fi
+    done
+  fi
   rm -f "$PID_FILE" "$URL_FILE" "${TMPDIR:-/tmp}/duendee-whatsapp-qr.png" 2>/dev/null || true
 }
 
@@ -741,10 +745,11 @@ show_menu() {
   else
     echo -e "  ${YEL}${BOLD}[6]${RST}  ${SKY}Cihaz Açılışında Otomatik Başlat${RST}  ${DIM}[KAPALI]${RST}"
   fi
+  echo -e "  ${YEL}${BOLD}[7]${RST}  ${SKY}Aracı Cihazdan Kaldır${RST}"
   echo
   echo -e "${DIM}      Kapatmak için pencereyi kapatın, [Ctrl]+[C] ya da [5]${RST}"
   echo
-  printf "%b" "${CYN}   Seçim [1-6]: ${RST}"
+  printf "%b" "${CYN}   Seçim [1-7]: ${RST}"
 }
 
 do_start() {
@@ -1080,6 +1085,248 @@ EOF
   wait_key
 }
 
+is_uninstall_arg() {
+  case "${1:-}" in
+    7|uninstall|kaldir|kaldır|remove) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+normalized_dir() {
+  local p="${1:-}"
+  [[ -n "$p" ]] || return 0
+  if [[ -d "$p" ]]; then
+    (cd "$p" && pwd)
+  else
+    printf '%s\n' "$p"
+  fi
+}
+
+install_dir_default() {
+  if [[ -n "${DT_INSTALL_DIR:-}" ]]; then
+    printf '%s\n' "$DT_INSTALL_DIR"
+    return 0
+  fi
+  printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/duendee-tunnel-tool"
+}
+
+strip_path_marker() {
+  local rc="$1"
+  [[ -f "$rc" ]] || return 0
+  local tmp
+  tmp="$(mktemp)"
+  awk '
+    $0 == "# Duendee Tunnel Tool PATH" { skip=1; next }
+    skip == 1 && $0 ~ /^export PATH=/ { skip=0; next }
+    { skip=0; print }
+  ' "$rc" >"$tmp"
+  mv "$tmp" "$rc"
+}
+
+remove_shim_file() {
+  local f="$1"
+  [[ -f "$f" ]] || return 0
+  if grep -q 'duendee-tunnel-tool.sh' "$f" 2>/dev/null; then
+    rm -f "$f" 2>/dev/null || sudo rm -f "$f" 2>/dev/null || true
+  fi
+}
+
+pkg_installed() {
+  local name="$1"
+  if command -v dpkg >/dev/null 2>&1; then
+    dpkg -s "$name" >/dev/null 2>&1
+    return $?
+  fi
+  if command -v rpm >/dev/null 2>&1; then
+    rpm -q "$name" >/dev/null 2>&1
+    return $?
+  fi
+  if command -v pacman >/dev/null 2>&1; then
+    pacman -Qi "$name" >/dev/null 2>&1
+    return $?
+  fi
+  return 1
+}
+
+file_owned_by_package() {
+  local f="$1"
+  if command -v dpkg >/dev/null 2>&1; then
+    dpkg -S "$f" >/dev/null 2>&1 && return 0
+  fi
+  if command -v rpm >/dev/null 2>&1; then
+    rpm -qf "$f" >/dev/null 2>&1 && return 0
+  fi
+  if command -v pacman >/dev/null 2>&1; then
+    pacman -Qo "$f" >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
+remove_unmanaged_bin() {
+  local bin="$1"
+  command -v "$bin" >/dev/null 2>&1 || return 0
+  local path
+  path="$(command -v "$bin")"
+  [[ "$(basename "$path")" == "$bin" ]] || return 0
+  if file_owned_by_package "$path"; then
+    return 0
+  fi
+  case "$path" in
+    "$HOME"/*|/usr/local/bin/*|/usr/bin/*)
+      rm -f "$path" 2>/dev/null || sudo rm -f "$path" 2>/dev/null || true
+      ;;
+  esac
+}
+
+remove_dependencies() {
+  local pkgs=()
+  local name
+  for name in nodejs npm cloudflared; do
+    if pkg_installed "$name"; then
+      pkgs+=("$name")
+    fi
+  done
+  if [[ ${#pkgs[@]} -gt 0 ]]; then
+    echo -e "  ${DIM}   Paketler kaldırılıyor: ${pkgs[*]}${RST}"
+    if command -v apt-get >/dev/null 2>&1; then
+      sudo apt-get remove -y "${pkgs[@]}" || echo -e "  ${YEL}   apt kaldırma tamamlanamadı.${RST}"
+    elif command -v dnf >/dev/null 2>&1; then
+      sudo dnf remove -y "${pkgs[@]}" || echo -e "  ${YEL}   dnf kaldırma tamamlanamadı.${RST}"
+    elif command -v pacman >/dev/null 2>&1; then
+      sudo pacman -Rns --noconfirm "${pkgs[@]}" || echo -e "  ${YEL}   pacman kaldırma tamamlanamadı.${RST}"
+    else
+      echo -e "  ${YEL}   Paket yöneticisi bulunamadı. Paketler duruyor: ${pkgs[*]}${RST}"
+    fi
+  fi
+  remove_unmanaged_bin cloudflared
+  remove_unmanaged_bin node
+  remove_unmanaged_bin npm
+  remove_unmanaged_bin npx
+  if command -v node >/dev/null 2>&1; then
+    echo -e "  ${YEL}   Node.js hâlâ duruyor: $(command -v node)${RST}"
+  else
+    echo -e "  ${GRN}   Node.js bu oturumda artık yok.${RST}"
+  fi
+  if command -v cloudflared >/dev/null 2>&1; then
+    echo -e "  ${YEL}   cloudflared hâlâ duruyor: $(command -v cloudflared)${RST}"
+  else
+    echo -e "  ${GRN}   cloudflared bu oturumda artık yok.${RST}"
+  fi
+}
+
+print_uninstall_plan() {
+  local mode="$1"
+  local install root_full seen="" dir
+  install="$(install_dir_default)"
+  root_full="$(normalized_dir "$ROOT")"
+  for dir in "$install" "$root_full"; do
+    [[ -n "$dir" ]] || continue
+    case " $seen " in
+      *" $dir "*) continue ;;
+    esac
+    seen="$seen $dir"
+    if [[ -d "$dir" ]]; then
+      echo -e "  ${DIM}   - Tool klasörü: ${dir}${RST}"
+    fi
+  done
+  echo -e "  ${DIM}   - Komut: ${HOME}/.local/bin/duendee-tunnel${RST}"
+  if [[ -e /usr/local/bin/duendee-tunnel ]]; then
+    echo -e "  ${DIM}   - Komut: /usr/local/bin/duendee-tunnel${RST}"
+  fi
+  echo -e "  ${DIM}   - PATH satırı (~/.bashrc, ~/.zshrc, ~/.profile, ~/.bash_profile)${RST}"
+  echo -e "  ${DIM}   - Otomatik başlatma: ${AUTO_UNIT}${RST}"
+  if [[ -f "$AUTO_DESKTOP" ]]; then
+    echo -e "  ${DIM}   - Otomatik başlatma: ${AUTO_DESKTOP}${RST}"
+  fi
+  if [[ "$mode" == "2" ]]; then
+    echo -e "  ${DIM}   - Node.js (bu cihazdaki kurulum; diğer programlar da etkilenir)${RST}"
+    echo -e "  ${DIM}   - cloudflared (bu cihazdaki kurulum)${RST}"
+  fi
+}
+
+do_uninstall() {
+  local mode="${1:-}"
+  local ans=""
+  clear
+  echo
+  echo -e "${CYN}   --- Aracı Kaldır ---${RST}"
+  echo
+  if [[ "$mode" != "1" && "$mode" != "2" ]]; then
+    echo -e "  ${YEL}${BOLD}[1]${RST}  ${SKY}Yalnızca Duendee Tunnel Tool${RST}"
+    echo -e "  ${DIM}      Kurulum, komut, PATH ve otomatik başlatma silinir.${RST}"
+    echo -e "  ${YEL}${BOLD}[2]${RST}  ${SKY}Tool ile birlikte Node.js ve cloudflared${RST}"
+    echo -e "  ${DIM}      [1] ile aynı, artı bu cihazdaki Node.js ve cloudflared.${RST}"
+    echo -e "  ${YEL}${BOLD}[X]${RST}  ${SKY}Vazgeç${RST}"
+    echo
+    printf "%b" "${CYN}   Seçim [1/2/X]: ${RST}"
+    read -r -n 1 ans
+    echo
+    case "${ans^^}" in
+      1|2) mode="$ans" ;;
+      *) return 0 ;;
+    esac
+  fi
+
+  echo
+  echo -e "  ${RED}${BOLD}Emin misiniz?${RST} Bu işlem geri alınamaz."
+  echo
+  print_uninstall_plan "$mode"
+  echo
+  printf "%b" "${CYN}   [E] Evet, kaldır    [H] Hayır: ${RST}"
+  read -r -n 1 ans
+  echo
+  case "${ans^^}" in
+    E) ;;
+    *)
+      echo
+      echo -e "  ${YEL}   Kaldırma iptal edildi.${RST}"
+      if [[ -z "${UNINSTALL_CLI:-}" ]]; then
+        wait_key
+      fi
+      return 0
+      ;;
+  esac
+
+  echo
+  CLEANING_UP=1
+  kill_all || true
+  systemctl --user disable --now duendee-tunnel-tool.service >/dev/null 2>&1 || true
+  rm -f "$AUTO_UNIT" "$AUTO_DESKTOP" 2>/dev/null || true
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+
+  local rc
+  for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile" "$HOME/.bash_profile"; do
+    strip_path_marker "$rc"
+  done
+  remove_shim_file "${HOME}/.local/bin/duendee-tunnel"
+  remove_shim_file /usr/local/bin/duendee-tunnel
+
+  if [[ "$mode" == "2" ]]; then
+    remove_dependencies
+  fi
+
+  local install root_full seen="" dir
+  install="$(install_dir_default)"
+  root_full="$(normalized_dir "$ROOT")"
+  for dir in "$install" "$root_full"; do
+    [[ -n "$dir" && -d "$dir" ]] || continue
+    case " $seen " in
+      *" $dir "*) continue ;;
+    esac
+    seen="$seen $dir"
+    rm -rf "$dir" 2>/dev/null || sudo rm -rf "$dir" 2>/dev/null || true
+    if [[ -d "$dir" ]]; then
+      echo -e "  ${YEL}   Silinemedi: ${dir}${RST}"
+    else
+      echo -e "  ${GRN}   Silindi: ${dir}${RST}"
+    fi
+  done
+  echo
+  echo -e "  ${GRN}   Kaldırma tamam.${RST}"
+  echo
+  exit 0
+}
+
 do_shutdown() {
   clear
   echo
@@ -1092,6 +1339,12 @@ do_shutdown() {
 }
 
 # ---- entry ----
+if is_uninstall_arg "${1:-}"; then
+  UNINSTALL_CLI=1
+  do_uninstall "${2:-}"
+  exit 0
+fi
+
 load_config
 trap cleanup_quiet EXIT INT TERM HUP
 start_watcher
@@ -1119,6 +1372,7 @@ while true; do
     4) do_cancel ;;
     5) do_shutdown ;;
     6) do_autostart ;;
+    7) do_uninstall ;;
     *) ;;
   esac
 done

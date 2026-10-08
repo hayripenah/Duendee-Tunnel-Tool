@@ -10,6 +10,8 @@ bash -n scripts/extract-tunnel-url.sh
 bash -n scripts/tunnel-watcher.sh
 
 grep -q 'do_start()' duendee-tunnel-tool.sh
+grep -q 'do_uninstall()' duendee-tunnel-tool.sh
+grep -q 'Emin misiniz?' duendee-tunnel-tool.sh
 grep -q 'do_cancel()' duendee-tunnel-tool.sh
 grep -q 'tunnel_running' duendee-tunnel-tool.sh
 # Cancel must not call do_start (no auto-restart)

@@ -116,8 +116,21 @@ Shared pieces (repo root):
 4. **Cancel tunnel** (stops tunnel **and** the tool-started dev server; never auto-restarts)  
 5. Shutdown (stops tunnel + dev server + helpers, then exits)  
 6. Toggle device-start autostart  
+7. Uninstall — **[1]** tool only, **[2]** tool plus Node.js and cloudflared. Both paths ask **Emin misiniz?** before deleting anything.
 
 Closing the main tool window, Ctrl+C, or option **[5]** cleans up cloudflared, the dev server, and watchers. Helper processes run hidden in the background.
+
+## Uninstall
+
+From the menu, choose **[7]**. From a terminal:
+
+```text
+duendee-tunnel uninstall
+duendee-tunnel uninstall 1
+duendee-tunnel uninstall 2
+```
+
+`1` removes the tool copy you are running, the installed copy (`%LOCALAPPDATA%\DuendeeTunnelTool` or `~/.local/share/duendee-tunnel-tool`), the `duendee-tunnel` command, PATH entry, shortcut, and autostart. `2` does the same and also removes Node.js and cloudflared from this device. Passing `1` or `2` still asks for confirmation. `duendee-tunnel 7` opens the same prompt.
 
 ## Build portable packages (maintainers)
 
