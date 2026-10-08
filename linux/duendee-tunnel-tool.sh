@@ -1339,16 +1339,23 @@ do_uninstall() {
     remove_dependencies
   fi
 
-  local install root_full seen="" dir
+  local install root_full seen="" dir tries
   install="$(install_dir_default)"
   root_full="$(normalized_dir "$ROOT")"
+  cd /tmp 2>/dev/null || cd "$HOME" || true
   for dir in "$install" "$root_full"; do
     [[ -n "$dir" && -d "$dir" ]] || continue
     case " $seen " in
       *" $dir "*) continue ;;
     esac
     seen="$seen $dir"
-    rm -rf "$dir" 2>/dev/null || sudo rm -rf "$dir" 2>/dev/null || true
+    tries=0
+    while [[ -d "$dir" && "$tries" -lt 20 ]]; do
+      rm -rf "$dir" 2>/dev/null || sudo rm -rf "$dir" 2>/dev/null || true
+      [[ -d "$dir" ]] || break
+      tries=$((tries + 1))
+      sleep 0.5
+    done
     if [[ -d "$dir" ]]; then
       echo -e "  ${YEL}   Silinemedi: ${dir}${RST}"
     else

@@ -83,10 +83,17 @@ function Install-ShimAndUserPath {
   Set-Content -Path $shimCmd -Value $cmdShim -Encoding ASCII
 
   # Avoid expandable here-strings eating %~dp0 / $vars; write literal lines
+  # Explicit param so `duendee-tunnel uninstall` and `duendee-tunnel uninstall 2` reach the tool.
   $psShim = "#Requires -Version 5.1`r`n" +
+    'param(' + "`r`n" +
+    '  [Parameter(Position = 0)]' + "`r`n" +
+    '  [string]$Action = '''',' + "`r`n" +
+    '  [Parameter(Position = 1)]' + "`r`n" +
+    '  [string]$Choice = ''''' + "`r`n" +
+    ')' + "`r`n" +
     '$Root = Split-Path -Parent $PSScriptRoot' + "`r`n" +
-    'Set-Location -LiteralPath $Root' + "`r`n" +
-    '& (Join-Path $Root ''windows\duendee-tunnel-tool.ps1'') @args' + "`r`n"
+    '$tool = Join-Path $Root ''windows\duendee-tunnel-tool.ps1''' + "`r`n" +
+    'if ($Action) { & $tool $Action $Choice } else { & $tool }' + "`r`n"
   Set-Content -Path $shimPs1 -Value $psShim -Encoding UTF8
 
   # Also drop a shim into WindowsApps (often already on User PATH) as a belt-and-suspenders fallback

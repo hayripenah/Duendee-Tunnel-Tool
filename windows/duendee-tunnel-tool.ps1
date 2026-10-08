@@ -1138,26 +1138,63 @@ function Remove-UserPathEntry([string]$BinDir) {
   [Environment]::SetEnvironmentVariable('Path', ($kept -join ';'), 'User')
 }
 
+function Get-AncestorProcessIds {
+  $ids = New-Object 'System.Collections.Generic.HashSet[int]'
+  $cur = [int]$PID
+  while ($cur -gt 0 -and $ids.Add($cur)) {
+    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$cur" -ErrorAction SilentlyContinue
+    if (-not $proc) { break }
+    $cur = [int]$proc.ParentProcessId
+  }
+  return $ids
+}
+
+function Stop-OtherToolProcesses([string]$ToolRoot) {
+  $keep = Get-AncestorProcessIds
+  $root = $ToolRoot.TrimEnd('\')
+  if (-not $root) { return }
+  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    -not $keep.Contains([int]$_.ProcessId) -and $_.CommandLine -and ($_.CommandLine -like "*$root*")
+  } | ForEach-Object { Stop-ProcessTree ([int]$_.ProcessId) }
+}
+
 function Start-DeferredDirectoryDelete {
   param([string[]]$Paths)
-  $list = Join-Path $env:TEMP ("duendee-uninstall-" + [guid]::NewGuid().ToString('N') + '.txt')
-  @($Paths | Where-Object { $_ }) | Set-Content -LiteralPath $list -Encoding UTF8
+  $utf8 = New-Object System.Text.UTF8Encoding $false
+  $id = [guid]::NewGuid().ToString('N')
+  $list = Join-Path $env:TEMP ("duendee-uninstall-" + $id + '.txt')
+  $clean = @($Paths | Where-Object { $_ } | ForEach-Object { "$_".Trim() })
+  [System.IO.File]::WriteAllLines($list, $clean, $utf8)
   $runner = [System.IO.Path]::ChangeExtension($list, '.ps1')
-  @'
+  $body = @'
 param([string]$ListFile)
-Start-Sleep -Seconds 2
-if (Test-Path -LiteralPath $ListFile) {
-  foreach ($p in (Get-Content -LiteralPath $ListFile -Encoding UTF8)) {
-    $p = "$p".Trim()
-    if ($p -and (Test-Path -LiteralPath $p)) {
-      Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
+Set-Location -LiteralPath $env:TEMP
+$deadline = (Get-Date).AddSeconds(30)
+do {
+  $pending = New-Object System.Collections.Generic.List[string]
+  if (Test-Path -LiteralPath $ListFile) {
+    foreach ($raw in [System.IO.File]::ReadAllLines($ListFile)) {
+      $p = "$raw".Trim().TrimStart([char]0xFEFF)
+      if (-not $p) { continue }
+      if (-not (Test-Path -LiteralPath $p)) { continue }
+      try {
+        Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop
+      } catch {
+        cmd.exe /c "rmdir /s /q `"$p`"" | Out-Null
+      }
+      if (Test-Path -LiteralPath $p) { [void]$pending.Add($p) }
     }
   }
-  Remove-Item -LiteralPath $ListFile -Force -ErrorAction SilentlyContinue
-}
+  if ($pending.Count -eq 0) { break }
+  [System.IO.File]::WriteAllLines($ListFile, $pending.ToArray())
+  Start-Sleep -Seconds 1
+} while ((Get-Date) -lt $deadline)
+Remove-Item -LiteralPath $ListFile -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
-'@ | Set-Content -LiteralPath $runner -Encoding UTF8
-  Start-Process -FilePath powershell.exe -WindowStyle Hidden -ArgumentList @(
+'@
+  [System.IO.File]::WriteAllText($runner, $body.Replace("`r`n", "`n").Replace("`n", "`r`n"), $utf8)
+  Set-Location -LiteralPath $env:TEMP
+  Start-Process -FilePath powershell.exe -WorkingDirectory $env:TEMP -WindowStyle Hidden -ArgumentList @(
     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runner, '-ListFile', $list
   ) | Out-Null
 }
@@ -1266,7 +1303,9 @@ function Invoke-Uninstall {
   Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'DuendeeTunnelTool' -ErrorAction SilentlyContinue
 
   $install = Get-ToolInstallDir
+  $rootFull = Get-NormalizedDir $Root
   Remove-UserPathEntry (Join-Path $install 'bin')
+  Remove-UserPathEntry (Join-Path $rootFull 'bin')
   $waShim = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\duendee-tunnel.cmd'
   Remove-Item -LiteralPath $waShim -Force -ErrorAction SilentlyContinue
   $lnk = Join-Path (Get-UserDesktopPath) 'Duendee Tunnel Tool.lnk'
@@ -1276,7 +1315,7 @@ function Invoke-Uninstall {
     Invoke-RemoveDependencies
   }
 
-  $rootFull = Get-NormalizedDir $Root
+  Stop-OtherToolProcesses $rootFull
   $scriptFull = Get-NormalizedDir $PSCommandPath
   $immediate = @()
   $deferred = @()
@@ -1293,8 +1332,12 @@ function Invoke-Uninstall {
     }
   }
   foreach ($dir in $immediate) {
-    Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
-    Write-UiLine "  $GRN   Silindi: $dir$RST"
+    try {
+      Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction Stop
+      Write-UiLine "  $GRN   Silindi: $dir$RST"
+    } catch {
+      $deferred += $dir
+    }
   }
   if ($deferred.Count -gt 0) {
     Start-DeferredDirectoryDelete -Paths $deferred
