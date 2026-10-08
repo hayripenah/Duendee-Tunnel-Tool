@@ -567,13 +567,19 @@ logtail() {
 }
 
 autostate() {
-  AUTOEN=0
+  # off | tool | tunnel
+  AUTOMODE=off
+  local enabled=0
   if systemctl --user is-enabled duendee-tunnel-tool.service >/dev/null 2>&1; then
-    AUTOEN=1
+    enabled=1
   elif [[ -f "$AUTO_UNIT" ]]; then
-    # unit present but maybe not enabled
-    if systemctl --user is-enabled duendee-tunnel-tool.service >/dev/null 2>&1; then
-      AUTOEN=1
+    enabled=1
+  fi
+  if [[ "$enabled" == "1" ]]; then
+    if [[ -f "$AUTO_UNIT" ]] && grep -q 'boot-tunnel' "$AUTO_UNIT"; then
+      AUTOMODE=tunnel
+    else
+      AUTOMODE=tool
     fi
   fi
 }
@@ -740,11 +746,11 @@ show_menu() {
   echo -e "  ${YEL}${BOLD}[3]${RST}  ${SKY}Yayın Linkini Kopyala${RST}"
   echo -e "  ${YEL}${BOLD}[4]${RST}  ${SKY}Tünel Servisini İptal Et${RST}"
   echo -e "  ${YEL}${BOLD}[5]${RST}  ${SKY}Tüm Terminalleri Kapat ve Çık${RST}"
-  if [[ "${AUTOEN}" == "1" ]]; then
-    echo -e "  ${YEL}${BOLD}[6]${RST}  ${SKY}Cihaz Açılışında Otomatik Başlat${RST}  ${GRN}[AÇIK]${RST}"
-  else
-    echo -e "  ${YEL}${BOLD}[6]${RST}  ${SKY}Cihaz Açılışında Otomatik Başlat${RST}  ${DIM}[KAPALI]${RST}"
-  fi
+  case "${AUTOMODE}" in
+    tool) echo -e "  ${YEL}${BOLD}[6]${RST}  ${SKY}Cihaz Açılışında Otomatik Başlat${RST}  ${GRN}[TOOL]${RST}" ;;
+    tunnel) echo -e "  ${YEL}${BOLD}[6]${RST}  ${SKY}Cihaz Açılışında Otomatik Başlat${RST}  ${GRN}[TOOL+TÜNEL]${RST}" ;;
+    *) echo -e "  ${YEL}${BOLD}[6]${RST}  ${SKY}Cihaz Açılışında Otomatik Başlat${RST}  ${DIM}[KAPALI]${RST}" ;;
+  esac
   echo -e "  ${YEL}${BOLD}[7]${RST}  ${SKY}Aracı Cihazdan Kaldır${RST}"
   echo
   echo -e "${DIM}      Kapatmak için pencereyi kapatın, [Ctrl]+[C] ya da [5]${RST}"
@@ -1009,78 +1015,106 @@ do_cancel() {
   wait_key
 }
 
-do_autostart() {
-  clear
-  echo
-  echo -e "${CYN}   --- Cihaz Açılışında Otomatik Başlat ---${RST}"
-  echo
-  autostate
-  if [[ "$AUTOEN" == "1" ]]; then
-    echo -e "  ${DIM}   Durum:${RST} ${YEL}${BOLD}[AÇIK]${RST}"
-    echo -e "  ${DIM}   Cihaz açıldığında tool kendiliğinden açılır, servisi [1] ile elle başlatırsın.${RST}"
-    echo
-    printf "   Otomatik başlatmayı kapat  [K]   -   geri dön  [X]: "
-    read -r -n 1 ans
-    echo
-    case "${ans^^}" in
-      K)
-        systemctl --user disable --now duendee-tunnel-tool.service >/dev/null 2>&1 || true
-        rm -f "$AUTO_UNIT"
-        systemctl --user daemon-reload >/dev/null 2>&1 || true
-        autostate
-        echo
-        if [[ "$AUTOEN" == "0" ]]; then
-          echo -e "  ${GRN}   Otomatik başlatma kapatıldı.${RST}"
-          echo -e "  ${DIM}   Bundan sonra cihaz açıldığında tool açılmayacak.${RST}"
-        else
-          echo -e "  ${RED}${BOLD}[HATA]${RST} Ayar kapatılamadı, kayıt duruyor."
-        fi
-        ;;
-      *) return ;;
-    esac
-  else
-    echo -e "  ${DIM}   Durum:${RST} ${RED}${BOLD}[KAPALI]${RST}"
-    echo -e "  ${DIM}   Cihaz açıldığında tool açılmıyor.${RST}"
-    echo
-    printf "   Otomatik başlatmayı aç  [A]   -   geri dön  [X]: "
-    read -r -n 1 ans
-    echo
-    case "${ans^^}" in
-      A)
-        mkdir -p "$AUTO_UNIT_DIR"
-        cat >"$AUTO_UNIT" <<EOF
+write_autostart_unit() {
+  local arg="${1:-}"
+  mkdir -p "$AUTO_UNIT_DIR"
+  cat >"$AUTO_UNIT" <<EOF
 [Unit]
 Description=Duendee Tunnel Tool
 After=default.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/env bash "${OS_DIR}/duendee-tunnel-tool.sh"
+ExecStart=/usr/bin/env bash "${OS_DIR}/duendee-tunnel-tool.sh" ${arg}
 WorkingDirectory=${ROOT}
 Restart=no
 
 [Install]
 WantedBy=default.target
 EOF
-        systemctl --user daemon-reload >/dev/null 2>&1 || true
-        if systemctl --user enable duendee-tunnel-tool.service >/dev/null 2>&1; then
-          # linger so user units can start at boot without login (best-effort)
-          loginctl enable-linger "$USER" >/dev/null 2>&1 || true
-        fi
-        autostate
-        echo
-        if [[ "$AUTOEN" == "1" ]]; then
-          echo -e "  ${GRN}   Otomatik başlatma açık.${RST}"
-          echo -e "  ${DIM}   Bundan sonra cihaz açıldığında tool kendiliğinden açılacak. Servisi [1] ile başlatabilirsin.${RST}"
-          echo -e "  ${DIM}   Kayıt: ${AUTO_UNIT}${RST}"
-        else
-          echo -e "  ${RED}${BOLD}[HATA]${RST} Ayar kaydedilemedi, kayıt oluşturulamadı."
-          echo -e "  ${DIM}   systemd --user kullanılabilir olmalı.${RST}"
-        fi
-        ;;
-      *) return ;;
-    esac
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+  if systemctl --user enable duendee-tunnel-tool.service >/dev/null 2>&1; then
+    loginctl enable-linger "$USER" >/dev/null 2>&1 || true
+    return 0
   fi
+  return 1
+}
+
+disable_autostart() {
+  systemctl --user disable --now duendee-tunnel-tool.service >/dev/null 2>&1 || true
+  rm -f "$AUTO_UNIT"
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+}
+
+do_autostart() {
+  local ans="" choices="TSX"
+  clear
+  echo
+  echo -e "${CYN}   --- Cihaz Açılışında Otomatik Başlat ---${RST}"
+  echo
+  autostate
+  case "$AUTOMODE" in
+    tool)
+      echo -e "  ${DIM}   Durum:${RST} ${GRN}${BOLD}[TOOL]${RST}"
+      echo -e "  ${DIM}   Cihaz açıldığında yalnızca tool açılır. Tünel servisini [1] ile başlatırsın.${RST}"
+      ;;
+    tunnel)
+      echo -e "  ${DIM}   Durum:${RST} ${GRN}${BOLD}[TOOL+TÜNEL]${RST}"
+      echo -e "  ${DIM}   Cihaz açıldığında tool açılır ve tünel servisi kendiliğinden başlar.${RST}"
+      ;;
+    *)
+      echo -e "  ${DIM}   Durum:${RST} ${RED}${BOLD}[KAPALI]${RST}"
+      echo -e "  ${DIM}   Cihaz açıldığında tool açılmıyor.${RST}"
+      ;;
+  esac
+  echo
+  echo -e "  ${YEL}${BOLD}[T]${RST}  ${SKY}Yalnızca tool'u otomatik başlat${RST}"
+  echo -e "  ${YEL}${BOLD}[S]${RST}  ${SKY}Tool'u ve tünel servisini otomatik başlat${RST}"
+  if [[ "$AUTOMODE" != "off" ]]; then
+    echo -e "  ${YEL}${BOLD}[K]${RST}  ${SKY}Otomatik başlatmayı kapat${RST}"
+    choices="TSKX"
+  fi
+  echo -e "  ${YEL}${BOLD}[X]${RST}  ${SKY}Geri dön${RST}"
+  echo
+  printf "%b" "${CYN}   Seçim: ${RST}"
+  read -r -n 1 ans
+  echo
+  case "${ans^^}" in
+    T)
+      if [[ "$AUTOMODE" == "tool" ]]; then
+        echo -e "  ${YEL}   Bu ayar zaten seçili.${RST}"
+      elif write_autostart_unit ""; then
+        echo -e "  ${GRN}   Yalnızca tool otomatik başlayacak.${RST}"
+        echo -e "  ${DIM}   Kayıt: ${AUTO_UNIT}${RST}"
+      else
+        echo -e "  ${RED}${BOLD}[HATA]${RST} Ayar kaydedilemedi."
+        echo -e "  ${DIM}   systemd --user kullanılabilir olmalı.${RST}"
+      fi
+      ;;
+    S)
+      if [[ "$AUTOMODE" == "tunnel" ]]; then
+        echo -e "  ${YEL}   Bu ayar zaten seçili.${RST}"
+      elif write_autostart_unit "boot-tunnel"; then
+        echo -e "  ${GRN}   Tool ve tünel servisi otomatik başlayacak.${RST}"
+        echo -e "  ${DIM}   Kayıt: ${AUTO_UNIT}${RST}"
+      else
+        echo -e "  ${RED}${BOLD}[HATA]${RST} Ayar kaydedilemedi."
+        echo -e "  ${DIM}   systemd --user kullanılabilir olmalı.${RST}"
+      fi
+      ;;
+    K)
+      [[ "$AUTOMODE" == "off" ]] && return 0
+      disable_autostart
+      autostate
+      echo
+      if [[ "$AUTOMODE" == "off" ]]; then
+        echo -e "  ${GRN}   Otomatik başlatma kapatıldı.${RST}"
+      else
+        echo -e "  ${RED}${BOLD}[HATA]${RST} Ayar kapatılamadı, kayıt duruyor."
+      fi
+      ;;
+    *) return 0 ;;
+  esac
   echo
   wait_key
 }
@@ -1349,7 +1383,9 @@ load_config
 trap cleanup_quiet EXIT INT TERM HUP
 start_watcher
 
-if [[ "${1:-}" != "" ]]; then
+if [[ "${1:-}" == "boot-tunnel" ]]; then
+  do_start
+elif [[ "${1:-}" != "" ]]; then
   AUTO=1
   case "$1" in
     1) do_start; exit 0 ;;

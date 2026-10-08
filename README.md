@@ -115,7 +115,7 @@ Shared pieces (repo root):
 3. Copy public link  
 4. **Cancel tunnel** (stops tunnel **and** the tool-started dev server; never auto-restarts)  
 5. Shutdown (stops tunnel + dev server + helpers, then exits)  
-6. Toggle device-start autostart  
+6. Device-start autostart — **[T]** open only the tool, **[S]** open the tool and start the tunnel service, **[K]** turn it off  
 7. Uninstall — **[1]** tool only, **[2]** tool plus Node.js and cloudflared. Both paths ask **Emin misiniz?** before deleting anything.
 
 Closing the main tool window, Ctrl+C, or option **[5]** cleans up cloudflared, the dev server, and watchers. Helper processes run hidden in the background.

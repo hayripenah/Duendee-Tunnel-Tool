@@ -385,7 +385,8 @@ if (-not $script:UninstallCli -and -not (Test-Path -LiteralPath $StateDir)) {
   New-Item -ItemType Directory -Path $StateDir | Out-Null
 }
 
-$script:AutoMode = -not [string]::IsNullOrWhiteSpace($Action)
+$script:BootTunnel = ($Action -eq 'boot-tunnel')
+$script:AutoMode = -not [string]::IsNullOrWhiteSpace($Action) -and -not $script:BootTunnel
 $env:PROJECT = $Project
 $env:SERVER_PID = $ServerPidFile
 $env:PID_FILE = $PidFile
@@ -393,8 +394,30 @@ $env:URL_FILE = $UrlFile
 $env:LOG = $LogFile
 $env:OUT_LOG = $OutLogFile
 
-function Get-AutoEnabled {
-  $null -ne (Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'DuendeeTunnelTool' -ErrorAction SilentlyContinue)
+function Get-AutoRunCommand {
+  $prop = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'DuendeeTunnelTool' -ErrorAction SilentlyContinue
+  if (-not $prop) { return '' }
+  return [string]$prop.DuendeeTunnelTool
+}
+
+function Get-AutoMode {
+  $cmd = Get-AutoRunCommand
+  if ([string]::IsNullOrWhiteSpace($cmd)) { return 'off' }
+  if ($cmd -match '(?i)boot-tunnel') { return 'tunnel' }
+  return 'tool'
+}
+
+function Set-AutoMode([string]$Mode) {
+  $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+  if ($Mode -eq 'off') {
+    Remove-ItemProperty -Path $key -Name 'DuendeeTunnelTool' -ErrorAction SilentlyContinue
+    return ((Get-AutoMode) -eq 'off')
+  }
+  $batLauncher = Join-Path $OsDir 'Duendee Tunnel Tool.bat'
+  $val = '"' + $batLauncher + '"'
+  if ($Mode -eq 'tunnel') { $val = $val + ' boot-tunnel' }
+  New-ItemProperty -Path $key -Name 'DuendeeTunnelTool' -Value $val -PropertyType String -Force | Out-Null
+  return ((Get-AutoMode) -eq $Mode)
 }
 
 function Read-TunnelPid {
@@ -694,18 +717,19 @@ function Show-Logo {
 function Show-Menu {
   Initialize-Utf8Console
   Clear-Host
-  $autoOn = Get-AutoEnabled
+  $autoMode = Get-AutoMode
   Show-Logo
   Write-UiLine "  $YEL$BOLD[1]$RST  ${SKY}Tünel Servisi Başlat$RST"
   Write-UiLine "  $YEL$BOLD[2]$RST  ${SKY}Servis Durumunu Kontrol Et$RST"
   Write-UiLine "  $YEL$BOLD[3]$RST  ${SKY}Yayın Linkini Kopyala$RST"
   Write-UiLine "  $YEL$BOLD[4]$RST  ${SKY}Tünel Servisini İptal Et$RST"
   Write-UiLine "  $YEL$BOLD[5]$RST  ${SKY}Tüm Terminalleri Kapat ve Çık$RST"
-  if ($autoOn) {
-    Write-UiLine "  $YEL$BOLD[6]$RST  ${SKY}Cihaz Açılışında Otomatik Başlat$RST  $GRN[AÇIK]$RST"
-  } else {
-    Write-UiLine "  $YEL$BOLD[6]$RST  ${SKY}Cihaz Açılışında Otomatik Başlat$RST  $DIM[KAPALI]$RST"
+  $autoLabel = switch ($autoMode) {
+    'tool' { "$GRN[TOOL]$RST" }
+    'tunnel' { "$GRN[TOOL+TÜNEL]$RST" }
+    default { "$DIM[KAPALI]$RST" }
   }
+  Write-UiLine "  $YEL$BOLD[6]$RST  ${SKY}Cihaz Açılışında Otomatik Başlat$RST  $autoLabel"
   Write-UiLine "  $YEL$BOLD[7]$RST  ${SKY}Aracı Cihazdan Kaldır$RST"
   Write-UiLine ''
   Write-UiLine "$DIM      Kapatmak için pencereyi kapatın, [Ctrl]+[C] ya da [5]$RST"
@@ -956,37 +980,54 @@ function Invoke-Autostart {
   Write-UiLine ''
   Write-UiLine "$CYN   --- Cihaz Açılışında Otomatik Başlat ---$RST"
   Write-UiLine ''
-  $batLauncher = Join-Path $OsDir 'Duendee Tunnel Tool.bat'
-  if (Get-AutoEnabled) {
-    Write-UiLine "  $DIM   Durum:$RST $YEL$BOLD[AÇIK]$RST"
-    Write-UiLine "  $DIM   Cihaz açıldığında tool kendiliğinden açılır, servisi [1] ile elle başlatırsın.$RST"
-    Write-UiLine ''
-    Write-Ui '   Otomatik başlatmayı kapat  [K]   -   geri dön  [X]: '
-    $c = Get-Choice 'KX'
-    Write-UiLine ''
-    if ($c -eq 'X') { return }
-    Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'DuendeeTunnelTool' -ErrorAction SilentlyContinue
-    if (-not (Get-AutoEnabled)) {
-      Write-UiLine "  $GRN   Otomatik başlatma kapatıldı.$RST"
-    } else {
-      Write-UiLine "  $RED$BOLD[HATA]$RST Ayar kapatılamadı."
+  $mode = Get-AutoMode
+  switch ($mode) {
+    'tool' {
+      Write-UiLine "  $DIM   Durum:$RST $GRN$BOLD[TOOL]$RST"
+      Write-UiLine "  $DIM   Cihaz açıldığında yalnızca tool açılır. Tünel servisini [1] ile başlatırsın.$RST"
     }
+    'tunnel' {
+      Write-UiLine "  $DIM   Durum:$RST $GRN$BOLD[TOOL+TÜNEL]$RST"
+      Write-UiLine "  $DIM   Cihaz açıldığında tool açılır ve tünel servisi kendiliğinden başlar.$RST"
+    }
+    default {
+      Write-UiLine "  $DIM   Durum:$RST $RED$BOLD[KAPALI]$RST"
+      Write-UiLine "  $DIM   Cihaz açıldığında tool açılmıyor.$RST"
+    }
+  }
+  Write-UiLine ''
+  Write-UiLine "  $YEL$BOLD[T]$RST  ${SKY}Yalnızca tool'u otomatik başlat$RST"
+  Write-UiLine "  $YEL$BOLD[S]$RST  ${SKY}Tool'u ve tünel servisini otomatik başlat$RST"
+  if ($mode -ne 'off') {
+    Write-UiLine "  $YEL$BOLD[K]$RST  ${SKY}Otomatik başlatmayı kapat$RST"
+  }
+  Write-UiLine "  $YEL$BOLD[X]$RST  ${SKY}Geri dön$RST"
+  Write-UiLine ''
+  $choices = if ($mode -ne 'off') { 'TSKX' } else { 'TSX' }
+  Write-Ui "$CYN   Seçim: $RST"
+  $c = Get-Choice $choices
+  Write-UiLine ''
+  if ($c -eq 'X') { return }
+  $target = switch ($c) {
+    'T' { 'tool' }
+    'S' { 'tunnel' }
+    default { 'off' }
+  }
+  if ($target -eq $mode) {
+    Write-UiLine "  $YEL   Bu ayar zaten seçili.$RST"
+    Complete-Action
+    return
+  }
+  $ok = Set-AutoMode $target
+  if ($ok) {
+    switch ($target) {
+      'tool' { Write-UiLine "  $GRN   Yalnızca tool otomatik başlayacak.$RST" }
+      'tunnel' { Write-UiLine "  $GRN   Tool ve tünel servisi otomatik başlayacak.$RST" }
+      default { Write-UiLine "  $GRN   Otomatik başlatma kapatıldı.$RST" }
+    }
+    Write-UiLine "  $DIM   Kayıt: HKCU\...\Run - DuendeeTunnelTool$RST"
   } else {
-    Write-UiLine "  $DIM   Durum:$RST $RED$BOLD[KAPALI]$RST"
-    Write-UiLine "  $DIM   Cihaz açıldığında tool açılmıyor.$RST"
-    Write-UiLine ''
-    Write-Ui '   Otomatik başlatmayı aç  [A]   -   geri dön  [X]: '
-    $c = Get-Choice 'AX'
-    Write-UiLine ''
-    if ($c -eq 'X') { return }
-    $val = '"' + $batLauncher + '"'
-    New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'DuendeeTunnelTool' -Value $val -PropertyType String -Force | Out-Null
-    if (Get-AutoEnabled) {
-      Write-UiLine "  $GRN   Otomatik başlatma açık.$RST"
-      Write-UiLine "  $DIM   Kayıt: HKCU\...\Run - DuendeeTunnelTool$RST"
-    } else {
-      Write-UiLine "  $RED$BOLD[HATA]$RST Ayar kaydedilemedi."
-    }
+    Write-UiLine "  $RED$BOLD[HATA]$RST Ayar kaydedilemedi."
   }
   Complete-Action
 }
@@ -1323,6 +1364,9 @@ try {
     $script:CleanupDone = $true
     Invoke-Uninstall -Mode $UninstallChoice
     exit 0
+  }
+  if ($script:BootTunnel) {
+    Invoke-Start
   }
   switch ($Action) {
     '1' { Invoke-Start; exit 0 }
