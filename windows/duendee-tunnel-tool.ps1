@@ -1552,14 +1552,19 @@ try {
     Show-Menu
     $choice = Get-Choice '1234567'
     Write-UiLine ''
-    switch ($choice) {
-      '1' { Invoke-Start }
-      '2' { Invoke-Status }
-      '3' { Invoke-CopyLink }
-      '4' { Invoke-Cancel }
-      '5' { Invoke-Shutdown }
-      '6' { Invoke-Autostart }
-      '7' { Invoke-Uninstall }
+    try {
+      switch ($choice) {
+        '1' { Invoke-Start }
+        '2' { Invoke-Status }
+        '3' { Invoke-CopyLink }
+        '4' { Invoke-Cancel }
+        '5' { Invoke-Shutdown }
+        '6' { Invoke-Autostart }
+        '7' { Invoke-Uninstall }
+      }
+    } catch {
+      Write-UiLine "  $RED$BOLD[HATA]$RST $($_.Exception.Message)"
+      Complete-Action
     }
   }
 } finally {

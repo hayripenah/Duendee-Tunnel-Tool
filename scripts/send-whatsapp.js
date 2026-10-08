@@ -1,4 +1,4 @@
-import { default as makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
+import { default as makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers } from '@whiskeysockets/baileys';
 import qrcodeTerminal from 'qrcode-terminal';
 import QRCode from 'qrcode';
 import pino from 'pino';
@@ -108,15 +108,19 @@ function saveSent(rows) {
 }
 
 function showQr(qr) {
+  qrSeen = true;
   console.log('');
   console.log('  ============================================================');
   console.log('  ' + phone + ' hattina bagli degil — yeni QR');
-  console.log('  WhatsApp oturumu yok — QR ile baglayin / Scan QR to link');
+  console.log('  Bagli cihazlarda Chrome olarak gorunur.');
   console.log('  WhatsApp > Bagli Cihazlar > Cihaz Bagla');
-  console.log('  WhatsApp > Linked Devices > Link a Device');
   console.log('  ============================================================');
   console.log('');
-  qrcodeTerminal.generate(qr, { small: true });
+  try {
+    qrcodeTerminal.generate(qr, { small: true });
+  } catch (err) {
+    console.log('  Terminal QR yazilamadi: ' + (err?.message || err));
+  }
   QRCode.toFile(qrImage, qr, { width: 400, margin: 2 })
     .then(() => {
       console.log('');
@@ -141,9 +145,14 @@ function toDigits(raw) {
   return String(raw || '').replace(/[^0-9]/g, '');
 }
 
+function userDigits(raw) {
+  const user = String(raw || '').trim().split('@')[0].split(':')[0];
+  return user.replace(/[^0-9]/g, '');
+}
+
 function phonesMatch(accountId, target) {
-  const account = toDigits(accountId);
-  const expected = toDigits(target);
+  const account = userDigits(accountId);
+  const expected = userDigits(target);
   if (!account || !expected) return false;
   return account === expected || account.endsWith(expected) || expected.endsWith(account);
 }
@@ -250,13 +259,6 @@ async function deleteStored(sock, keepUrl) {
 }
 
 async function sendText(sock, jid, message) {
-  if (typeof sock.assertSessions === 'function') {
-    try {
-      await sock.assertSessions([jid], true);
-    } catch {
-      /* a missing session is retried by sendMessage */
-    }
-  }
   const sentMsg = await sock.sendMessage(jid, { text: message });
   const id = sentMsg?.key?.id;
   if (!id) {
@@ -305,8 +307,19 @@ async function deliver(sock) {
   console.log('WhatsApp mesaji gonderildi -> ' + phone + ' | ' + url);
 }
 
+let qrSeen = false;
+process.on('uncaughtException', (err) => {
+  console.error('WhatsApp hatasi: ' + (err?.message || err));
+  if (!qrSeen) process.exit(1);
+});
+process.on('unhandledRejection', (err) => {
+  console.error('WhatsApp hatasi: ' + (err?.message || err));
+  if (!qrSeen) process.exit(1);
+});
+
 async function main() {
-  if (action === 'send' && fs.existsSync(credsPath) && !phonesMatch(readLinkedId(), phone)) {
+  const linkedNow = readLinkedId();
+  if (action === 'send' && linkedNow && !phonesMatch(linkedNow, phone)) {
     console.log('  Kayitli WhatsApp hatti ' + phone + ' degil. Yeni QR olusturuluyor...');
     try {
       fs.rmSync(sessionDir, { recursive: true, force: true });
@@ -386,7 +399,7 @@ async function main() {
     } catch {
       /* ignore */
     }
-    setTimeout(() => process.exit(code), 350);
+    setTimeout(() => process.exit(code), 1500);
   };
 
   timer = setTimeout(() => {
@@ -462,7 +475,7 @@ async function main() {
       auth: state,
       version,
       logger: pino({ level: 'silent' }),
-      browser: ['Duendee Tunnel Tool', 'Chrome', '120.0.0'],
+      browser: process.platform === 'win32' ? Browsers.windows('Chrome') : Browsers.ubuntu('Chrome'),
       syncFullHistory: false,
       markOnlineOnConnect: false
     });
@@ -489,6 +502,7 @@ async function main() {
 
     current.ev.on('connection.update', (update) => {
       if (finished || gen !== generation) return;
+      try {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr && action === 'send' && !delivered) showQr(qr);
@@ -549,6 +563,9 @@ async function main() {
         setTimeout(() => {
           connect().catch((err) => finish(1, 'WhatsApp baslatilamadi: ' + (err?.message || err)));
         }, restarting ? 500 : 2000);
+      }
+      } catch (err) {
+        console.error('  WhatsApp baglanti hatasi: ' + (err?.message || err));
       }
     });
   };
