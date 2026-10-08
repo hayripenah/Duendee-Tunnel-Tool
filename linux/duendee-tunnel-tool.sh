@@ -539,9 +539,54 @@ refresh_url() {
   [[ -n "${URL:-}" ]] && TUNNEL_URL="$URL"
 }
 
+short_log_line() {
+  local t="$1"
+  t="${t#[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T* }"
+  t="${t#ERR }"
+  t="${t#WRN }"
+  t="${t#INF }"
+  case "$t" in
+    *'Registered tunnel connection'*) printf '%s\n' 'Tünel bağlandı'; return ;;
+    *'quick Tunnel has been created'*|*'Requesting new quick Tunnel'*) printf '%s\n' 'Hızlı tünel açıldı'; return ;;
+    *'Unable to reach the origin'*|*'connection refused'*) printf '%s\n' 'Yerel sunucuya ulaşılamadı'; return ;;
+    *'failed to serve tunnel'*|*'connection terminated'*|*'context canceled'*) printf '%s\n' 'Tünel kesildi'; return ;;
+  esac
+  case "$t" in
+    '+'*|'|'*|*'Thank you for trying'*|*'no uptime guarantee'*|*'Cannot determine default'*|*'GOOS:'*|*'GoArch:'*|*'Settings:'*|*'automatically update'*|*'Generated Connector'*|*'Initial protocol'*|*'ICMP proxy'*|*'metrics server'*|'Version '*) return 0 ;;
+  esac
+  t="${t#"${t%%[![:space:]]*}"}"
+  t="${t%"${t##*[![:space:]]}"}"
+  [[ -n "$t" ]] || return 0
+  if ((${#t} > 64)); then
+    t="${t:0:61}..."
+  fi
+  printf '%s\n' "$t"
+}
+
 logtail() {
+  local brief="${1:-}"
   echo -e "  ${DIM}   Son log:${RST}"
   if [[ ! -f "$LOG" ]]; then
+    return 0
+  fi
+  if [[ "$brief" == "brief" ]]; then
+    local -a shown=()
+    local s short seen
+    while IFS= read -r s; do
+      short="$(short_log_line "$s" || true)"
+      [[ -n "$short" ]] || continue
+      seen=0
+      for prev in "${shown[@]+"${shown[@]}"}"; do
+        [[ "$prev" == "$short" ]] && seen=1 && break
+      done
+      [[ "$seen" == "1" ]] && continue
+      shown+=("$short")
+    done < <(tail -n 24 "$LOG" 2>/dev/null || true)
+    local i start=${#shown[@]}
+    if (( start > 4 )); then start=$((${#shown[@]} - 4)); else start=0; fi
+    for ((i = start; i < ${#shown[@]}; i++)); do
+      echo "    ${shown[$i]}"
+    done
     return 0
   fi
   tail -n 8 "$LOG" 2>/dev/null | while IFS= read -r s; do
@@ -949,7 +994,7 @@ do_status() {
     echo -e "  Tünel Servisi ..... ${RED}KAPALI${RST}"
   fi
   if [[ -f "$LOG" ]]; then
-    logtail
+    logtail brief
   fi
   echo
   wait_key

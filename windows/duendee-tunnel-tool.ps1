@@ -674,9 +674,40 @@ function Get-TunnelUrl {
   return $u.Trim()
 }
 
+function Format-ShortLogLine([string]$Line) {
+  $t = $Line -replace '^\d{4}-\d{2}-\d{2}T\S+\s+', ''
+  $t = $t -replace '^(ERR|WRN|INF)\s+', ''
+  if ($t -match 'Registered tunnel connection') { return 'Tünel bağlandı' }
+  if ($t -match 'quick Tunnel has been created|Requesting new quick Tunnel') { return 'Hızlı tünel açıldı' }
+  if ($t -match 'Unable to reach the origin|connection refused') { return 'Yerel sunucuya ulaşılamadı' }
+  if ($t -match 'failed to serve tunnel|connection terminated|context canceled') { return 'Tünel kesildi' }
+  if ($t -match '^\+|^\||Thank you for trying|no uptime guarantee|Cannot determine default|GOOS:|GoArch:|Settings:|automatically update|Generated Connector|Initial protocol|ICMP proxy|metrics server|^Version ') {
+    return $null
+  }
+  $t = $t.Trim()
+  if (-not $t) { return $null }
+  if ($t.Length -gt 64) { return $t.Substring(0, 61) + '...' }
+  return $t
+}
+
 function Show-LogTail {
+  param([switch]$Brief)
   Write-UiLine "  $DIM   Son log:$RST"
   if (-not (Test-Path -LiteralPath $LogFile)) { return }
+  if ($Brief) {
+    $shown = New-Object System.Collections.Generic.List[string]
+    foreach ($s in (Get-Content -LiteralPath $LogFile -Tail 24 -ErrorAction SilentlyContinue)) {
+      $short = Format-ShortLogLine $s
+      if (-not $short) { continue }
+      if ($shown.Contains($short)) { continue }
+      [void]$shown.Add($short)
+    }
+    $start = [Math]::Max(0, $shown.Count - 4)
+    for ($i = $start; $i -lt $shown.Count; $i++) {
+      Write-UiLine "    $($shown[$i])"
+    }
+    return
+  }
   foreach ($s in (Get-Content -LiteralPath $LogFile -Tail 8 -ErrorAction SilentlyContinue)) {
     $t = $s
     $t = $t -replace '^ERR ', 'Hata: '
@@ -811,7 +842,7 @@ function Invoke-Status {
   } else {
     Write-UiLine "  Tünel Servisi ..... ${RED}KAPALI$RST"
   }
-  if (Test-Path -LiteralPath $LogFile) { Show-LogTail }
+  if (Test-Path -LiteralPath $LogFile) { Show-LogTail -Brief }
   Complete-Action
 }
 
