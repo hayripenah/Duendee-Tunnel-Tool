@@ -1536,6 +1536,8 @@ function Invoke-ExitCleanup {
   if ($script:CleanupDone) { return }
   $script:CleanupDone = $true
   try {
+    # Spawn before any slow process cleanup. Closing the window kills this process quickly.
+    Start-DetachedRetract
     $tpid = Read-TunnelPid
     if ($tpid -and (Test-PidAlive $tpid)) { Stop-ProcessTree $tpid }
     Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object { Stop-ProcessTree $_.Id }
@@ -1552,10 +1554,28 @@ function Invoke-ExitCleanup {
         ForEach-Object { Stop-ProcessTree ([int]$_.ProcessId) }
     }
     Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue
-    # Detached so the delete survives the console window closing.
-    Start-DetachedRetract
   } catch {}
 }
+
+try {
+  if (-not ('DuendeeConsoleCtrl' -as [type])) {
+    Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class DuendeeConsoleCtrl {
+  public delegate bool Handler(int ctrlType);
+  [DllImport("kernel32.dll")] public static extern bool SetConsoleCtrlHandler(Handler handler, bool add);
+}
+'@
+  }
+  $script:ConsoleCloseHandler = [DuendeeConsoleCtrl+Handler] {
+    param([int]$ctrlType)
+    # 2 = window closed. Start the delete before this process is torn down.
+    if ($ctrlType -eq 2) { Start-DetachedRetract }
+    return $false
+  }
+  [void][DuendeeConsoleCtrl]::SetConsoleCtrlHandler($script:ConsoleCloseHandler, $true)
+} catch {}
 
 try {
   [Console]::TreatControlCAsInput = $false

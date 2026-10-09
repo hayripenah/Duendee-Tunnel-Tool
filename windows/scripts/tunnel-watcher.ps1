@@ -14,6 +14,9 @@ while (Get-Process -Id $ToolPid -ErrorAction SilentlyContinue) {
   Start-Sleep -Milliseconds 500
 }
 
+$closeLog = Join-Path $state 'wa-retract.log'
+Add-Content -LiteralPath $closeLog -Value ("tool-closed " + (Get-Date).ToString('o')) -ErrorAction SilentlyContinue
+
 # The tool terminal is gone. The link message stays only while the tool is running.
 $waJs = Join-Path $ToolRoot 'scripts\send-whatsapp.js'
 $sentFile = Join-Path $ToolRoot '.whatsapp-session\sent-links.json'

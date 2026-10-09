@@ -247,18 +247,30 @@ async function deleteStored(sock, keepUrl) {
       keep.push(row);
       continue;
     }
-    try {
-      await sock.sendMessage(row.jid, {
-        delete: { remoteJid: row.jid, fromMe: true, id: row.id }
-      });
-      console.log('  Eski link mesaji kaldirildi: ' + (row.url || row.id));
-    } catch (err) {
-      console.error('  Mesaj kaldirilamadi, sonra tekrar denenecek: ' + (err?.message || err));
-      keep.push(row);
+    const pn = toDigits(phone) + '@s.whatsapp.net';
+    const jids = [...new Set([row.jid, pn].filter(Boolean))];
+    let removed = false;
+    for (const jid of jids) {
+      try {
+        await sock.sendMessage(jid, {
+          delete: { remoteJid: jid, fromMe: true, id: row.id }
+        });
+        removed = true;
+      } catch (err) {
+        console.error('  Mesaj kaldirilamadi (' + jid + '): ' + (err?.message || err));
+      }
     }
+    if (removed) console.log('  Eski link mesaji kaldirildi: ' + (row.url || row.id));
+    else keep.push(row);
   }
   saveSent(keep);
   return keep;
+}
+
+function rememberSent(id, jid, messageUrl) {
+  const rows = loadSent().filter((row) => row.id !== id);
+  rows.push({ id, jid, url: messageUrl, at: new Date().toISOString() });
+  saveSent(rows);
 }
 
 async function sendText(sock, jid, message) {
@@ -267,8 +279,10 @@ async function sendText(sock, jid, message) {
   if (!id) {
     throw new Error('Mesaj anahtari donmedi');
   }
+  const remoteJid = sentMsg.key?.remoteJid || jid;
+  rememberSent(id, remoteJid, url);
   const acked = await waitForServerAck(sock, id, 12000);
-  return { sentMsg, id, jid: sentMsg.key?.remoteJid || jid, acked };
+  return { sentMsg, id, jid: remoteJid, acked };
 }
 
 async function deliver(sock) {
@@ -299,14 +313,6 @@ async function deliver(sock) {
   if (!last?.acked) {
     throw new Error('WhatsApp sunucusu mesaji onaylamadi');
   }
-  const rows = loadSent().filter((row) => !sameUrl(row.url, url));
-  rows.push({
-    id: last.id,
-    jid: last.jid,
-    url,
-    at: new Date().toISOString()
-  });
-  saveSent(rows);
   console.log('WhatsApp mesaji gonderildi -> ' + phone + ' | ' + url);
 }
 
