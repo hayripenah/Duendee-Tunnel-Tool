@@ -115,7 +115,7 @@ function showQr(qr) {
   console.log('');
   console.log('  ============================================================');
   console.log('  ' + phone + ' hattina bagli degil — yeni QR');
-  console.log('  Bagli cihazlarda Chrome olarak gorunur.');
+  console.log('  Bagli cihazlarda Duendee Tunnel Tool olarak gorunur.');
   console.log('  WhatsApp > Bagli Cihazlar > Cihaz Bagla');
   console.log('  ============================================================');
   console.log('');
@@ -524,7 +524,7 @@ async function main() {
       auth: state,
       version,
       logger: pino({ level: 'silent' }),
-      browser: process.platform === 'win32' ? Browsers.windows('Chrome') : Browsers.ubuntu('Chrome'),
+      browser: process.platform === 'win32' ? Browsers.windows('Duendee Tunnel Tool') : Browsers.ubuntu('Duendee Tunnel Tool'),
       syncFullHistory: false,
       markOnlineOnConnect: false
     });
