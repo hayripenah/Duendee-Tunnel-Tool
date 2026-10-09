@@ -654,8 +654,13 @@ autostate() {
 start_watcher() {
   local tool_pid="$$"
   # ToolRoot = repo root (shared .tunnelstate)
-  nohup bash "${OS_DIR}/scripts/tunnel-watcher.sh" "$tool_pid" "$PROJECT" "$ROOT" \
-    >/dev/null 2>&1 &
+  if command -v setsid >/dev/null 2>&1; then
+    setsid nohup bash "${OS_DIR}/scripts/tunnel-watcher.sh" "$tool_pid" "$PROJECT" "$ROOT" \
+      >/dev/null 2>&1 &
+  else
+    nohup bash "${OS_DIR}/scripts/tunnel-watcher.sh" "$tool_pid" "$PROJECT" "$ROOT" \
+      >/dev/null 2>&1 &
+  fi
 }
 
 tunnel_running() {

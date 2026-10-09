@@ -35,9 +35,10 @@ if ((Test-Path -LiteralPath $waJs) -and (Test-Path -LiteralPath $sentFile) -and 
       }
     }
     if ($node) {
+      $log = Join-Path $state 'wa-retract.log'
       $env:DT_WA_ACTION = 'retract'
       $env:DT_WA_TIMEOUT_MS = '45000'
-      & $node $waJs
+      & $node $waJs --retract *>> $log
       Remove-Item Env:DT_WA_ACTION -ErrorAction SilentlyContinue
       Remove-Item Env:DT_WA_TIMEOUT_MS -ErrorAction SilentlyContinue
     }

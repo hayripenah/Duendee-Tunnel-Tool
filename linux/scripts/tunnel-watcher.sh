@@ -19,7 +19,7 @@ sent_file="${TOOL_ROOT}/.whatsapp-session/sent-links.json"
 creds="${TOOL_ROOT}/.whatsapp-session/creds.json"
 if [[ -f "$wa_js" && -f "$sent_file" && -f "$creds" && -s "$sent_file" ]] && ! grep -q '^\[\][[:space:]]*$' "$sent_file"; then
   if command -v node >/dev/null 2>&1; then
-    DT_WA_ACTION=retract DT_WA_TIMEOUT_MS=45000 node "$wa_js" || true
+    DT_WA_ACTION=retract DT_WA_TIMEOUT_MS=45000 node "$wa_js" --retract || true
   fi
 fi
 
