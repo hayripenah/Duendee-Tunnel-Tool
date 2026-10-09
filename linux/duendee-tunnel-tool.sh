@@ -23,6 +23,7 @@ AUTO_DESKTOP="${AUTO_DESKTOP_DIR}/duendee-tunnel-tool.desktop"
 AUTO_UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 AUTO_UNIT="${AUTO_UNIT_DIR}/duendee-tunnel-tool.service"
 AUTO=""
+OPEN_BROWSER=1
 
 RST=$'\033[0m'
 BOLD=$'\033[1m'
@@ -787,7 +788,7 @@ logtail() {
 }
 
 autostate() {
-  # off | tool | tunnel
+  # off | tool | tunnel | browser
   AUTOMODE=off
   local enabled=0
   if systemctl --user is-enabled duendee-tunnel-tool.service >/dev/null 2>&1; then
@@ -796,7 +797,9 @@ autostate() {
     enabled=1
   fi
   if [[ "$enabled" == "1" ]]; then
-    if [[ -f "$AUTO_UNIT" ]] && grep -q 'boot-tunnel' "$AUTO_UNIT"; then
+    if [[ -f "$AUTO_UNIT" ]] && grep -q 'boot-browser' "$AUTO_UNIT"; then
+      AUTOMODE=browser
+    elif [[ -f "$AUTO_UNIT" ]] && grep -q 'boot-tunnel' "$AUTO_UNIT"; then
       AUTOMODE=tunnel
     else
       AUTOMODE=tool
@@ -979,6 +982,7 @@ show_menu() {
   case "${AUTOMODE}" in
     tool) echo -e "  ${YEL}${BOLD}[6]${RST}  ${SKY}Cihaz Açılışında Otomatik Başlat${RST}  ${GRN}[TOOL]${RST}" ;;
     tunnel) echo -e "  ${YEL}${BOLD}[6]${RST}  ${SKY}Cihaz Açılışında Otomatik Başlat${RST}  ${GRN}[TOOL+TÜNEL]${RST}" ;;
+    browser) echo -e "  ${YEL}${BOLD}[6]${RST}  ${SKY}Cihaz Açılışında Otomatik Başlat${RST}  ${GRN}[TOOL+TÜNEL+TARAYICI]${RST}" ;;
     *) echo -e "  ${YEL}${BOLD}[6]${RST}  ${SKY}Cihaz Açılışında Otomatik Başlat${RST}  ${DIM}[KAPALI]${RST}" ;;
   esac
   echo -e "  ${YEL}${BOLD}[7]${RST}  ${SKY}Aracı Cihazdan Kaldır${RST}"
@@ -1193,8 +1197,10 @@ do_start() {
     fi
     echo -e "${BLUE}${BOLD}     ${URL}${RST}"
     echo
-    echo "  Varsayılan tarayıcıda açılıyor..."
-    open_url "$URL"
+    if [[ "${OPEN_BROWSER:-1}" == "1" ]]; then
+      echo "  Varsayılan tarayıcıda açılıyor..."
+      open_url "$URL"
+    fi
     send_tunnel_whatsapp "$URL"
   fi
   echo
@@ -1355,7 +1361,9 @@ register_stable_launch() {
   install_desktop_shortcut || true
   if [[ -f "$AUTO_UNIT" ]]; then
     local arg=""
-    if grep -q 'boot-tunnel' "$AUTO_UNIT"; then
+    if grep -q 'boot-browser' "$AUTO_UNIT"; then
+      arg="boot-browser"
+    elif grep -q 'boot-tunnel' "$AUTO_UNIT"; then
       arg="boot-tunnel"
     fi
     write_autostart_unit "$arg" || true
@@ -1369,7 +1377,7 @@ disable_autostart() {
 }
 
 do_autostart() {
-  local ans="" choices="TSX"
+  local ans="" choices="TSBX"
   clear
   echo
   echo -e "${CYN}   --- Cihaz Açılışında Otomatik Başlat ---${RST}"
@@ -1382,7 +1390,11 @@ do_autostart() {
       ;;
     tunnel)
       echo -e "  ${DIM}   Durum:${RST} ${GRN}${BOLD}[TOOL+TÜNEL]${RST}"
-      echo -e "  ${DIM}   Cihaz açıldığında tool açılır ve tünel servisi kendiliğinden başlar.${RST}"
+      echo -e "  ${DIM}   Cihaz açıldığında tool açılır ve tünel servisi kendiliğinden başlar. Tarayıcı açılmaz.${RST}"
+      ;;
+    browser)
+      echo -e "  ${DIM}   Durum:${RST} ${GRN}${BOLD}[TOOL+TÜNEL+TARAYICI]${RST}"
+      echo -e "  ${DIM}   Cihaz açıldığında tool ve tünel başlar, yayın linki tarayıcıda açılır.${RST}"
       ;;
     *)
       echo -e "  ${DIM}   Durum:${RST} ${RED}${BOLD}[KAPALI]${RST}"
@@ -1392,9 +1404,10 @@ do_autostart() {
   echo
   echo -e "  ${YEL}${BOLD}[T]${RST}  ${SKY}Yalnızca tool'u otomatik başlat${RST}"
   echo -e "  ${YEL}${BOLD}[S]${RST}  ${SKY}Tool'u ve tünel servisini otomatik başlat${RST}"
+  echo -e "  ${YEL}${BOLD}[B]${RST}  ${SKY}Tool, tünel ve tarayıcıyı otomatik başlat${RST}"
   if [[ "$AUTOMODE" != "off" ]]; then
     echo -e "  ${YEL}${BOLD}[K]${RST}  ${SKY}Otomatik başlatmayı kapat${RST}"
-    choices="TSKX"
+    choices="TSBKX"
   fi
   echo -e "  ${YEL}${BOLD}[X]${RST}  ${SKY}Geri dön${RST}"
   echo
@@ -1417,7 +1430,18 @@ do_autostart() {
       if [[ "$AUTOMODE" == "tunnel" ]]; then
         echo -e "  ${YEL}   Bu ayar zaten seçili.${RST}"
       elif write_autostart_unit "boot-tunnel"; then
-        echo -e "  ${GRN}   Tool ve tünel servisi otomatik başlayacak.${RST}"
+        echo -e "  ${GRN}   Tool ve tünel servisi otomatik başlayacak. Tarayıcı açılmayacak.${RST}"
+        echo -e "  ${DIM}   Kayıt: ${AUTO_UNIT}${RST}"
+      else
+        echo -e "  ${RED}${BOLD}[HATA]${RST} Ayar kaydedilemedi."
+        echo -e "  ${DIM}   systemd --user kullanılabilir olmalı.${RST}"
+      fi
+      ;;
+    B)
+      if [[ "$AUTOMODE" == "browser" ]]; then
+        echo -e "  ${YEL}   Bu ayar zaten seçili.${RST}"
+      elif write_autostart_unit "boot-browser"; then
+        echo -e "  ${GRN}   Tool, tünel ve tarayıcı otomatik başlayacak.${RST}"
         echo -e "  ${DIM}   Kayıt: ${AUTO_UNIT}${RST}"
       else
         echo -e "  ${RED}${BOLD}[HATA]${RST} Ayar kaydedilemedi."
@@ -1719,7 +1743,11 @@ trap cleanup_quiet EXIT INT TERM HUP
 register_stable_launch || true
 start_watcher
 
-if [[ "${1:-}" == "boot-tunnel" ]]; then
+if [[ "${1:-}" == "boot-browser" ]]; then
+  OPEN_BROWSER=1
+  do_start
+elif [[ "${1:-}" == "boot-tunnel" ]]; then
+  OPEN_BROWSER=0
   do_start
 elif [[ "${1:-}" != "" ]]; then
   AUTO=1
