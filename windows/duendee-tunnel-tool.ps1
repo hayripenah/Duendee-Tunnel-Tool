@@ -1219,7 +1219,6 @@ function Start-AppOrigin {
   for ($attempt = 1; $attempt -le 2; $attempt++) {
     Ensure-SupabaseEnv
     if ($usePreview -and (Test-AppBuildStale)) {
-      Write-UiLine "  $DIM   Uygulama derleniyor. Telefondaki sayfa hazır paketle açılır.$RST"
       Push-Location $Project
       try {
         & npm run build *> $buildLog

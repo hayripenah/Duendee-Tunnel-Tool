@@ -1129,11 +1129,9 @@ build_app_bundle() {
   ensure_supabase_env
   export_supabase_build_env
   if bundle_missing_supabase; then
-    echo -e "  ${YEL}   Eski paket Supabase ayarı içermiyor, siliniyor.${RST}"
     rm -rf "${PROJECT}/dist"
   fi
   if app_build_stale; then
-    echo -e "  ${DIM}   Uygulama derleniyor. Telefondaki sayfa hazır paketle açılır.${RST}"
     if ! (cd "$PROJECT" && npm run build >"${STATE}/server.build.log" 2>&1); then
       echo -e "  ${RED}${BOLD}   [HATA]${RST} npm run build başarısız."
       echo -e "  ${DIM}   Ayrıntı: ${STATE}/server.build.log${RST}"
