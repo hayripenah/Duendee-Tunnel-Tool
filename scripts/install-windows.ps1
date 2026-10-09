@@ -289,6 +289,25 @@ try {
     }
   }
 
+  $ghCmd = Get-Command gh -ErrorAction SilentlyContinue
+  if (-not $ghCmd) {
+    Write-Host "GitHub CLI kuruluyor..."
+    try {
+      $ghVer = '2.102.0'
+      $ghArch = if ($env:PROCESSOR_ARCHITECTURE -match 'ARM64') { 'arm64' } else { 'amd64' }
+      $ghZip = Join-Path $tmp "gh-$ghVer.zip"
+      $ghHome = Join-Path $env:LOCALAPPDATA 'DuendeeTunnel\gh'
+      Invoke-WebRequest -Uri "https://github.com/cli/cli/releases/download/v$ghVer/gh_${ghVer}_windows_${ghArch}.zip" -OutFile $ghZip -UseBasicParsing
+      if (Test-Path $ghHome) { Remove-Item $ghHome -Recurse -Force }
+      New-Item -ItemType Directory -Force -Path $ghHome | Out-Null
+      Expand-Archive -Path $ghZip -DestinationPath $ghHome -Force
+      $ghExe = Get-ChildItem $ghHome -Filter gh.exe -Recurse | Select-Object -First 1
+      if ($ghExe) { $env:Path = "$(Split-Path $ghExe.FullName);$env:Path" }
+    } catch {
+      Write-Host "WARNING: GitHub CLI indirilemedi. $($_.Exception.Message)"
+    }
+  }
+
   if (-not $SkipNpm) {
     if ((Get-Command npm.cmd -ErrorAction SilentlyContinue) -or (Get-Command npm -ErrorAction SilentlyContinue)) {
       Invoke-NpmInstallSafe -WorkDir $InstallDir

@@ -83,6 +83,32 @@ ensure_cloudflared() {
   hash -r 2>/dev/null || true
 }
 
+ensure_gh() {
+  ensure_local_bin_path
+  if command -v gh >/dev/null 2>&1; then
+    return 0
+  fi
+  local name ver="2.102.0" dest tmp
+  case "$(uname -m)" in
+    x86_64|amd64) name="gh_${ver}_linux_amd64.tar.gz" ;;
+    aarch64|arm64) name="gh_${ver}_linux_arm64.tar.gz" ;;
+    *)
+      echo "GitHub CLI bu mimaride otomatik kurulamadı: $(uname -m)" >&2
+      return 1
+      ;;
+  esac
+  echo "GitHub CLI kuruluyor..."
+  dest="${HOME}/.local/share/duendee-gh"
+  tmp="$(mktemp)"
+  curl -fsSL -o "$tmp" "https://github.com/cli/cli/releases/download/v${ver}/${name}"
+  mkdir -p "$dest" "${HOME}/.local/bin"
+  tar -xzf "$tmp" -C "$dest" --strip-components=1
+  rm -f "$tmp"
+  ln -sfn "${dest}/bin/gh" "${HOME}/.local/bin/gh"
+  ensure_local_bin_path
+  hash -r 2>/dev/null || true
+}
+
 path_has_bin_dir() {
   case ":${PATH}:" in
     *":${BIN_DIR}:"*) return 0 ;;
@@ -287,6 +313,7 @@ chmod +x "${INSTALL_DIR}/linux/duendee-tunnel-tool.sh" \
 
 ensure_node || echo "WARNING: Node.js kurulamadı. WhatsApp ve dev server için node gerekli."
 ensure_cloudflared || echo "WARNING: cloudflared kurulamadı. Tünel için cloudflared gerekli."
+ensure_gh || echo "WARNING: GitHub CLI kurulamadı. Private Duendee indirmek için gh gerekli."
 
 if [[ "$SKIP_NPM" != "1" ]]; then
   if command -v npm >/dev/null 2>&1; then

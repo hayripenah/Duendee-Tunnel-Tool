@@ -107,6 +107,30 @@ function Test-LooksLikeDuendeeRepo([string]$Path) {
   return ($remoteHit -or ($nameHit -and $pkgHit) -or ($pkgHit -and (Test-Path -LiteralPath $gitDir)))
 }
 
+function Install-UserGh {
+  $cmd = Get-Command gh -ErrorAction SilentlyContinue
+  if ($cmd) { return $cmd.Source }
+  $ver = '2.102.0'
+  $arch = if ($env:PROCESSOR_ARCHITECTURE -match 'ARM64') { 'arm64' } else { 'amd64' }
+  $zip = Join-Path $env:TEMP "gh-$ver-win.zip"
+  $dest = Join-Path $env:LOCALAPPDATA 'DuendeeTunnel\gh'
+  Write-UiLine '  GitHub CLI kuruluyor (tek sefer)...'
+  try {
+    Invoke-WebRequest -Uri "https://github.com/cli/cli/releases/download/v$ver/gh_${ver}_windows_${arch}.zip" -OutFile $zip -UseBasicParsing
+    if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $dest | Out-Null
+    Expand-Archive -Path $zip -DestinationPath $dest -Force
+  } catch {
+    Write-UiLine "  $YEL   GitHub CLI indirilemedi.$RST"
+    return $null
+  }
+  $exe = Get-ChildItem -Path $dest -Filter gh.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $exe) { return $null }
+  $bin = Split-Path -Parent $exe.FullName
+  if ($env:Path -notlike "*$bin*") { $env:Path = "$bin;$env:Path" }
+  return $exe.FullName
+}
+
 function Save-PublicGitHubTree([string]$RepoUrl, [string]$Target) {
   $repo = $RepoUrl -replace '\.git$', '' -replace '^https://github.com/', '' -replace '^git@github.com:', ''
   $zip = Join-Path $env:TEMP ("duendee-src-" + [guid]::NewGuid().ToString('n') + '.zip')
@@ -126,7 +150,20 @@ function Save-PublicGitHubTree([string]$RepoUrl, [string]$Target) {
       }
     } catch {}
   }
-  return $false
+  $gh = Install-UserGh
+  if (-not $gh) { return $false }
+  & $gh auth status 1>$null 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    Write-UiLine '  Private repo. GitHub CLI girişi bir kez istenir; şifre repoya yazılmaz.'
+    & $gh auth login --hostname github.com --git-protocol https --web
+    if ($LASTEXITCODE -ne 0) { return $false }
+  }
+  $parent = Split-Path -Parent $Target
+  if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+  $env:GH_PROMPT_DISABLED = '1'
+  & $gh repo clone $repo $Target -- --depth 1
+  $ok = ($LASTEXITCODE -eq 0) -and (Test-Path -LiteralPath $Target)
+  return $ok
 }
 
 function Update-DuendeeRepoSafe([string]$Path) {
@@ -134,15 +171,21 @@ function Update-DuendeeRepoSafe([string]$Path) {
   if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return }
   try {
     $env:GIT_TERMINAL_PROMPT = '0'
-    $dirty = (& git -c credential.helper= -C $Path status --porcelain 2>$null)
+    $gh = Get-Command gh -ErrorAction SilentlyContinue
+    $cred = @('-c', 'credential.helper=')
+    if ($gh) {
+      & $gh.Source auth status 1>$null 2>$null
+      if ($LASTEXITCODE -eq 0) { $cred = @('-c', 'credential.helper=!gh auth git-credential') }
+    }
+    $dirty = (& git @cred -C $Path status --porcelain 2>$null)
     if ($dirty) {
       Write-UiLine "  $DIM   Git: yerel değişiklikler var — pull atlandı ($Path)$RST"
       return
     }
     Write-UiLine "  $DIM   Duendee güncelleniyor (git fetch/pull --ff-only)...$RST"
     $env:GIT_TERMINAL_PROMPT = '0'
-    & git -c credential.helper= -C $Path fetch --quiet 2>$null | Out-Null
-    & git -c credential.helper= -C $Path pull --ff-only --quiet 2>$null | Out-Null
+    & git @cred -C $Path fetch --quiet 2>$null | Out-Null
+    & git @cred -C $Path pull --ff-only --quiet 2>$null | Out-Null
     if ($LASTEXITCODE -eq 0) {
       Write-UiLine "  $GRN   Repo güncel.$RST"
     } else {
@@ -223,7 +266,7 @@ function Clone-DuendeeTo([string]$ParentDir) {
     Write-UiLine "  $YEL   Klasör zaten var ama Duendee görünmüyor: $target$RST"
     return $null
   }
-  Write-UiLine "  $DIM   İndiriliyor (hesap gerekmez): $($script:DuendeeRepoUrl) -> $target$RST"
+  Write-UiLine "  $DIM   İndiriliyor: $($script:DuendeeRepoUrl) -> $target$RST"
   if (-not (Save-PublicGitHubTree -RepoUrl $script:DuendeeRepoUrl -Target $target)) {
     Write-UiLine "  $RED   İndirme başarısız.$RST"
     return $null

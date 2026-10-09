@@ -128,13 +128,70 @@ public_git() {
   GIT_TERMINAL_PROMPT=0 git -c credential.helper= "$@"
 }
 
+github_slug() {
+  local repo="$1"
+  repo="${repo%.git}"
+  repo="${repo#https://github.com/}"
+  repo="${repo#git@github.com:}"
+  printf '%s' "$repo"
+}
+
+ensure_gh() {
+  ensure_local_bin_path
+  if command -v gh >/dev/null 2>&1; then
+    return 0
+  fi
+  local name ver="2.102.0" dest tmp
+  case "$(uname -m)" in
+    x86_64|amd64) name="gh_${ver}_linux_amd64.tar.gz" ;;
+    aarch64|arm64) name="gh_${ver}_linux_arm64.tar.gz" ;;
+    *)
+      echo -e "  ${YEL}   GitHub CLI bu mimaride kurulamadı: $(uname -m)${RST}" >&2
+      return 1
+      ;;
+  esac
+  command -v curl >/dev/null 2>&1 || return 1
+  command -v tar >/dev/null 2>&1 || return 1
+  echo "  GitHub CLI kuruluyor (tek sefer)..." >&2
+  dest="${HOME}/.local/share/duendee-gh"
+  tmp="$(mktemp)"
+  if ! curl -fsSL -o "$tmp" "https://github.com/cli/cli/releases/download/v${ver}/${name}"; then
+    rm -f "$tmp"
+    echo -e "  ${YEL}   GitHub CLI indirilemedi.${RST}" >&2
+    return 1
+  fi
+  mkdir -p "$dest" "${HOME}/.local/bin"
+  tar -xzf "$tmp" -C "$dest" --strip-components=1
+  rm -f "$tmp"
+  ln -sfn "${dest}/bin/gh" "${HOME}/.local/bin/gh"
+  ensure_local_bin_path
+  hash -r 2>/dev/null || true
+}
+
+git_with_gh() {
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    GIT_TERMINAL_PROMPT=0 git -c 'credential.helper=!gh auth git-credential' "$@"
+  else
+    public_git "$@"
+  fi
+}
+
+fetch_private_github() {
+  local repo="$1"
+  local target="$2"
+  ensure_gh || return 1
+  if ! gh auth status >/dev/null 2>&1; then
+    echo "  Private repo. GitHub CLI girişi bir kez istenir; şifre repoya yazılmaz." >&2
+    gh auth login --hostname github.com --git-protocol https --web || return 1
+  fi
+  GH_PROMPT_DISABLED=1 gh repo clone "$repo" "$target" -- --depth 1
+}
+
 fetch_public_github() {
   local url="$1"
   local target="$2"
   local repo tmp branch inner
-  repo="${url%.git}"
-  repo="${repo#https://github.com/}"
-  repo="${repo#git@github.com:}"
+  repo="$(github_slug "$url")"
   command -v curl >/dev/null 2>&1 || return 1
   command -v tar >/dev/null 2>&1 || return 1
   tmp="$(mktemp -d)"
@@ -152,23 +209,19 @@ fetch_public_github() {
     fi
   done
   rm -rf "$tmp"
-  if command -v git >/dev/null 2>&1; then
-    public_git clone --depth 1 "$url" "$target"
-    return $?
-  fi
-  return 1
+  fetch_private_github "$repo" "$target"
 }
 
 update_duendee_safe() {
   local path="$1"
   [[ -d "$path/.git" ]] || return 0
   command -v git >/dev/null 2>&1 || return 0
-  if [[ -n "$(public_git -C "$path" status --porcelain 2>/dev/null || true)" ]]; then
+  if [[ -n "$(git_with_gh -C "$path" status --porcelain 2>/dev/null || true)" ]]; then
     echo -e "  ${DIM}   Git: yerel değişiklikler var — pull atlandı (${path})${RST}" >&2
     return 0
   fi
   echo -e "  ${DIM}   Duendee güncelleniyor (git fetch/pull --ff-only)...${RST}" >&2
-  if public_git -C "$path" fetch --quiet 2>/dev/null && public_git -C "$path" pull --ff-only --quiet 2>/dev/null; then
+  if git_with_gh -C "$path" fetch --quiet 2>/dev/null && git_with_gh -C "$path" pull --ff-only --quiet 2>/dev/null; then
     echo -e "  ${GRN}   Repo güncel.${RST}" >&2
   else
     echo -e "  ${YEL}   Pull atlandı/başarısız (ff-only). Mevcut kopya kullanılacak.${RST}" >&2
@@ -254,7 +307,7 @@ clone_duendee_to() {
     echo -e "  ${YEL}   Klasör zaten var ama Duendee görünmüyor: ${target}${RST}" >&2
     return 1
   fi
-  echo -e "  ${DIM}   İndiriliyor (hesap gerekmez): ${DUENDEE_REPO_URL} -> ${target}${RST}" >&2
+  echo -e "  ${DIM}   İndiriliyor: ${DUENDEE_REPO_URL} -> ${target}${RST}" >&2
   if fetch_public_github "$DUENDEE_REPO_URL" "$target"; then
     (cd "$target" && pwd)
     return 0
