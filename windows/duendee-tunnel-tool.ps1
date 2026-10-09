@@ -447,8 +447,7 @@ if (-not $script:UninstallCli -and -not (Test-Path -LiteralPath $StateDir)) {
   New-Item -ItemType Directory -Path $StateDir | Out-Null
 }
 
-$script:BootTunnel = ($Action -eq 'boot-tunnel' -or $Action -eq 'boot-browser')
-$script:OpenBrowser = ($Action -ne 'boot-tunnel')
+$script:BootTunnel = ($Action -eq 'boot-tunnel')
 $script:AutoMode = -not [string]::IsNullOrWhiteSpace($Action) -and -not $script:BootTunnel
 $env:PROJECT = $Project
 $env:SERVER_PID = $ServerPidFile
@@ -466,7 +465,6 @@ function Get-AutoRunCommand {
 function Get-AutoMode {
   $cmd = Get-AutoRunCommand
   if ([string]::IsNullOrWhiteSpace($cmd)) { return 'off' }
-  if ($cmd -match '(?i)boot-browser') { return 'browser' }
   if ($cmd -match '(?i)boot-tunnel') { return 'tunnel' }
   return 'tool'
 }
@@ -513,8 +511,7 @@ function Install-StableLauncher {
   if ((Get-AutoMode) -ne 'off') {
     $mode = Get-AutoMode
     $val = '"' + $cmd + '"'
-    if ($mode -eq 'browser') { $val = $val + ' boot-browser' }
-    elseif ($mode -eq 'tunnel') { $val = $val + ' boot-tunnel' }
+    if ($mode -eq 'tunnel') { $val = $val + ' boot-tunnel' }
     New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'DuendeeTunnelTool' -Value $val -PropertyType String -Force | Out-Null
   }
 }
@@ -528,8 +525,7 @@ function Set-AutoMode([string]$Mode) {
   Install-StableLauncher
   $cmd = Join-Path (Get-StableLaunchDir) 'launch.cmd'
   $val = '"' + $cmd + '"'
-  if ($Mode -eq 'browser') { $val = $val + ' boot-browser' }
-  elseif ($Mode -eq 'tunnel') { $val = $val + ' boot-tunnel' }
+  if ($Mode -eq 'tunnel') { $val = $val + ' boot-tunnel' }
   New-ItemProperty -Path $key -Name 'DuendeeTunnelTool' -Value $val -PropertyType String -Force | Out-Null
   return ((Get-AutoMode) -eq $Mode)
 }
@@ -1011,10 +1007,10 @@ function Show-Menu {
   $autoLabel = switch ($autoMode) {
     'tool' { "$GRN[TOOL]$RST" }
     'tunnel' { "$GRN[TOOL+TÜNEL]$RST" }
-    'browser' { "$GRN[TOOL+TÜNEL+TARAYICI]$RST" }
     default { "$DIM[KAPALI]$RST" }
   }
-  Write-UiLine "  $YEL$BOLD[6]$RST  ${SKY}Cihaz Açılışında Otomatik Başlat$RST  $autoLabel"
+  $browserLabel = if (Test-BrowserOpens) { "$GRN[TARAYICI]$RST" } else { "$DIM[TARAYICI KAPALI]$RST" }
+  Write-UiLine "  $YEL$BOLD[6]$RST  ${SKY}Cihaz Açılışında Otomatik Başlat$RST  $autoLabel  $browserLabel"
   Write-UiLine "  $YEL$BOLD[7]$RST  ${SKY}Aracı Cihazdan Kaldır$RST"
   Write-UiLine ''
   Write-UiLine "$DIM      Kapatmak için pencereyi kapatın, [Ctrl]+[C] ya da [5]$RST"
@@ -1224,9 +1220,11 @@ function Invoke-Start {
     Write-UiLine "  $BLUE$BOLD     $url$RST"
     Write-UiLine "  $GRN   Link panoya kopyalandı.$RST  Gerekirse [3] ile yeniden kopyalayın."
     Write-UiLine ''
-    if ($script:OpenBrowser) {
+    if (Test-BrowserOpens) {
       Write-UiLine '  Varsayılan tarayıcıda açılıyor...'
       Start-Process $url
+    } else {
+      Write-UiLine "  $DIM   Tarayıcı kapalı. Açmak için [6] > [B].$RST"
     }
     Send-TunnelWhatsApp -PublicUrl $url
   }
@@ -1258,6 +1256,24 @@ function Invoke-Cancel {
   Complete-Action
 }
 
+function Get-BrowserFlagPath {
+  Join-Path $StateDir 'open-browser'
+}
+
+function Test-BrowserOpens {
+  $path = Get-BrowserFlagPath
+  if (-not (Test-Path -LiteralPath $path)) { return $true }
+  $raw = Get-Content -LiteralPath $path -TotalCount 1 -ErrorAction SilentlyContinue
+  return ("$raw".Trim() -ne '0')
+}
+
+function Set-BrowserOpens([bool]$On) {
+  if (-not (Test-Path -LiteralPath $StateDir)) {
+    New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+  }
+  Set-Content -LiteralPath (Get-BrowserFlagPath) -Value $(if ($On) { '1' } else { '0' }) -Encoding Ascii
+}
+
 function Invoke-Autostart {
   Clear-Host
   Initialize-Utf8Console
@@ -1272,11 +1288,7 @@ function Invoke-Autostart {
     }
     'tunnel' {
       Write-UiLine "  $DIM   Durum:$RST $GRN$BOLD[TOOL+TÜNEL]$RST"
-      Write-UiLine "  $DIM   Cihaz açıldığında tool açılır ve tünel servisi kendiliğinden başlar. Tarayıcı açılmaz.$RST"
-    }
-    'browser' {
-      Write-UiLine "  $DIM   Durum:$RST $GRN$BOLD[TOOL+TÜNEL+TARAYICI]$RST"
-      Write-UiLine "  $DIM   Cihaz açıldığında tool ve tünel başlar, yayın linki tarayıcıda açılır.$RST"
+      Write-UiLine "  $DIM   Cihaz açıldığında tool açılır ve tünel servisi kendiliğinden başlar.$RST"
     }
     default {
       Write-UiLine "  $DIM   Durum:$RST $RED$BOLD[KAPALI]$RST"
@@ -1284,9 +1296,15 @@ function Invoke-Autostart {
     }
   }
   Write-UiLine ''
+  if (Test-BrowserOpens) {
+    Write-UiLine "  $DIM   Tarayıcı:$RST $GRN$BOLD[AÇIK]$RST  $DIM   Tünel başlayınca yayın linki açılır.$RST"
+  } else {
+    Write-UiLine "  $DIM   Tarayıcı:$RST $RED$BOLD[KAPALI]$RST  $DIM   Tünel başlayınca tarayıcı açılmaz.$RST"
+  }
+  Write-UiLine ''
   Write-UiLine "  $YEL$BOLD[T]$RST  ${SKY}Yalnızca tool'u otomatik başlat$RST"
   Write-UiLine "  $YEL$BOLD[S]$RST  ${SKY}Tool'u ve tünel servisini otomatik başlat$RST"
-  Write-UiLine "  $YEL$BOLD[B]$RST  ${SKY}Tool, tünel ve tarayıcıyı otomatik başlat$RST"
+  Write-UiLine "  $YEL$BOLD[B]$RST  ${SKY}Tünel başladığında tarayıcıyı aç / kapat$RST"
   if ($mode -ne 'off') {
     Write-UiLine "  $YEL$BOLD[K]$RST  ${SKY}Otomatik başlatmayı kapat$RST"
   }
@@ -1297,10 +1315,17 @@ function Invoke-Autostart {
   $c = Get-Choice $choices
   Write-UiLine ''
   if ($c -eq 'X') { return }
+  if ($c -eq 'B') {
+    $next = -not (Test-BrowserOpens)
+    Set-BrowserOpens $next
+    if ($next) { Write-UiLine "  $GRN   Tünel başladığında tarayıcı açılacak.$RST" }
+    else { Write-UiLine "  $GRN   Tünel başladığında tarayıcı açılmayacak.$RST" }
+    Complete-Action
+    return
+  }
   $target = switch ($c) {
     'T' { 'tool' }
     'S' { 'tunnel' }
-    'B' { 'browser' }
     default { 'off' }
   }
   if ($target -eq $mode) {
@@ -1312,8 +1337,7 @@ function Invoke-Autostart {
   if ($ok) {
     switch ($target) {
       'tool' { Write-UiLine "  $GRN   Yalnızca tool otomatik başlayacak.$RST" }
-      'tunnel' { Write-UiLine "  $GRN   Tool ve tünel servisi otomatik başlayacak. Tarayıcı açılmayacak.$RST" }
-      'browser' { Write-UiLine "  $GRN   Tool, tünel ve tarayıcı otomatik başlayacak.$RST" }
+      'tunnel' { Write-UiLine "  $GRN   Tool ve tünel servisi otomatik başlayacak.$RST" }
       default { Write-UiLine "  $GRN   Otomatik başlatma kapatıldı.$RST" }
     }
     Write-UiLine "  $DIM   Kayıt: HKCU\...\Run - DuendeeTunnelTool$RST"
