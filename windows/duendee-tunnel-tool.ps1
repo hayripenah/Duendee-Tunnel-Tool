@@ -674,7 +674,8 @@ function Start-HiddenDetached([string]$CommandLine) {
 function Start-HiddenCmd([string]$Command) {
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = Join-Path $env:SystemRoot 'System32\cmd.exe'
-  $psi.Arguments = '/D /C ' + $Command
+  # /S keeps a quoted exe path intact. Without it cmd strips the first and last quote and exits at once.
+  $psi.Arguments = '/D /S /C "' + $Command + '"'
   $psi.UseShellExecute = $false
   $psi.CreateNoWindow = $true
   $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
