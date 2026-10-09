@@ -1067,6 +1067,131 @@ function Invoke-CopyLink {
   Complete-Action
 }
 
+function Test-EnvHasSupabase([string]$Path) {
+  if (-not (Test-Path -LiteralPath $Path)) { return $false }
+  $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+  if (-not $raw) { return $false }
+  return ($raw -match '(?m)^\s*VITE_SUPABASE_URL=https://' -and $raw -match '(?m)^\s*VITE_SUPABASE_ANON_KEY=eyJ')
+}
+
+function Stop-ListenersOnPort([int]$PortNum) {
+  $lines = & netstat.exe -ano -p tcp | Select-String -Pattern (":$PortNum\s+.*LISTENING\s+(\d+)")
+  foreach ($line in $lines) {
+    if ($line.Line -match '\s(\d+)\s*$') {
+      $procId = [int]$Matches[1]
+      if ($procId -gt 0 -and $procId -ne $PID) { Stop-ProcessTree $procId }
+    }
+  }
+}
+
+function Test-BundleMissingSupabase {
+  $assets = Join-Path $Project 'dist\assets'
+  if (-not (Test-Path -LiteralPath $assets)) { return $true }
+  $hit = Get-ChildItem -LiteralPath $assets -Filter '*.js' -ErrorAction SilentlyContinue |
+    Select-String -Pattern 'Missing Supabase environment variables' -SimpleMatch -List -Quiet
+  return [bool]$hit
+}
+
+function Test-AppBuildStale {
+  $index = Join-Path $Project 'dist\index.html'
+  if (-not (Test-Path -LiteralPath $index)) { return $true }
+  if (Test-BundleMissingSupabase) { return $true }
+  $stamp = (Get-Item -LiteralPath $index).LastWriteTime
+  foreach ($rel in @('src', 'index.html', '.env', '.env.local', 'vite.config.ts', 'vite.config.js', 'vite.config.mjs')) {
+    $p = Join-Path $Project $rel
+    if (-not (Test-Path -LiteralPath $p)) { continue }
+    $item = Get-Item -LiteralPath $p
+    if (-not $item.PSIsContainer) {
+      if ($item.LastWriteTime -gt $stamp) { return $true }
+      continue
+    }
+    $newer = Get-ChildItem -LiteralPath $p -Recurse -File -ErrorAction SilentlyContinue |
+      Where-Object { $_.LastWriteTime -gt $stamp } |
+      Select-Object -First 1
+    if ($newer) { return $true }
+  }
+  return $false
+}
+
+function Test-OriginBundleBroken {
+  $html = ''
+  try { $html = & curl.exe -fsS --max-time 5 "http://127.0.0.1:$Port/" } catch { return $false }
+  if ($html -notmatch 'src="(/assets/index-[^"]+\.js)"') { return $false }
+  $jsPath = $Matches[1]
+  $tmp = Join-Path $env:TEMP 'duendee-origin-check.js'
+  & curl.exe -fsS --max-time 8 -o $tmp "http://127.0.0.1:$Port$jsPath" | Out-Null
+  if (-not (Test-Path -LiteralPath $tmp)) { return $false }
+  $hit = Select-String -LiteralPath $tmp -Pattern 'Missing Supabase environment variables' -SimpleMatch -Quiet
+  Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+  return [bool]$hit
+}
+
+function Start-AppOrigin {
+  $viteCmd = Join-Path $Project 'node_modules\vite\bin\vite.js'
+  $node = Find-NodeExe
+  $usePreview = (Test-Path -LiteralPath $viteCmd) -and $node -and (
+    (Test-Path -LiteralPath (Join-Path $Project 'vite.config.ts')) -or
+    (Test-Path -LiteralPath (Join-Path $Project 'vite.config.js')) -or
+    (Test-Path -LiteralPath (Join-Path $Project 'vite.config.mjs'))
+  )
+  $serverOut = Join-Path $StateDir 'server.out.log'
+  $serverErr = Join-Path $StateDir 'server.err.log'
+  $buildLog = Join-Path $StateDir 'server.build.log'
+  for ($attempt = 1; $attempt -le 2; $attempt++) {
+    Ensure-SupabaseEnv
+    if ($usePreview -and (Test-AppBuildStale)) {
+      Write-UiLine "  $DIM   Uygulama derleniyor. Telefondaki sayfa hazır paketle açılır.$RST"
+      Push-Location $Project
+      try {
+        & npm run build *> $buildLog
+        if ($LASTEXITCODE -ne 0) {
+          Write-UiLine "  $RED$BOLD   [HATA]$RST npm run build başarısız."
+          return $false
+        }
+      } finally { Pop-Location }
+    } elseif ($usePreview) {
+      Write-UiLine "  $DIM   Mevcut derleme kullanılacak.$RST"
+    }
+    if ($usePreview) {
+      $cmd = "cd /d `"$Project`" & `"$node`" `"$viteCmd`" preview --host 127.0.0.1 --port $Port --strictPort > `"$serverOut`" 2> `"$serverErr`""
+    } else {
+      $cmd = "cd /d `"$Project`" & npm run dev > `"$serverOut`" 2> `"$serverErr`""
+    }
+    $p = Start-HiddenCmd $cmd
+    if ($p) { Set-Content -LiteralPath $ServerPidFile -Value $p.Id -Encoding Ascii }
+    $ready = $false
+    for ($i = 1; $i -le 80; $i++) {
+      if (Test-PortListening $Port) { $ready = $true; break }
+      Start-Sleep -Milliseconds 250
+    }
+    if (-not $ready) { return $false }
+    if (-not (Test-OriginBundleBroken)) { return $true }
+    Write-UiLine "  $YEL   Sunulan paket Supabase ayarı içermiyor, yeniden derleniyor.$RST"
+    Stop-DevServer
+    Stop-ListenersOnPort $Port
+    Remove-Item -LiteralPath (Join-Path $Project 'dist\index.html') -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 300
+  }
+  Write-UiLine "  $RED$BOLD   [HATA]$RST Yayın hâlâ Supabase ayarı olmadan açılıyor."
+  return $false
+}
+
+function Ensure-SupabaseEnv {
+  # Clones omit .env. Vite then ships a bundle that throws before the page renders.
+  if ((Test-EnvHasSupabase (Join-Path $Project '.env')) -or (Test-EnvHasSupabase (Join-Path $Project '.env.local'))) {
+    return
+  }
+  $url = if ($env:DT_VITE_SUPABASE_URL) { $env:DT_VITE_SUPABASE_URL } else { 'https://ytlliifgpbiagidduhsx.supabase.co' }
+  $key = if ($env:DT_VITE_SUPABASE_ANON_KEY) { $env:DT_VITE_SUPABASE_ANON_KEY } else { 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl0bGxpaWZncGJpYWdpZGR1aHN4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM1NjAyOTAsImV4cCI6MjA4OTEzNjI5MH0.W4p97en1IP7NTF304lCuVsyyvRINqa01yDnwCgOzBj4' }
+  $target = Join-Path $Project '.env.local'
+  @(
+    "VITE_SUPABASE_URL=$url"
+    "VITE_SUPABASE_ANON_KEY=$key"
+    'VITE_APP_VARIANT=main'
+  ) | Set-Content -LiteralPath $target -Encoding ascii
+  Write-UiLine "  $DIM   Supabase istemci ayarı yazıldı (.env yoktu).$RST"
+}
+
 function Invoke-Start {
   Clear-Host
   Initialize-Utf8Console
@@ -1091,46 +1216,43 @@ function Invoke-Start {
   }
   if ($tpid) { Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue }
 
-  if (-not (Test-PortListening $Port)) {
-    Write-UiLine "  ${CYN}[2/4]$RST Dev server başlatılıyor..."
-    if (-not (Test-Path -LiteralPath (Join-Path $Project 'node_modules'))) {
-      Write-UiLine "  $DIM   node_modules yok, npm install çalıştırılıyor...$RST"
-      Push-Location $Project
-      try {
-        & npm install
-        if ($LASTEXITCODE -ne 0) {
-          Write-UiLine "  $RED$BOLD   [HATA]$RST npm install başarısız."
-          Complete-Action
-          return
-        }
-      } finally { Pop-Location }
-    }
-    $serverOut = Join-Path $StateDir 'server.out.log'
-    $serverErr = Join-Path $StateDir 'server.err.log'
-    $p = Start-HiddenCmd "cd /d `"$Project`" & npm run dev > `"$serverOut`" 2> `"$serverErr`""
-    if ($p) { Set-Content -LiteralPath $ServerPidFile -Value $p.Id -Encoding Ascii }
-    $ready = $false
-    for ($i = 1; $i -le 80; $i++) {
-      if (Test-PortListening $Port) { $ready = $true; break }
-      Start-Sleep -Milliseconds 250
-    }
-    if (-not $ready) {
-      Write-UiLine "  $RED$BOLD[HATA]$RST Dev server $Port portunda açılamadı."
-      Write-UiLine "  $DIM   npm run dev çıktısını ayrı bir pencerede deneyin.$RST"
-      Complete-Action
-      return
-    }
-    Write-UiLine "  ${CYN}[2/4]$RST Dev server http://127.0.0.1:$Port hazır."
-  } else {
-    Write-UiLine "  ${CYN}[2/4]$RST Dev server $Port portunda hazır."
+  if (Test-PortListening $Port) {
+    Stop-DevServer
+    Stop-ListenersOnPort $Port
+    Start-Sleep -Milliseconds 300
   }
+  if (Test-PortListening $Port) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST $Port portu boşaltılamadı. Eski yayın durdurulamadı."
+    Complete-Action
+    return
+  }
+  Write-UiLine "  ${CYN}[2/4]$RST Uygulama başlatılıyor..."
+  if (-not (Test-Path -LiteralPath (Join-Path $Project 'node_modules'))) {
+    Write-UiLine "  $DIM   node_modules yok, npm install çalıştırılıyor...$RST"
+    Push-Location $Project
+    try {
+      & npm install
+      if ($LASTEXITCODE -ne 0) {
+        Write-UiLine "  $RED$BOLD   [HATA]$RST npm install başarısız."
+        Complete-Action
+        return
+      }
+    } finally { Pop-Location }
+  }
+  if (-not (Start-AppOrigin)) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST Uygulama $Port portunda açılamadı."
+    Write-UiLine "  $DIM   Ayrıntı: $(Join-Path $StateDir 'server.out.log')$RST"
+    Complete-Action
+    return
+  }
+  Write-UiLine "  ${CYN}[2/4]$RST Uygulama http://127.0.0.1:$Port hazır."
 
   Write-UiLine "  ${CYN}[3/4]$RST Cloudflare tünel başlatılıyor..."
   Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $UrlFile, $LogFile, $OutLogFile -Force -ErrorAction SilentlyContinue
   # 127.0.0.1 + IPv4 edge avoids localhost/IPv6 happy-eyeballs delay on Windows
   $target = "http://127.0.0.1:$Port"
-  $cfCmd = "`"$cf`" tunnel --url `"$target`" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 3 > `"$OutLogFile`" 2> `"$LogFile`""
+  $cfCmd = "`"$cf`" tunnel --url `"$target`" --http-host-header `"127.0.0.1:$Port`" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 3 > `"$OutLogFile`" 2> `"$LogFile`""
   $tp = Start-HiddenCmd $cfCmd
   if (-not $tp) {
     Write-UiLine "  $RED$BOLD[HATA]$RST Tünel başlatılamadı. Log: $LogFile"

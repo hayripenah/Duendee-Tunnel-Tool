@@ -859,6 +859,26 @@ kill_tunnel() {
   rm -f "$PID_FILE" "$URL_FILE"
 }
 
+free_listen_port() {
+  if command -v fuser >/dev/null 2>&1; then
+    fuser -k "${PORT}/tcp" >/dev/null 2>&1 || true
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    local p
+    for p in $(lsof -tiTCP:"${PORT}" -sTCP:LISTEN 2>/dev/null || true); do
+      kill -KILL "$p" 2>/dev/null || true
+    done
+  fi
+}
+
+origin_serves_broken_bundle() {
+  local html js
+  html="$(curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/" 2>/dev/null || true)"
+  js="$(printf '%s\n' "$html" | sed -n 's/.*src="\(\/assets\/index-[^"]*\.js\)".*/\1/p' | head -n 1)"
+  [[ -n "$js" ]] || return 1
+  curl -fsS --max-time 8 "http://127.0.0.1:${PORT}${js}" 2>/dev/null | grep -q "Missing Supabase environment variables"
+}
+
 kill_dev_server() {
   local spid=""
   local stopped=0
@@ -1007,30 +1027,64 @@ show_menu() {
   printf "%b" "${CYN}   Seçim [1-7]: ${RST}"
 }
 
+# Public Supabase client values. Clones omit .env, so vite build otherwise
+# ships a bundle that throws before the page can render.
+DUENDEE_SUPABASE_URL="${DT_VITE_SUPABASE_URL:-https://ytlliifgpbiagidduhsx.supabase.co}"
+DUENDEE_SUPABASE_ANON_KEY="${DT_VITE_SUPABASE_ANON_KEY:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl0bGxpaWZncGJpYWdpZGR1aHN4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM1NjAyOTAsImV4cCI6MjA4OTEzNjI5MH0.W4p97en1IP7NTF304lCuVsyyvRINqa01yDnwCgOzBj4}"
+
+env_has_supabase() {
+  local f="$1"
+  [[ -f "$f" ]] || return 1
+  grep -Eq '^[[:space:]]*VITE_SUPABASE_URL=https://' "$f" || return 1
+  grep -Eq '^[[:space:]]*VITE_SUPABASE_ANON_KEY=eyJ' "$f" || return 1
+}
+
+ensure_supabase_env() {
+  if env_has_supabase "${PROJECT}/.env" || env_has_supabase "${PROJECT}/.env.local"; then
+    return 0
+  fi
+  local target="${PROJECT}/.env.local"
+  umask 077
+  cat >"$target" <<EOF
+VITE_SUPABASE_URL=${DUENDEE_SUPABASE_URL}
+VITE_SUPABASE_ANON_KEY=${DUENDEE_SUPABASE_ANON_KEY}
+VITE_APP_VARIANT=main
+EOF
+  echo -e "  ${DIM}   Supabase istemci ayarı yazıldı (.env yoktu).${RST}"
+}
+
+bundle_missing_supabase() {
+  [[ -d "${PROJECT}/dist/assets" ]] || return 0
+  grep -q "Missing Supabase environment variables" "${PROJECT}/dist/assets/"*.js 2>/dev/null
+}
+
 app_build_stale() {
   [[ -f "${PROJECT}/dist/index.html" ]] || return 0
+  bundle_missing_supabase && return 0
   local newer=""
-  newer="$(find "${PROJECT}/src" "${PROJECT}/index.html" "${PROJECT}/vite.config.ts" "${PROJECT}/vite.config.js" "${PROJECT}/vite.config.mjs" \
+  newer="$(find "${PROJECT}/src" "${PROJECT}/index.html" "${PROJECT}/.env" "${PROJECT}/.env.local" \
+    "${PROJECT}/vite.config.ts" "${PROJECT}/vite.config.js" "${PROJECT}/vite.config.mjs" \
     -newer "${PROJECT}/dist/index.html" -print -quit 2>/dev/null || true)"
   [[ -n "$newer" ]]
 }
 
-start_app_origin() {
-  local vite_bin="${PROJECT}/node_modules/.bin/vite"
-  local use_preview=0
-  if [[ -x "$vite_bin" && ( -f "${PROJECT}/vite.config.ts" || -f "${PROJECT}/vite.config.js" || -f "${PROJECT}/vite.config.mjs" ) ]]; then
-    use_preview=1
-  fi
-  if (( use_preview )); then
-    if app_build_stale; then
-      echo -e "  ${DIM}   Uygulama derleniyor. Telefondaki sayfa hazır paketle açılır.${RST}"
-      if ! (cd "$PROJECT" && npm run build >"${STATE}/server.out.log" 2>&1); then
-        echo -e "  ${RED}${BOLD}   [HATA]${RST} npm run build başarısız."
-        return 1
-      fi
-    else
-      echo -e "  ${DIM}   Mevcut derleme kullanılacak.${RST}"
+wait_for_port() {
+  local tries=0
+  while true; do
+    tries=$((tries + 1))
+    if port_listening "$PORT"; then
+      return 0
     fi
+    if (( tries >= 80 )); then
+      return 1
+    fi
+    sleep 0.25
+  done
+}
+
+launch_app_server() {
+  local vite_bin="${PROJECT}/node_modules/.bin/vite"
+  if [[ -x "$vite_bin" && ( -f "${PROJECT}/vite.config.ts" || -f "${PROJECT}/vite.config.js" || -f "${PROJECT}/vite.config.mjs" ) ]]; then
     (
       cd "$PROJECT" || exit 1
       setsid "$vite_bin" preview --host 127.0.0.1 --port "$PORT" --strictPort >"${STATE}/server.out.log" 2>&1 &
@@ -1043,17 +1097,47 @@ start_app_origin() {
       echo $! >"$SERVER_PID"
     )
   fi
-  local tries=0
-  while true; do
-    tries=$((tries + 1))
-    if port_listening "$PORT"; then
-      return 0
-    fi
-    if (( tries >= 80 )); then
+}
+
+build_app_bundle() {
+  ensure_supabase_env
+  if app_build_stale; then
+    echo -e "  ${DIM}   Uygulama derleniyor. Telefondaki sayfa hazır paketle açılır.${RST}"
+    if ! (cd "$PROJECT" && npm run build >"${STATE}/server.build.log" 2>&1); then
+      echo -e "  ${RED}${BOLD}   [HATA]${RST} npm run build başarısız."
       return 1
     fi
-    sleep 0.25
+  else
+    echo -e "  ${DIM}   Mevcut derleme kullanılacak.${RST}"
+  fi
+}
+
+start_app_origin() {
+  local vite_bin="${PROJECT}/node_modules/.bin/vite"
+  local attempt
+  for attempt in 1 2; do
+    if [[ -x "$vite_bin" && ( -f "${PROJECT}/vite.config.ts" || -f "${PROJECT}/vite.config.js" || -f "${PROJECT}/vite.config.mjs" ) ]]; then
+      if ! build_app_bundle; then
+        return 1
+      fi
+    else
+      ensure_supabase_env
+    fi
+    launch_app_server
+    if ! wait_for_port; then
+      return 1
+    fi
+    if ! origin_serves_broken_bundle; then
+      return 0
+    fi
+    echo -e "  ${YEL}   Sunulan paket Supabase ayarı içermiyor, yeniden derleniyor.${RST}"
+    kill_dev_server
+    free_listen_port
+    rm -f "${PROJECT}/dist/index.html"
+    sleep 0.3
   done
+  echo -e "  ${RED}${BOLD}   [HATA]${RST} Yayın hâlâ Supabase ayarı olmadan açılıyor."
+  return 1
 }
 
 do_start() {
@@ -1088,14 +1172,17 @@ do_start() {
   fi
 
   if port_listening "$PORT"; then
-    # A leftover Vite dev server keeps the phone on a white screen. Replace it with the built app.
+    # A leftover server keeps phones on the previous bundle. Always replace it.
     kill_dev_server
+    free_listen_port
     sleep 0.3
   fi
   if port_listening "$PORT"; then
-    echo -e "  ${CYN}[2/4]${RST} Uygulama ${PORT} portunda hazır."
-  else
-    echo -e "  ${CYN}[2/4]${RST} Uygulama başlatılıyor..."
+    echo -e "  ${RED}${BOLD}[HATA]${RST} ${PORT} portu boşaltılamadı. Eski yayın durdurulamadı."
+    wait_key
+    return
+  fi
+  echo -e "  ${CYN}[2/4]${RST} Uygulama başlatılıyor..."
     if [[ ! -d "${PROJECT}/node_modules" ]]; then
       echo -e "  ${DIM}   node_modules yok, npm install çalıştırılıyor...${RST}"
       (cd "$PROJECT" && npm install) || {
@@ -1111,7 +1198,6 @@ do_start() {
       return
     fi
     echo -e "  ${CYN}[2/4]${RST} Uygulama http://127.0.0.1:${PORT} hazır."
-  fi
 
   echo -e "  ${CYN}[3/4]${RST} Cloudflare tünel başlatılıyor..."
   pkill -f "cloudflared tunnel --url" 2>/dev/null || true
