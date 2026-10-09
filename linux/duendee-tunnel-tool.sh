@@ -537,6 +537,21 @@ send_tunnel_whatsapp() {
   fi
 }
 
+spawn_retract_detached() {
+  local wa_js="${WHATSAPP_JS:-${ROOT}/scripts/send-whatsapp.js}"
+  local sent_file="${ROOT}/.whatsapp-session/sent-links.json"
+  local creds="${ROOT}/.whatsapp-session/creds.json"
+  local log="${STATE}/wa-retract.log"
+  [[ -f "$wa_js" && -f "$sent_file" && -f "$creds" && -s "$sent_file" ]] || return 0
+  grep -q '^\[\][[:space:]]*$' "$sent_file" && return 0
+  command -v node >/dev/null 2>&1 || return 0
+  if command -v setsid >/dev/null 2>&1; then
+    setsid nohup env DT_WA_ACTION=retract DT_WA_TIMEOUT_MS=45000 node "$wa_js" --retract >>"$log" 2>&1 </dev/null &
+  else
+    nohup env DT_WA_ACTION=retract DT_WA_TIMEOUT_MS=45000 node "$wa_js" --retract >>"$log" 2>&1 </dev/null &
+  fi
+}
+
 retract_tunnel_whatsapp() {
   local wa_js="${WHATSAPP_JS:-${ROOT}/scripts/send-whatsapp.js}"
   local sent_file="${ROOT}/.whatsapp-session/sent-links.json"
@@ -965,7 +980,7 @@ cleanup_quiet() {
   fi
   pkill -f "cloudflared tunnel --url" 2>/dev/null || true
   killall cloudflared 2>/dev/null || true
-  DT_WA_TIMEOUT_MS=20000 retract_tunnel_whatsapp || true
+  spawn_retract_detached || true
   read_pid
   if [[ -n "${TPID:-}" ]] && pid_alive "$TPID"; then
     kill -TERM "-$TPID" 2>/dev/null || kill -TERM "$TPID" 2>/dev/null || true
@@ -1417,6 +1432,7 @@ do_cancel() {
     fi
   fi
   if [[ "$had_tunnel" -eq 0 && "$had_server" -eq 0 ]]; then
+    retract_tunnel_whatsapp
     echo -e "  ${YEL}   Aktif tünel servisi yok.${RST}"
     echo -e "  ${DIM}   İptal edilecek bir şey yok. Başlatmak için menüden [1] kullanın.${RST}"
     echo

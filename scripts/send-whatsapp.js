@@ -160,6 +160,10 @@ function phonesMatch(accountId, target) {
   return account === expected || account.endsWith(expected) || expected.endsWith(account);
 }
 
+function isPhoneAccount(accountId) {
+  return String(accountId || '').includes('@s.whatsapp.net');
+}
+
 function readLinkedId() {
   try {
     const creds = JSON.parse(fs.readFileSync(credsPath, 'utf8'));
@@ -368,7 +372,7 @@ async function main() {
   }
 
   const linkedNow = readLinkedId();
-  if (action === 'send' && linkedNow && !phonesMatch(linkedNow, phone)) {
+  if (action === 'send' && linkedNow && isPhoneAccount(linkedNow) && !phonesMatch(linkedNow, phone)) {
     console.log('  Kayitli WhatsApp hatti ' + phone + ' degil. Yeni QR olusturuluyor...');
     try {
       fs.rmSync(sessionDir, { recursive: true, force: true });
@@ -390,7 +394,7 @@ async function main() {
 
   fs.mkdirSync(sessionDir, { recursive: true });
 
-  if (fs.existsSync(credsPath) && phonesMatch(readLinkedId(), phone)) {
+  if (fs.existsSync(credsPath)) {
     console.log('  WhatsApp hatti kontrol ediliyor: ' + phone);
   } else {
     console.log('  WhatsApp hatti ' + phone + ' bagli degil. Yeni QR olusturuluyor...');
@@ -402,6 +406,7 @@ async function main() {
   let attempts = 0;
   let qrCycles = 0;
   let generation = 0;
+  let allowQr = !fs.existsSync(credsPath);
   let sock = null;
   let timer = null;
 
@@ -412,6 +417,7 @@ async function main() {
       return;
     }
     qrCycles += 1;
+    allowQr = true;
     delivered = false;
     delivering = false;
     attempts = 0;
@@ -557,7 +563,7 @@ async function main() {
       try {
       const { connection, lastDisconnect, qr } = update;
 
-      if (qr && action === 'send' && !delivered) showQr(qr);
+      if (qr && action === 'send' && !delivered && allowQr) showQr(qr);
 
       if (update.receivedPendingNotifications) {
         notificationsReady = true;
@@ -566,7 +572,7 @@ async function main() {
 
       if (connection === 'open') {
         const linked = current.user?.id || '';
-        if (action === 'send' && linked && !phonesMatch(linked, phone)) {
+        if (action === 'send' && linked && isPhoneAccount(linked) && !phonesMatch(linked, phone)) {
           replaceWithQr('Acilan oturum ' + linked + ' hattina ait.');
           return;
         }
