@@ -263,8 +263,8 @@ else
 fi
 [[ -n "$extracted" ]] || { echo "Archive layout unexpected (linux/duendee-tunnel-tool.sh missing)." >&2; exit 1; }
 
-if [[ ! -f "${extracted}/linux/stable-launch.sh" ]]; then
-  echo "Release package is incomplete. Downloading current main (public, no login)..."
+if [[ ! -f "${extracted}/linux/stable-launch.sh" ]] || ! grep -q 'ensure_supabase_env' "${extracted}/linux/duendee-tunnel-tool.sh" 2>/dev/null; then
+  echo "Release package is incomplete or missing the tunnel Supabase fix. Downloading current main (public, no login)..."
   curl -fsSL -o "${tmp}/main.tgz" "https://codeload.github.com/${REPO}/tar.gz/refs/heads/main"
   mkdir -p "${tmp}/main-src"
   tar -xzf "${tmp}/main.tgz" -C "${tmp}/main-src"

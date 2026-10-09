@@ -1062,6 +1062,23 @@ EOF
   echo -e "  ${DIM}   Supabase istemci ayarı yazıldı (.env yoktu).${RST}"
 }
 
+# Vite inlines VITE_* from the process environment with higher priority than .env.
+# A clone often has no .env, so the tunnel build must export the public client values.
+export_supabase_build_env() {
+  local f val
+  VITE_SUPABASE_URL="$DUENDEE_SUPABASE_URL"
+  VITE_SUPABASE_ANON_KEY="$DUENDEE_SUPABASE_ANON_KEY"
+  for f in "${PROJECT}/.env" "${PROJECT}/.env.local" "${PROJECT}/.env.production" "${PROJECT}/.env.production.local"; do
+    [[ -f "$f" ]] || continue
+    val="$(grep -E '^[[:space:]]*VITE_SUPABASE_URL=https://' "$f" | tail -n1 | cut -d= -f2- | tr -d '\r"' | tr -d "'")"
+    [[ -n "$val" ]] && VITE_SUPABASE_URL="$val"
+    val="$(grep -E '^[[:space:]]*VITE_SUPABASE_ANON_KEY=eyJ' "$f" | tail -n1 | cut -d= -f2- | tr -d '\r"' | tr -d "'")"
+    [[ -n "$val" ]] && VITE_SUPABASE_ANON_KEY="$val"
+  done
+  export VITE_SUPABASE_URL VITE_SUPABASE_ANON_KEY
+  export VITE_APP_VARIANT="${VITE_APP_VARIANT:-main}"
+}
+
 bundle_missing_supabase() {
   [[ -d "${PROJECT}/dist/assets" ]] || return 0
   grep -q "Missing Supabase environment variables" "${PROJECT}/dist/assets/"*.js 2>/dev/null
@@ -1110,10 +1127,16 @@ launch_app_server() {
 
 build_app_bundle() {
   ensure_supabase_env
+  export_supabase_build_env
+  if bundle_missing_supabase; then
+    echo -e "  ${YEL}   Eski paket Supabase ayarı içermiyor, siliniyor.${RST}"
+    rm -rf "${PROJECT}/dist"
+  fi
   if app_build_stale; then
     echo -e "  ${DIM}   Uygulama derleniyor. Telefondaki sayfa hazır paketle açılır.${RST}"
     if ! (cd "$PROJECT" && npm run build >"${STATE}/server.build.log" 2>&1); then
       echo -e "  ${RED}${BOLD}   [HATA]${RST} npm run build başarısız."
+      echo -e "  ${DIM}   Ayrıntı: ${STATE}/server.build.log${RST}"
       return 1
     fi
   else
@@ -1142,7 +1165,7 @@ start_app_origin() {
     echo -e "  ${YEL}   Sunulan paket Supabase ayarı içermiyor, yeniden derleniyor.${RST}"
     kill_dev_server
     free_listen_port
-    rm -f "${PROJECT}/dist/index.html"
+    rm -rf "${PROJECT}/dist"
     sleep 0.3
   done
   echo -e "  ${RED}${BOLD}   [HATA]${RST} Yayın hâlâ Supabase ayarı olmadan açılıyor."
