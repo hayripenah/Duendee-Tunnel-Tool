@@ -654,9 +654,55 @@ function Find-Cloudflared {
   return $null
 }
 
+function Start-DetachedCommand([string]$CommandLine) {
+  try {
+    $result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $CommandLine }
+    return ($result.ReturnValue -eq 0)
+  } catch {
+    return $false
+  }
+}
+
+function Start-HiddenDetached([string]$CommandLine) {
+  $vbs = Join-Path $env:TEMP ("duendee-hidden-" + [guid]::NewGuid().ToString('n') + '.vbs')
+  $escaped = $CommandLine.Replace('"', '""')
+  $line = 'CreateObject("Wscript.Shell").Run "' + $escaped + '", 0, False'
+  [System.IO.File]::WriteAllText($vbs, $line)
+  return Start-DetachedCommand -CommandLine "wscript.exe //B //Nologo `"$vbs`""
+}
+
+function Start-HiddenCmd([string]$Command) {
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = Join-Path $env:SystemRoot 'System32\cmd.exe'
+  $psi.Arguments = '/D /C ' + $Command
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+  return [System.Diagnostics.Process]::Start($psi)
+}
+
+function Start-DetachedRetract {
+  $waJs = Join-Path $Root 'scripts\send-whatsapp.js'
+  $sentFile = Join-Path $Root '.whatsapp-session\sent-links.json'
+  $sessionCreds = Join-Path $Root '.whatsapp-session\creds.json'
+  if (-not (Test-Path -LiteralPath $waJs) -or -not (Test-Path -LiteralPath $sentFile) -or -not (Test-Path -LiteralPath $sessionCreds)) {
+    return
+  }
+  $raw = Get-Content -LiteralPath $sentFile -Raw -ErrorAction SilentlyContinue
+  if ([string]::IsNullOrWhiteSpace($raw) -or $raw.Trim() -eq '[]') { return }
+  $node = Find-NodeExe
+  if (-not $node) { return }
+  [void](Start-HiddenDetached -CommandLine "`"$node`" `"$waJs`" --retract")
+}
+
 function Start-ToolWatcher {
   $watcher = Join-Path $OsDir 'scripts\tunnel-watcher.ps1'
   if (-not (Test-Path -LiteralPath $watcher)) { return }
+  $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  $projectArg = ($Project -replace '"', '\"')
+  $arg = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$watcher`" -ToolPid $PID -Project `"$projectArg`" -ToolRoot `"$Root`""
+  # Hidden and outside this console, so no second terminal appears and closing the window does not kill it.
+  if (Start-HiddenDetached -CommandLine "`"$ps`" $arg") { return }
   Start-Process -FilePath powershell.exe -WindowStyle Hidden -ArgumentList @(
     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
     '-File', $watcher, '-ToolPid', "$PID", '-Project', $Project, '-ToolRoot', $Root
@@ -945,10 +991,7 @@ function Invoke-Start {
     }
     $serverOut = Join-Path $StateDir 'server.out.log'
     $serverErr = Join-Path $StateDir 'server.err.log'
-    $p = Start-Process -FilePath cmd.exe `
-      -ArgumentList '/C', "cd /d `"$Project`" & npm run dev" `
-      -WindowStyle Hidden -PassThru `
-      -RedirectStandardOutput $serverOut -RedirectStandardError $serverErr
+    $p = Start-HiddenCmd "cd /d `"$Project`" & npm run dev > `"$serverOut`" 2> `"$serverErr`""
     if ($p) { Set-Content -LiteralPath $ServerPidFile -Value $p.Id -Encoding Ascii }
     $ready = $false
     for ($i = 1; $i -le 80; $i++) {
@@ -971,9 +1014,8 @@ function Invoke-Start {
   Remove-Item -LiteralPath $UrlFile, $LogFile, $OutLogFile -Force -ErrorAction SilentlyContinue
   # 127.0.0.1 + IPv4 edge avoids localhost/IPv6 happy-eyeballs delay on Windows
   $target = "http://127.0.0.1:$Port"
-  $cfArgs = @('tunnel', '--url', $target, '--no-autoupdate', '--protocol', 'http2', '--edge-ip-version', '4', '--retries', '3')
-  $tp = Start-Process -FilePath $cf -ArgumentList $cfArgs `
-    -WindowStyle Hidden -PassThru -RedirectStandardOutput $OutLogFile -RedirectStandardError $LogFile
+  $cfCmd = "`"$cf`" tunnel --url `"$target`" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 3 > `"$OutLogFile`" 2> `"$LogFile`""
+  $tp = Start-HiddenCmd $cfCmd
   if (-not $tp) {
     Write-UiLine "  $RED$BOLD[HATA]$RST Tünel başlatılamadı. Log: $LogFile"
     Complete-Action
@@ -1509,9 +1551,8 @@ function Invoke-ExitCleanup {
         ForEach-Object { Stop-ProcessTree ([int]$_.ProcessId) }
     }
     Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue
-    $env:DT_WA_TIMEOUT_MS = '20000'
-    Invoke-RetractWhatsApp
-    Remove-Item Env:DT_WA_TIMEOUT_MS -ErrorAction SilentlyContinue
+    # Detached so the delete survives the console window closing.
+    Start-DetachedRetract
   } catch {}
 }
 

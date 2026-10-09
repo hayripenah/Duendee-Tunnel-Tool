@@ -41,7 +41,10 @@ if (!fs.existsSync(configPath)) {
 
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 const urlFile = path.join(toolRoot, '.tunnelstate', 'tunnel.url');
-const action = String(process.env.DT_WA_ACTION || 'send').trim().toLowerCase() === 'retract' ? 'retract' : 'send';
+const action =
+  String(process.env.DT_WA_ACTION || '').trim().toLowerCase() === 'retract' || process.argv.includes('--retract')
+    ? 'retract'
+    : 'send';
 
 function resolveUrl(raw) {
   let fromFile = '';
@@ -128,7 +131,7 @@ function showQr(qr) {
       console.log('  Tarama sonrasi mesaj otomatik gidecek / Message sends after scan.');
       try {
         if (process.platform === 'win32') {
-          spawn('cmd', ['/c', 'start', '', qrImage], { detached: true, stdio: 'ignore' }).unref();
+          spawn('explorer.exe', [qrImage], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
         } else if (process.platform === 'darwin') {
           spawn('open', [qrImage], { detached: true, stdio: 'ignore' }).unref();
         } else {
@@ -317,7 +320,44 @@ process.on('unhandledRejection', (err) => {
   if (!qrSeen) process.exit(1);
 });
 
+const retractLock = path.join(toolRoot, '.tunnelstate', 'wa-retract.lock');
+
+function claimRetractLock() {
+  fs.mkdirSync(path.dirname(retractLock), { recursive: true });
+  try {
+    const fd = fs.openSync(retractLock, 'wx');
+    fs.writeFileSync(fd, String(process.pid));
+    fs.closeSync(fd);
+    return true;
+  } catch (err) {
+    if (err.code !== 'EEXIST') throw err;
+    try {
+      const age = Date.now() - fs.statSync(retractLock).mtimeMs;
+      if (age > 90000) {
+        fs.rmSync(retractLock, { force: true });
+        return claimRetractLock();
+      }
+    } catch {
+      /* another retract owns the lock */
+    }
+    return false;
+  }
+}
+
+function releaseRetractLock() {
+  try {
+    fs.rmSync(retractLock, { force: true });
+  } catch {
+    /* ignore */
+  }
+}
+
 async function main() {
+  if (action === 'retract' && !claimRetractLock()) {
+    console.log('  Link mesaji kaldirma zaten calisiyor.');
+    return;
+  }
+
   const linkedNow = readLinkedId();
   if (action === 'send' && linkedNow && !phonesMatch(linkedNow, phone)) {
     console.log('  Kayitli WhatsApp hatti ' + phone + ' degil. Yeni QR olusturuluyor...');
@@ -330,10 +370,12 @@ async function main() {
 
   const stored = loadSent();
   if (action === 'retract' && stored.length === 0) {
+    releaseRetractLock();
     console.log('  Kaldirilacak eski link mesaji yok.');
     return;
   }
   if (action === 'retract' && !hasSession) {
+    releaseRetractLock();
     fail('WhatsApp oturumu yok; eski link mesaji kaldirilamadi.');
   }
 
@@ -399,6 +441,7 @@ async function main() {
     } catch {
       /* ignore */
     }
+    if (action === 'retract') releaseRetractLock();
     setTimeout(() => process.exit(code), 1500);
   };
 
@@ -574,6 +617,7 @@ async function main() {
 }
 
 main().catch((err) => {
+  if (action === 'retract') releaseRetractLock();
   console.error('WhatsApp baslatilamadi / failed to start:', err?.message || err);
   process.exit(1);
 });
