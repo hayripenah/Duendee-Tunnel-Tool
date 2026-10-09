@@ -785,6 +785,81 @@ function Start-HiddenDetached([string]$CommandLine) {
   return Start-DetachedCommand -CommandLine "wscript.exe //B //Nologo `"$vbs`""
 }
 
+$script:ToolJobHandle = [IntPtr]::Zero
+
+function Initialize-ToolJob {
+  if ($script:ToolJobHandle -ne [IntPtr]::Zero) { return }
+  if (-not ('DuendeeToolJob' -as [type])) {
+    Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class DuendeeToolJob {
+  [StructLayout(LayoutKind.Sequential)]
+  struct BasicLimits {
+    public long PerProcessUserTimeLimit;
+    public long PerJobUserTimeLimit;
+    public uint LimitFlags;
+    public UIntPtr MinimumWorkingSetSize;
+    public UIntPtr MaximumWorkingSetSize;
+    public uint ActiveProcessLimit;
+    public UIntPtr Affinity;
+    public uint PriorityClass;
+    public uint SchedulingClass;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  struct IoCounters {
+    public ulong ReadOperationCount;
+    public ulong WriteOperationCount;
+    public ulong OtherOperationCount;
+    public ulong ReadTransferCount;
+    public ulong WriteTransferCount;
+    public ulong OtherTransferCount;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  struct ExtendedLimits {
+    public BasicLimits Basic;
+    public IoCounters Io;
+    public UIntPtr ProcessMemoryLimit;
+    public UIntPtr JobMemoryLimit;
+    public UIntPtr PeakProcessMemoryUsed;
+    public UIntPtr PeakJobMemoryUsed;
+  }
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+  static extern IntPtr CreateJobObject(IntPtr attr, string name);
+  [DllImport("kernel32.dll")]
+  static extern bool SetInformationJobObject(IntPtr job, int cls, IntPtr info, uint len);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+  public static IntPtr CreateKillOnCloseJob() {
+    IntPtr job = CreateJobObject(IntPtr.Zero, null);
+    if (job == IntPtr.Zero) return IntPtr.Zero;
+    var limits = new ExtendedLimits();
+    limits.Basic.LimitFlags = 0x2000; // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    int size = Marshal.SizeOf(typeof(ExtendedLimits));
+    IntPtr mem = Marshal.AllocHGlobal(size);
+    try {
+      Marshal.StructureToPtr(limits, mem, false);
+      if (!SetInformationJobObject(job, 9, mem, (uint)size)) return IntPtr.Zero;
+    } finally {
+      Marshal.FreeHGlobal(mem);
+    }
+    return job;
+  }
+}
+'@
+  }
+  $script:ToolJobHandle = [DuendeeToolJob]::CreateKillOnCloseJob()
+}
+
+function Add-ProcessToToolJob([System.Diagnostics.Process]$Process) {
+  if (-not $Process) { return }
+  try {
+    Initialize-ToolJob
+    if ($script:ToolJobHandle -eq [IntPtr]::Zero) { return }
+    [void][DuendeeToolJob]::AssignProcessToJobObject($script:ToolJobHandle, $Process.Handle)
+  } catch {}
+}
+
 function Start-HiddenCmd([string]$Command) {
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = Join-Path $env:SystemRoot 'System32\cmd.exe'
@@ -793,7 +868,11 @@ function Start-HiddenCmd([string]$Command) {
   $psi.UseShellExecute = $false
   $psi.CreateNoWindow = $true
   $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-  return [System.Diagnostics.Process]::Start($psi)
+  $proc = [System.Diagnostics.Process]::Start($psi)
+  # The job handle lives in this process. When the tool exits or the window is
+  # destroyed, Windows closes it and kills cloudflared plus the app server.
+  Add-ProcessToToolJob $proc
+  return $proc
 }
 
 function Start-DetachedRetract {
@@ -1845,8 +1924,11 @@ public static class DuendeeConsoleCtrl {
   }
   $script:ConsoleCloseHandler = [DuendeeConsoleCtrl+Handler] {
     param([int]$ctrlType)
-    # 2 = window closed. Start the delete before this process is torn down.
-    if ($ctrlType -eq 2) { Start-DetachedRetract }
+    # 2 = window closed. Kill the tunnel before this process is torn down.
+    if ($ctrlType -eq 2) {
+      Start-DetachedRetract
+      Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    }
     return $false
   }
   [void][DuendeeConsoleCtrl]::SetConsoleCtrlHandler($script:ConsoleCloseHandler, $true)

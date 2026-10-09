@@ -956,6 +956,15 @@ cleanup_quiet() {
     return 0
   fi
   CLEANING_UP=1
+  # Kill the tunnel before the slower WhatsApp retract. Closing the window
+  # can cut the shell off while that retract is still running.
+  read_pid
+  if [[ -n "${TPID:-}" ]] && pid_alive "$TPID"; then
+    kill -TERM "$TPID" 2>/dev/null || true
+    kill -KILL "$TPID" 2>/dev/null || true
+  fi
+  pkill -f "cloudflared tunnel --url" 2>/dev/null || true
+  killall cloudflared 2>/dev/null || true
   DT_WA_TIMEOUT_MS=20000 retract_tunnel_whatsapp || true
   read_pid
   if [[ -n "${TPID:-}" ]] && pid_alive "$TPID"; then
@@ -1206,9 +1215,16 @@ do_start() {
   URL=""
   TUNNEL_URL=""
   PREV=""
-  # 127.0.0.1 + IPv4 edge avoids localhost/IPv6 happy-eyeballs delay
+  # 127.0.0.1 + IPv4 edge avoids localhost/IPv6 happy-eyeballs delay.
+  # No setsid: cloudflared stays a child of this shell. prctl(PDEATHSIG) makes
+  # the kernel deliver SIGTERM when this shell dies, including a hard kill.
   local target="http://127.0.0.1:${PORT}"
-  setsid "$CF" tunnel --url "$target" --http-host-header "127.0.0.1:${PORT}" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 3 >"$OUT_LOG" 2>"$LOG" &
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import ctypes,os,sys; ctypes.CDLL("libc.so.6").prctl(1, 15); os.execvp(sys.argv[1], sys.argv[1:])' \
+      "$CF" tunnel --url "$target" --http-host-header "127.0.0.1:${PORT}" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 3 >"$OUT_LOG" 2>"$LOG" &
+  else
+    "$CF" tunnel --url "$target" --http-host-header "127.0.0.1:${PORT}" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 3 >"$OUT_LOG" 2>"$LOG" &
+  fi
   echo $! >"$PID_FILE"
   read_pid
   if [[ -z "${TPID:-}" ]]; then
