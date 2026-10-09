@@ -27,6 +27,62 @@ need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing required command: $1
 need curl
 need tar
 
+ensure_local_bin_path() {
+  export PATH="${HOME}/.local/bin:${PATH}"
+}
+
+ensure_node() {
+  ensure_local_bin_path
+  if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+    return 0
+  fi
+  local node_arch ver="v22.14.0" dest tmp
+  case "$(uname -m)" in
+    x86_64|amd64) node_arch="x64" ;;
+    aarch64|arm64) node_arch="arm64" ;;
+    *)
+      echo "Node.js bu mimaride otomatik kurulamadı: $(uname -m)" >&2
+      return 1
+      ;;
+  esac
+  dest="${HOME}/.local/share/duendee-node"
+  echo "Node.js kuruluyor (${ver}, hesap gerekmez)..."
+  tmp="$(mktemp)"
+  curl -fsSL -o "$tmp" "https://nodejs.org/dist/${ver}/node-${ver}-linux-${node_arch}.tar.xz"
+  mkdir -p "$dest" "${HOME}/.local/bin"
+  tar -xJf "$tmp" -C "$dest" --strip-components=1
+  rm -f "$tmp"
+  ln -sfn "${dest}/bin/node" "${HOME}/.local/bin/node"
+  ln -sfn "${dest}/bin/npm" "${HOME}/.local/bin/npm"
+  ln -sfn "${dest}/bin/npx" "${HOME}/.local/bin/npx"
+  ensure_local_bin_path
+  hash -r 2>/dev/null || true
+}
+
+ensure_cloudflared() {
+  ensure_local_bin_path
+  if command -v cloudflared >/dev/null 2>&1 || [[ -x "${HOME}/.cloudflared/cloudflared" ]]; then
+    return 0
+  fi
+  local name
+  case "$(uname -m)" in
+    x86_64|amd64) name="cloudflared-linux-amd64" ;;
+    aarch64|arm64) name="cloudflared-linux-arm64" ;;
+    *)
+      echo "cloudflared bu mimaride otomatik kurulamadı: $(uname -m)" >&2
+      return 1
+      ;;
+  esac
+  echo "cloudflared kuruluyor (hesap gerekmez)..."
+  mkdir -p "${HOME}/.cloudflared" "${HOME}/.local/bin"
+  curl -fsSL -L -o "${HOME}/.cloudflared/cloudflared" \
+    "https://github.com/cloudflare/cloudflared/releases/latest/download/${name}"
+  chmod +x "${HOME}/.cloudflared/cloudflared"
+  ln -sfn "${HOME}/.cloudflared/cloudflared" "${HOME}/.local/bin/cloudflared"
+  ensure_local_bin_path
+  hash -r 2>/dev/null || true
+}
+
 path_has_bin_dir() {
   case ":${PATH}:" in
     *":${BIN_DIR}:"*) return 0 ;;
@@ -181,6 +237,20 @@ else
 fi
 [[ -n "$extracted" ]] || { echo "Archive layout unexpected (linux/duendee-tunnel-tool.sh missing)." >&2; exit 1; }
 
+if [[ ! -f "${extracted}/linux/stable-launch.sh" ]]; then
+  echo "Release package is incomplete. Downloading current main (public, no login)..."
+  curl -fsSL -o "${tmp}/main.tgz" "https://codeload.github.com/${REPO}/tar.gz/refs/heads/main"
+  mkdir -p "${tmp}/main-src"
+  tar -xzf "${tmp}/main.tgz" -C "${tmp}/main-src"
+  for cand in "${tmp}/main-src"/*; do
+    if [[ -d "$cand" && -f "${cand}/linux/stable-launch.sh" ]]; then
+      extracted="$cand"
+      break
+    fi
+  done
+fi
+[[ -f "${extracted}/linux/stable-launch.sh" ]] || { echo "Current main is missing linux/stable-launch.sh" >&2; exit 1; }
+
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 
 # Preserve user state
@@ -214,6 +284,9 @@ fi
 
 chmod +x "${INSTALL_DIR}/linux/duendee-tunnel-tool.sh" \
   "${INSTALL_DIR}/linux/scripts/"*.sh 2>/dev/null || true
+
+ensure_node || echo "WARNING: Node.js kurulamadı. WhatsApp ve dev server için node gerekli."
+ensure_cloudflared || echo "WARNING: cloudflared kurulamadı. Tünel için cloudflared gerekli."
 
 if [[ "$SKIP_NPM" != "1" ]]; then
   if command -v npm >/dev/null 2>&1; then

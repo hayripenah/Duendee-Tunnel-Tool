@@ -124,16 +124,51 @@ looks_like_duendee() {
   return 1
 }
 
+public_git() {
+  GIT_TERMINAL_PROMPT=0 git -c credential.helper= "$@"
+}
+
+fetch_public_github() {
+  local url="$1"
+  local target="$2"
+  local repo tmp branch inner
+  repo="${url%.git}"
+  repo="${repo#https://github.com/}"
+  repo="${repo#git@github.com:}"
+  command -v curl >/dev/null 2>&1 || return 1
+  command -v tar >/dev/null 2>&1 || return 1
+  tmp="$(mktemp -d)"
+  for branch in main master; do
+    if curl -fsSL -o "${tmp}/src.tgz" "https://codeload.github.com/${repo}/tar.gz/refs/heads/${branch}"; then
+      tar -xzf "${tmp}/src.tgz" -C "$tmp" || true
+      inner="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d ! -name '.*' | head -n1 || true)"
+      if [[ -n "$inner" && -d "$inner" ]]; then
+        mkdir -p "$(dirname "$target")"
+        rm -rf "$target"
+        mv "$inner" "$target"
+        rm -rf "$tmp"
+        return 0
+      fi
+    fi
+  done
+  rm -rf "$tmp"
+  if command -v git >/dev/null 2>&1; then
+    public_git clone --depth 1 "$url" "$target"
+    return $?
+  fi
+  return 1
+}
+
 update_duendee_safe() {
   local path="$1"
   [[ -d "$path/.git" ]] || return 0
   command -v git >/dev/null 2>&1 || return 0
-  if [[ -n "$(git -C "$path" status --porcelain 2>/dev/null || true)" ]]; then
+  if [[ -n "$(public_git -C "$path" status --porcelain 2>/dev/null || true)" ]]; then
     echo -e "  ${DIM}   Git: yerel değişiklikler var — pull atlandı (${path})${RST}" >&2
     return 0
   fi
   echo -e "  ${DIM}   Duendee güncelleniyor (git fetch/pull --ff-only)...${RST}" >&2
-  if git -C "$path" fetch --quiet 2>/dev/null && git -C "$path" pull --ff-only --quiet 2>/dev/null; then
+  if public_git -C "$path" fetch --quiet 2>/dev/null && public_git -C "$path" pull --ff-only --quiet 2>/dev/null; then
     echo -e "  ${GRN}   Repo güncel.${RST}" >&2
   else
     echo -e "  ${YEL}   Pull atlandı/başarısız (ff-only). Mevcut kopya kullanılacak.${RST}" >&2
@@ -208,10 +243,6 @@ pick_dir_gui() {
 clone_duendee_to() {
   local parent="$1"
   local target
-  if ! command -v git >/dev/null 2>&1; then
-    echo -e "  ${RED}${BOLD}[HATA]${RST} git bulunamadı. Git kurun veya Duendee klasörünü elle seçin." >&2
-    return 1
-  fi
   mkdir -p "$parent"
   target="${parent%/}/${DUENDEE_CLONE_NAME}"
   if [[ -d "$target" ]]; then
@@ -223,12 +254,12 @@ clone_duendee_to() {
     echo -e "  ${YEL}   Klasör zaten var ama Duendee görünmüyor: ${target}${RST}" >&2
     return 1
   fi
-  echo -e "  ${DIM}   Klonlanıyor: ${DUENDEE_REPO_URL} -> ${target}${RST}" >&2
-  if git clone --depth 1 "$DUENDEE_REPO_URL" "$target"; then
+  echo -e "  ${DIM}   İndiriliyor (hesap gerekmez): ${DUENDEE_REPO_URL} -> ${target}${RST}" >&2
+  if fetch_public_github "$DUENDEE_REPO_URL" "$target"; then
     (cd "$target" && pwd)
     return 0
   fi
-  echo -e "  ${RED}   Clone başarısız.${RST}" >&2
+  echo -e "  ${RED}   İndirme başarısız.${RST}" >&2
   return 1
 }
 
@@ -471,6 +502,75 @@ retract_tunnel_whatsapp() {
   else
     echo -e "  ${GRN}   Gecersiz tunnel linki mesaji kaldirildi.${RST}"
   fi
+}
+
+ensure_local_bin_path() {
+  export PATH="${HOME}/.local/bin:${PATH}"
+}
+
+ensure_node() {
+  ensure_local_bin_path
+  if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+    return 0
+  fi
+  local node_arch ver="v22.14.0" dest tmp
+  case "$(uname -m)" in
+    x86_64|amd64) node_arch="x64" ;;
+    aarch64|arm64) node_arch="arm64" ;;
+    *)
+      echo -e "  ${YEL}   Node.js bu mimaride otomatik kurulamadı: $(uname -m)${RST}" >&2
+      return 1
+      ;;
+  esac
+  dest="${HOME}/.local/share/duendee-node"
+  echo "  Node.js kuruluyor (${ver})..."
+  tmp="$(mktemp)"
+  if ! curl -fsSL -o "$tmp" "https://nodejs.org/dist/${ver}/node-${ver}-linux-${node_arch}.tar.xz"; then
+    rm -f "$tmp"
+    echo -e "  ${YEL}   Node.js indirilemedi.${RST}" >&2
+    return 1
+  fi
+  mkdir -p "$dest" "${HOME}/.local/bin"
+  tar -xJf "$tmp" -C "$dest" --strip-components=1
+  rm -f "$tmp"
+  ln -sfn "${dest}/bin/node" "${HOME}/.local/bin/node"
+  ln -sfn "${dest}/bin/npm" "${HOME}/.local/bin/npm"
+  ln -sfn "${dest}/bin/npx" "${HOME}/.local/bin/npx"
+  ensure_local_bin_path
+  hash -r 2>/dev/null || true
+}
+
+ensure_cloudflared_bin() {
+  ensure_local_bin_path
+  if command -v cloudflared >/dev/null 2>&1 || [[ -x "${HOME}/.cloudflared/cloudflared" ]]; then
+    return 0
+  fi
+  local name
+  case "$(uname -m)" in
+    x86_64|amd64) name="cloudflared-linux-amd64" ;;
+    aarch64|arm64) name="cloudflared-linux-arm64" ;;
+    *)
+      echo -e "  ${YEL}   cloudflared bu mimaride otomatik kurulamadı: $(uname -m)${RST}" >&2
+      return 1
+      ;;
+  esac
+  echo "  cloudflared kuruluyor..."
+  mkdir -p "${HOME}/.cloudflared" "${HOME}/.local/bin"
+  if ! curl -fsSL -L -o "${HOME}/.cloudflared/cloudflared" \
+    "https://github.com/cloudflare/cloudflared/releases/latest/download/${name}"; then
+    echo -e "  ${YEL}   cloudflared indirilemedi.${RST}" >&2
+    return 1
+  fi
+  chmod +x "${HOME}/.cloudflared/cloudflared"
+  ln -sfn "${HOME}/.cloudflared/cloudflared" "${HOME}/.local/bin/cloudflared"
+  ensure_local_bin_path
+  hash -r 2>/dev/null || true
+}
+
+ensure_requirements() {
+  ensure_node || true
+  ensure_cloudflared_bin || true
+  ensure_whatsapp_deps || true
 }
 
 find_cloudflared() {
@@ -1483,6 +1583,7 @@ if is_uninstall_arg "${1:-}"; then
 fi
 
 load_config
+ensure_requirements
 trap cleanup_quiet EXIT INT TERM HUP
 register_stable_launch || true
 start_watcher

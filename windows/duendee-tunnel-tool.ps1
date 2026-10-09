@@ -107,18 +107,42 @@ function Test-LooksLikeDuendeeRepo([string]$Path) {
   return ($remoteHit -or ($nameHit -and $pkgHit) -or ($pkgHit -and (Test-Path -LiteralPath $gitDir)))
 }
 
+function Save-PublicGitHubTree([string]$RepoUrl, [string]$Target) {
+  $repo = $RepoUrl -replace '\.git$', '' -replace '^https://github.com/', '' -replace '^git@github.com:', ''
+  $zip = Join-Path $env:TEMP ("duendee-src-" + [guid]::NewGuid().ToString('n') + '.zip')
+  $unpack = Join-Path $env:TEMP ("duendee-src-" + [guid]::NewGuid().ToString('n'))
+  foreach ($branch in @('main', 'master')) {
+    try {
+      Invoke-WebRequest -Uri "https://github.com/$repo/archive/refs/heads/$branch.zip" -OutFile $zip -UseBasicParsing
+      if (Test-Path $unpack) { Remove-Item $unpack -Recurse -Force }
+      Expand-Archive -Path $zip -DestinationPath $unpack -Force
+      $inner = Get-ChildItem -LiteralPath $unpack -Directory | Select-Object -First 1
+      if ($inner) {
+        $parent = Split-Path -Parent $Target
+        if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+        if (Test-Path -LiteralPath $Target) { Remove-Item -LiteralPath $Target -Recurse -Force }
+        Move-Item -LiteralPath $inner.FullName -Destination $Target
+        return $true
+      }
+    } catch {}
+  }
+  return $false
+}
+
 function Update-DuendeeRepoSafe([string]$Path) {
   if (-not (Test-Path -LiteralPath (Join-Path $Path '.git'))) { return }
   if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return }
   try {
-    $dirty = (& git -C $Path status --porcelain 2>$null)
+    $env:GIT_TERMINAL_PROMPT = '0'
+    $dirty = (& git -c credential.helper= -C $Path status --porcelain 2>$null)
     if ($dirty) {
       Write-UiLine "  $DIM   Git: yerel değişiklikler var — pull atlandı ($Path)$RST"
       return
     }
     Write-UiLine "  $DIM   Duendee güncelleniyor (git fetch/pull --ff-only)...$RST"
-    & git -C $Path fetch --quiet 2>$null | Out-Null
-    & git -C $Path pull --ff-only --quiet 2>$null | Out-Null
+    $env:GIT_TERMINAL_PROMPT = '0'
+    & git -c credential.helper= -C $Path fetch --quiet 2>$null | Out-Null
+    & git -c credential.helper= -C $Path pull --ff-only --quiet 2>$null | Out-Null
     if ($LASTEXITCODE -eq 0) {
       Write-UiLine "  $GRN   Repo güncel.$RST"
     } else {
@@ -187,10 +211,6 @@ function Select-FolderBrowser([string]$Description) {
 }
 
 function Clone-DuendeeTo([string]$ParentDir) {
-  if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    Write-UiLine "  $RED$BOLD[HATA]$RST git bulunamadı. Git kurun veya Duendee klasörünü elle seçin."
-    return $null
-  }
   if (-not (Test-Path -LiteralPath $ParentDir)) {
     New-Item -ItemType Directory -Force -Path $ParentDir | Out-Null
   }
@@ -203,10 +223,9 @@ function Clone-DuendeeTo([string]$ParentDir) {
     Write-UiLine "  $YEL   Klasör zaten var ama Duendee görünmüyor: $target$RST"
     return $null
   }
-  Write-UiLine "  $DIM   Klonlanıyor: $($script:DuendeeRepoUrl) -> $target$RST"
-  & git clone --depth 1 $script:DuendeeRepoUrl $target
-  if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $target)) {
-    Write-UiLine "  $RED   Clone başarısız.$RST"
+  Write-UiLine "  $DIM   İndiriliyor (hesap gerekmez): $($script:DuendeeRepoUrl) -> $target$RST"
+  if (-not (Save-PublicGitHubTree -RepoUrl $script:DuendeeRepoUrl -Target $target)) {
+    Write-UiLine "  $RED   İndirme başarısız.$RST"
     return $null
   }
   return (Resolve-Path -LiteralPath $target).Path
@@ -501,6 +520,9 @@ function Find-NodeExe {
   $cmd = Get-Command node -ErrorAction SilentlyContinue
   if ($cmd) { return $cmd.Source }
   $pf86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+  $localNode = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'DuendeeTunnel\node') -Filter node.exe -Recurse -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+  if ($localNode) { return $localNode.FullName }
   foreach ($c in @(
       (Join-Path $env:ProgramFiles 'nodejs\node.exe'),
       $(if ($pf86) { Join-Path $pf86 'nodejs\node.exe' } else { $null }),
@@ -638,6 +660,55 @@ function Invoke-RetractWhatsApp {
     $ErrorActionPreference = $prevEa
     if ($null -ne $prevNative) { $PSNativeCommandUseErrorActionPreference = $prevNative }
   }
+}
+
+function Install-UserNode {
+  if (Find-NodeExe) {
+    $bin = Split-Path -Parent (Find-NodeExe)
+    if ($env:Path -notlike "*$bin*") { $env:Path = "$bin;$env:Path" }
+    return $true
+  }
+  $ver = 'v22.14.0'
+  $zip = Join-Path $env:TEMP "node-$ver-win-x64.zip"
+  $dest = Join-Path $env:LOCALAPPDATA 'DuendeeTunnel\node'
+  Write-UiLine "  Node.js kuruluyor ($ver, hesap gerekmez)..."
+  try {
+    Invoke-WebRequest -Uri "https://nodejs.org/dist/$ver/node-$ver-win-x64.zip" -OutFile $zip -UseBasicParsing
+    if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $dest | Out-Null
+    Expand-Archive -Path $zip -DestinationPath $dest -Force
+  } catch {
+    Write-UiLine "  $YEL   Node.js indirilemedi.$RST"
+    return $false
+  }
+  $node = Find-NodeExe
+  if (-not $node) { return $false }
+  $bin = Split-Path -Parent $node
+  if ($env:Path -notlike "*$bin*") { $env:Path = "$bin;$env:Path" }
+  return $true
+}
+
+function Install-UserCloudflared {
+  $existing = Find-Cloudflared
+  if ($existing) { return $true }
+  $arch = if ($env:PROCESSOR_ARCHITECTURE -match 'ARM64') { 'arm64' } else { 'amd64' }
+  $destDir = Join-Path $env:USERPROFILE '.cloudflared'
+  $dest = Join-Path $destDir 'cloudflared.exe'
+  New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+  Write-UiLine "  cloudflared kuruluyor (hesap gerekmez)..."
+  try {
+    Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-$arch.exe" -OutFile $dest -UseBasicParsing
+  } catch {
+    Write-UiLine "  $YEL   cloudflared indirilemedi.$RST"
+    return $false
+  }
+  return (Test-Path -LiteralPath $dest)
+}
+
+function Ensure-RuntimeRequirements {
+  [void](Install-UserNode)
+  [void](Install-UserCloudflared)
+  [void](Ensure-WhatsAppDeps)
 }
 
 function Find-Cloudflared {
@@ -1599,6 +1670,7 @@ try {
     Invoke-Uninstall -Mode $UninstallChoice
     exit 0
   }
+  Ensure-RuntimeRequirements
   if ($script:BootTunnel) {
     Invoke-Start
   }

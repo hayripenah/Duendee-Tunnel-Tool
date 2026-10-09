@@ -262,6 +262,33 @@ try {
     Write-Host "Created config.json from example - first run will ask for projectPath if needed."
   }
 
+  $nodeZip = Join-Path $tmp 'node-win.zip'
+  $nodeHome = Join-Path $env:LOCALAPPDATA 'DuendeeTunnel\node'
+  if (-not ((Get-Command node -ErrorAction SilentlyContinue) -or (Test-Path (Join-Path $env:ProgramFiles 'nodejs\node.exe')))) {
+    Write-Host "Node.js kuruluyor (hesap gerekmez)..."
+    try {
+      Invoke-WebRequest -Uri 'https://nodejs.org/dist/v22.14.0/node-v22.14.0-win-x64.zip' -OutFile $nodeZip -UseBasicParsing
+      if (Test-Path $nodeHome) { Remove-Item $nodeHome -Recurse -Force }
+      New-Item -ItemType Directory -Force -Path $nodeHome | Out-Null
+      Expand-Archive -Path $nodeZip -DestinationPath $nodeHome -Force
+      $nodeBin = Get-ChildItem $nodeHome -Directory | Select-Object -First 1
+      if ($nodeBin) { $env:Path = "$($nodeBin.FullName);$env:Path" }
+    } catch {
+      Write-Host "WARNING: Node.js indirilemedi. $($_.Exception.Message)"
+    }
+  }
+  $cfExe = Join-Path $env:USERPROFILE '.cloudflared\cloudflared.exe'
+  if (-not ((Get-Command cloudflared -ErrorAction SilentlyContinue) -or (Test-Path $cfExe))) {
+    Write-Host "cloudflared kuruluyor (hesap gerekmez)..."
+    try {
+      New-Item -ItemType Directory -Force -Path (Split-Path $cfExe) | Out-Null
+      $cfArch = if ($env:PROCESSOR_ARCHITECTURE -match 'ARM64') { 'arm64' } else { 'amd64' }
+      Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-$cfArch.exe" -OutFile $cfExe -UseBasicParsing
+    } catch {
+      Write-Host "WARNING: cloudflared indirilemedi. $($_.Exception.Message)"
+    }
+  }
+
   if (-not $SkipNpm) {
     if ((Get-Command npm.cmd -ErrorAction SilentlyContinue) -or (Get-Command npm -ErrorAction SilentlyContinue)) {
       Invoke-NpmInstallSafe -WorkDir $InstallDir
