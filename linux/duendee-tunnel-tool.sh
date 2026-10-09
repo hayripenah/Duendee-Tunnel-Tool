@@ -804,18 +804,19 @@ logtail() {
 autostate() {
   # off | tool | tunnel
   AUTOMODE=off
-  local enabled=0
-  if systemctl --user is-enabled duendee-tunnel-tool.service >/dev/null 2>&1; then
-    enabled=1
+  local spec=""
+  if [[ -f "$AUTO_DESKTOP" ]]; then
+    spec="$(grep -E '^Exec=' "$AUTO_DESKTOP" 2>/dev/null || true)"
   elif [[ -f "$AUTO_UNIT" ]]; then
-    enabled=1
+    spec="$(grep -E '^ExecStart=' "$AUTO_UNIT" 2>/dev/null || true)"
+  elif systemctl --user is-enabled duendee-tunnel-tool.service >/dev/null 2>&1; then
+    spec="$(grep -E '^ExecStart=' "$AUTO_UNIT" 2>/dev/null || true)"
   fi
-  if [[ "$enabled" == "1" ]]; then
-    if [[ -f "$AUTO_UNIT" ]] && grep -q 'boot-tunnel' "$AUTO_UNIT"; then
-      AUTOMODE=tunnel
-    else
-      AUTOMODE=tool
-    fi
+  [[ -n "$spec" ]] || return 0
+  if [[ "$spec" == *boot-tunnel* ]]; then
+    AUTOMODE=tunnel
+  else
+    AUTOMODE=tool
   fi
 }
 
@@ -1449,29 +1450,68 @@ do_cancel() {
   wait_key
 }
 
+write_terminal_opener() {
+  local opener="${HOME}/.local/bin/duendee-tunnel-open"
+  mkdir -p "${HOME}/.local/bin"
+  cat >"$opener" <<'EOF'
+#!/bin/sh
+tool="${HOME}/.local/bin/duendee-tunnel"
+[ -x "$tool" ] || exit 1
+if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+  if command -v gnome-terminal >/dev/null 2>&1; then
+    exec gnome-terminal -- "$tool" "$@"
+  fi
+  if command -v kgx >/dev/null 2>&1; then
+    exec kgx -- "$tool" "$@"
+  fi
+  if command -v ptyxis >/dev/null 2>&1; then
+    exec ptyxis -- "$tool" "$@"
+  fi
+  if command -v xfce4-terminal >/dev/null 2>&1; then
+    exec xfce4-terminal -e "$tool $*"
+  fi
+  if command -v konsole >/dev/null 2>&1; then
+    exec konsole -e "$tool" "$@"
+  fi
+  if command -v xterm >/dev/null 2>&1; then
+    exec xterm -e "$tool" "$@"
+  fi
+  if command -v x-terminal-emulator >/dev/null 2>&1; then
+    exec x-terminal-emulator -e "$tool" "$@"
+  fi
+fi
+exec "$tool" "$@"
+EOF
+  chmod +x "$opener"
+  printf '%s\n' "$opener"
+}
+
 write_autostart_unit() {
   local arg="${1:-}"
-  mkdir -p "$AUTO_UNIT_DIR"
-  cat >"$AUTO_UNIT" <<EOF
-[Unit]
-Description=Duendee Tunnel Tool
-After=default.target
-
-[Service]
-Type=simple
-ExecStart=${HOME}/.local/bin/duendee-tunnel ${arg}
-WorkingDirectory=${HOME}
-Restart=no
-
-[Install]
-WantedBy=default.target
-EOF
-  systemctl --user daemon-reload >/dev/null 2>&1 || true
-  if systemctl --user enable duendee-tunnel-tool.service >/dev/null 2>&1; then
-    loginctl enable-linger "$USER" >/dev/null 2>&1 || true
-    return 0
+  local opener exec_line
+  opener="$(write_terminal_opener)" || return 1
+  mkdir -p "$AUTO_DESKTOP_DIR"
+  if [[ -n "$arg" ]]; then
+    exec_line="${opener} ${arg}"
+  else
+    exec_line="${opener}"
   fi
-  return 1
+  cat >"$AUTO_DESKTOP" <<EOF
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Duendee Tunnel Tool
+Comment=Duendee Tunnel Tool
+Exec=${exec_line}
+Terminal=true
+X-GNOME-Autostart-enabled=true
+StartupNotify=false
+EOF
+  chmod +x "$AUTO_DESKTOP" 2>/dev/null || true
+  systemctl --user disable --now duendee-tunnel-tool.service >/dev/null 2>&1 || true
+  rm -f "$AUTO_UNIT"
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+  return 0
 }
 
 install_desktop_shortcut() {
@@ -1515,9 +1555,11 @@ register_stable_launch() {
     chmod +x "$shim" "$src" 2>/dev/null || true
   fi
   install_desktop_shortcut || true
-  if [[ -f "$AUTO_UNIT" ]]; then
+  if [[ -f "$AUTO_DESKTOP" || -f "$AUTO_UNIT" ]]; then
     local arg=""
-    if grep -q 'boot-tunnel' "$AUTO_UNIT"; then
+    if [[ -f "$AUTO_DESKTOP" ]] && grep -q 'boot-tunnel' "$AUTO_DESKTOP"; then
+      arg="boot-tunnel"
+    elif [[ -f "$AUTO_UNIT" ]] && grep -q 'boot-tunnel' "$AUTO_UNIT"; then
       arg="boot-tunnel"
     fi
     write_autostart_unit "$arg" || true
@@ -1526,7 +1568,7 @@ register_stable_launch() {
 
 disable_autostart() {
   systemctl --user disable --now duendee-tunnel-tool.service >/dev/null 2>&1 || true
-  rm -f "$AUTO_UNIT"
+  rm -f "$AUTO_UNIT" "$AUTO_DESKTOP" "${HOME}/.local/bin/duendee-tunnel-open"
   systemctl --user daemon-reload >/dev/null 2>&1 || true
 }
 
@@ -1576,10 +1618,9 @@ do_autostart() {
         echo -e "  ${YEL}   Bu ayar zaten seçili.${RST}"
       elif write_autostart_unit ""; then
         echo -e "  ${GRN}   Yalnızca tool otomatik başlayacak.${RST}"
-        echo -e "  ${DIM}   Kayıt: ${AUTO_UNIT}${RST}"
+        echo -e "  ${DIM}   Kayıt: ${AUTO_DESKTOP}${RST}"
       else
         echo -e "  ${RED}${BOLD}[HATA]${RST} Ayar kaydedilemedi."
-        echo -e "  ${DIM}   systemd --user kullanılabilir olmalı.${RST}"
       fi
       ;;
     S)
@@ -1587,10 +1628,9 @@ do_autostart() {
         echo -e "  ${YEL}   Bu ayar zaten seçili.${RST}"
       elif write_autostart_unit "boot-tunnel"; then
         echo -e "  ${GRN}   Tool ve tünel servisi otomatik başlayacak.${RST}"
-        echo -e "  ${DIM}   Kayıt: ${AUTO_UNIT}${RST}"
+        echo -e "  ${DIM}   Kayıt: ${AUTO_DESKTOP}${RST}"
       else
         echo -e "  ${RED}${BOLD}[HATA]${RST} Ayar kaydedilemedi."
-        echo -e "  ${DIM}   systemd --user kullanılabilir olmalı.${RST}"
       fi
       ;;
     B)

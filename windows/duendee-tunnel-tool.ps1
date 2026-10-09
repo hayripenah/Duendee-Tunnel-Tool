@@ -462,7 +462,20 @@ function Get-AutoRunCommand {
   return [string]$prop.DuendeeTunnelTool
 }
 
+function Get-StartupShortcutPath {
+  Join-Path ([Environment]::GetFolderPath('Startup')) 'Duendee Tunnel Tool.lnk'
+}
+
 function Get-AutoMode {
+  $lnk = Get-StartupShortcutPath
+  if (Test-Path -LiteralPath $lnk) {
+    try {
+      $w = New-Object -ComObject WScript.Shell
+      $sc = $w.CreateShortcut($lnk)
+      if ([string]$sc.Arguments -match '(?i)boot-tunnel') { return 'tunnel' }
+      return 'tool'
+    } catch {}
+  }
   $cmd = Get-AutoRunCommand
   if ([string]::IsNullOrWhiteSpace($cmd)) { return 'off' }
   if ($cmd -match '(?i)boot-tunnel') { return 'tunnel' }
@@ -509,24 +522,38 @@ function Install-StableLauncher {
   } catch {}
 
   if ((Get-AutoMode) -ne 'off') {
-    $mode = Get-AutoMode
-    $val = '"' + $cmd + '"'
-    if ($mode -eq 'tunnel') { $val = $val + ' boot-tunnel' }
-    New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'DuendeeTunnelTool' -Value $val -PropertyType String -Force | Out-Null
+    Set-StartupShortcut (Get-AutoMode)
   }
 }
 
-function Set-AutoMode([string]$Mode) {
-  $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+function Set-StartupShortcut([string]$Mode) {
+  Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'DuendeeTunnelTool' -ErrorAction SilentlyContinue
+  $lnk = Get-StartupShortcutPath
   if ($Mode -eq 'off') {
-    Remove-ItemProperty -Path $key -Name 'DuendeeTunnelTool' -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $lnk -Force -ErrorAction SilentlyContinue
+    return
+  }
+  $dir = Get-StableLaunchDir
+  $launch = Join-Path $dir 'launch.cmd'
+  $w = New-Object -ComObject WScript.Shell
+  $sc = $w.CreateShortcut($lnk)
+  $sc.TargetPath = $launch
+  $sc.WorkingDirectory = $dir
+  $sc.Arguments = $(if ($Mode -eq 'tunnel') { 'boot-tunnel' } else { '' })
+  $sc.WindowStyle = 1
+  $ico = Join-Path $OsDir 'Duendee Tunnel Logo.ico'
+  if (Test-Path -LiteralPath $ico) { $sc.IconLocation = $ico }
+  $sc.Description = 'Duendee Tunnel Tool'
+  $sc.Save()
+}
+
+function Set-AutoMode([string]$Mode) {
+  if ($Mode -eq 'off') {
+    Set-StartupShortcut 'off'
     return ((Get-AutoMode) -eq 'off')
   }
   Install-StableLauncher
-  $cmd = Join-Path (Get-StableLaunchDir) 'launch.cmd'
-  $val = '"' + $cmd + '"'
-  if ($Mode -eq 'tunnel') { $val = $val + ' boot-tunnel' }
-  New-ItemProperty -Path $key -Name 'DuendeeTunnelTool' -Value $val -PropertyType String -Force | Out-Null
+  Set-StartupShortcut $Mode
   return ((Get-AutoMode) -eq $Mode)
 }
 
@@ -1540,7 +1567,7 @@ function Invoke-Autostart {
       'tunnel' { Write-UiLine "  $GRN   Tool ve tünel servisi otomatik başlayacak.$RST" }
       default { Write-UiLine "  $GRN   Otomatik başlatma kapatıldı.$RST" }
     }
-    Write-UiLine "  $DIM   Kayıt: HKCU\...\Run - DuendeeTunnelTool$RST"
+    Write-UiLine "  $DIM   Kayıt: Başlangıç klasörü - Duendee Tunnel Tool$RST"
   } else {
     Write-UiLine "  $RED$BOLD[HATA]$RST Ayar kaydedilemedi."
   }
