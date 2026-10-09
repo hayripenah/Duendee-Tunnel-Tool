@@ -37,12 +37,14 @@ for f in "$TUNNEL_PID_FILE" "$SERVER_PID_FILE"; do
   fi
 done
 
-# Best-effort: stop npm run dev started for this project
-pgrep -af "npm run dev" 2>/dev/null | while read -r line; do
-  if [[ "$line" == *"$PROJECT"* ]]; then
-    pid="${line%% *}"
-    [[ "$pid" =~ ^[0-9]+$ ]] && kill -TERM "$pid" 2>/dev/null || true
-  fi
+# Best-effort: stop the app origin started for this project
+for pat in "npm run dev" "vite preview"; do
+  pgrep -af "$pat" 2>/dev/null | while read -r line; do
+    if [[ "$line" == *"$PROJECT"* ]]; then
+      pid="${line%% *}"
+      [[ "$pid" =~ ^[0-9]+$ ]] && kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done
 done
 
 rm -f "$QR_PNG" "$TUNNEL_PID_FILE" "$SERVER_PID_FILE" "${STATE}/tunnel.url" 2>/dev/null || true

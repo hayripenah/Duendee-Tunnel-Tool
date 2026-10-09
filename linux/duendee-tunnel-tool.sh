@@ -857,18 +857,20 @@ kill_dev_server() {
     fi
     rm -f "$SERVER_PID"
   fi
-  # Fallback: npm run dev started for this project
+  # Fallback: origin started for this project (dev or preview)
   if [[ -n "${PROJECT:-}" ]]; then
-    pgrep -af "npm run dev" 2>/dev/null | while read -r line; do
-      if [[ "$line" == *"$PROJECT"* ]]; then
-        local pid="${line%% *}"
+    local pat line pid
+    for pat in "npm run dev" "vite preview" "npm run build"; do
+      while read -r line; do
+        [[ "$line" == *"$PROJECT"* ]] || continue
+        pid="${line%% *}"
         if [[ "$pid" =~ ^[0-9]+$ ]]; then
           kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
           sleep 0.2
           kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
           stopped=1
         fi
-      fi
+      done < <(pgrep -af "$pat" 2>/dev/null || true)
     done
   fi
   if [[ "$stopped" -eq 0 ]]; then
@@ -933,11 +935,13 @@ cleanup_quiet() {
     rm -f "$SERVER_PID"
   fi
   if [[ -n "${PROJECT:-}" ]]; then
-    pgrep -af "npm run dev" 2>/dev/null | while read -r line; do
-      if [[ "$line" == *"$PROJECT"* ]]; then
-        local pid="${line%% *}"
+    local pat line pid
+    for pat in "npm run dev" "vite preview"; do
+      while read -r line; do
+        [[ "$line" == *"$PROJECT"* ]] || continue
+        pid="${line%% *}"
         [[ "$pid" =~ ^[0-9]+$ ]] && kill -TERM "$pid" 2>/dev/null || true
-      fi
+      done < <(pgrep -af "$pat" 2>/dev/null || true)
     done
   fi
   rm -f "$PID_FILE" "$URL_FILE" "${TMPDIR:-/tmp}/duendee-whatsapp-qr.png" 2>/dev/null || true
@@ -984,6 +988,55 @@ show_menu() {
   printf "%b" "${CYN}   Seçim [1-7]: ${RST}"
 }
 
+app_build_stale() {
+  [[ -f "${PROJECT}/dist/index.html" ]] || return 0
+  local newer=""
+  newer="$(find "${PROJECT}/src" "${PROJECT}/index.html" "${PROJECT}/vite.config.ts" "${PROJECT}/vite.config.js" "${PROJECT}/vite.config.mjs" \
+    -newer "${PROJECT}/dist/index.html" -print -quit 2>/dev/null || true)"
+  [[ -n "$newer" ]]
+}
+
+start_app_origin() {
+  local vite_bin="${PROJECT}/node_modules/.bin/vite"
+  local use_preview=0
+  if [[ -x "$vite_bin" && ( -f "${PROJECT}/vite.config.ts" || -f "${PROJECT}/vite.config.js" || -f "${PROJECT}/vite.config.mjs" ) ]]; then
+    use_preview=1
+  fi
+  if (( use_preview )); then
+    if app_build_stale; then
+      echo -e "  ${DIM}   Uygulama derleniyor. Telefondaki sayfa hazır paketle açılır.${RST}"
+      if ! (cd "$PROJECT" && npm run build >"${STATE}/server.out.log" 2>&1); then
+        echo -e "  ${RED}${BOLD}   [HATA]${RST} npm run build başarısız."
+        return 1
+      fi
+    else
+      echo -e "  ${DIM}   Mevcut derleme kullanılacak.${RST}"
+    fi
+    (
+      cd "$PROJECT" || exit 1
+      setsid "$vite_bin" preview --host 127.0.0.1 --port "$PORT" --strictPort >"${STATE}/server.out.log" 2>&1 &
+      echo $! >"$SERVER_PID"
+    )
+  else
+    (
+      cd "$PROJECT" || exit 1
+      setsid npm run dev >"${STATE}/server.out.log" 2>&1 &
+      echo $! >"$SERVER_PID"
+    )
+  fi
+  local tries=0
+  while true; do
+    tries=$((tries + 1))
+    if port_listening "$PORT"; then
+      return 0
+    fi
+    if (( tries >= 80 )); then
+      return 1
+    fi
+    sleep 0.25
+  done
+}
+
 do_start() {
   clear
   echo
@@ -1016,9 +1069,14 @@ do_start() {
   fi
 
   if port_listening "$PORT"; then
-    echo -e "  ${CYN}[2/4]${RST} Dev server ${PORT} portunda hazır."
+    # A leftover Vite dev server keeps the phone on a white screen. Replace it with the built app.
+    kill_dev_server
+    sleep 0.3
+  fi
+  if port_listening "$PORT"; then
+    echo -e "  ${CYN}[2/4]${RST} Uygulama ${PORT} portunda hazır."
   else
-    echo -e "  ${CYN}[2/4]${RST} Dev server başlatılıyor..."
+    echo -e "  ${CYN}[2/4]${RST} Uygulama başlatılıyor..."
     if [[ ! -d "${PROJECT}/node_modules" ]]; then
       echo -e "  ${DIM}   node_modules yok, npm install çalıştırılıyor...${RST}"
       (cd "$PROJECT" && npm install) || {
@@ -1027,26 +1085,13 @@ do_start() {
         return
       }
     fi
-    (
-      cd "$PROJECT" || exit 1
-      setsid npm run dev >"${STATE}/server.out.log" 2>&1 &
-      echo $! >"$SERVER_PID"
-    )
-    local tries=0
-    while true; do
-      tries=$((tries + 1))
-      if port_listening "$PORT"; then
-        break
-      fi
-      if (( tries >= 80 )); then
-        echo -e "  ${RED}${BOLD}[HATA]${RST} Dev server ${PORT} portunda açılamadı."
-        echo -e "  ${DIM}   npm run dev çıktısını ayrı bir terminalde deneyin.${RST}"
-        wait_key
-        return
-      fi
-      sleep 0.25
-    done
-    echo -e "  ${CYN}[2/4]${RST} Dev server http://127.0.0.1:${PORT} hazır."
+    if ! start_app_origin; then
+      echo -e "  ${RED}${BOLD}[HATA]${RST} Uygulama ${PORT} portunda açılamadı."
+      echo -e "  ${DIM}   Ayrıntı: ${STATE}/server.out.log${RST}"
+      wait_key
+      return
+    fi
+    echo -e "  ${CYN}[2/4]${RST} Uygulama http://127.0.0.1:${PORT} hazır."
   fi
 
   echo -e "  ${CYN}[3/4]${RST} Cloudflare tünel başlatılıyor..."
@@ -1058,7 +1103,7 @@ do_start() {
   PREV=""
   # 127.0.0.1 + IPv4 edge avoids localhost/IPv6 happy-eyeballs delay
   local target="http://127.0.0.1:${PORT}"
-  setsid "$CF" tunnel --url "$target" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 3 >"$OUT_LOG" 2>"$LOG" &
+  setsid "$CF" tunnel --url "$target" --http-host-header "127.0.0.1:${PORT}" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 3 >"$OUT_LOG" 2>"$LOG" &
   echo $! >"$PID_FILE"
   read_pid
   if [[ -z "${TPID:-}" ]]; then
@@ -1267,6 +1312,36 @@ EOF
   return 1
 }
 
+install_desktop_shortcut() {
+  local desk icon launcher dest app
+  desk="$(desktop_dir)"
+  [[ -n "$desk" ]] || return 0
+  mkdir -p "$desk" "${HOME}/.local/share/applications"
+  icon="${OS_DIR}/duendee-tunnel-tool.png"
+  [[ -f "$icon" ]] || return 0
+  launcher="${HOME}/.local/bin/duendee-tunnel"
+  [[ -x "$launcher" ]] || launcher="${OS_DIR}/duendee-tunnel-tool.sh"
+  dest="${desk}/Duendee Tunnel Tool.desktop"
+  app="${HOME}/.local/share/applications/duendee-tunnel-tool.desktop"
+  cat >"$dest" <<EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Duendee Tunnel Tool
+Comment=Duendee Tunnel Tool
+Exec=${launcher}
+Icon=${icon}
+Terminal=true
+Categories=Network;
+StartupNotify=true
+EOF
+  cp "$dest" "$app"
+  chmod +x "$dest" "$app" 2>/dev/null || true
+  if command -v gio >/dev/null 2>&1; then
+    gio set "$dest" metadata::trusted true >/dev/null 2>&1 || true
+  fi
+}
+
 register_stable_launch() {
   local cfg_dir="${XDG_CONFIG_HOME:-$HOME/.config}/duendee-tunnel"
   local shim="${HOME}/.local/bin/duendee-tunnel"
@@ -1277,6 +1352,7 @@ register_stable_launch() {
     cp "$src" "$shim"
     chmod +x "$shim" "$src" 2>/dev/null || true
   fi
+  install_desktop_shortcut || true
   if [[ -f "$AUTO_UNIT" ]]; then
     local arg=""
     if grep -q 'boot-tunnel' "$AUTO_UNIT"; then
@@ -1518,6 +1594,7 @@ print_uninstall_plan() {
   if [[ -f "$AUTO_DESKTOP" ]]; then
     echo -e "  ${DIM}   - Otomatik başlatma: ${AUTO_DESKTOP}${RST}"
   fi
+  echo -e "  ${DIM}   - Masaüstü kısayolu: $(desktop_dir)/Duendee Tunnel Tool.desktop${RST}"
   if [[ "$mode" == "2" ]]; then
     echo -e "  ${DIM}   - Node.js (bu cihazdaki kurulum; diğer programlar da etkilenir)${RST}"
     echo -e "  ${DIM}   - cloudflared (bu cihazdaki kurulum)${RST}"
@@ -1572,7 +1649,8 @@ do_uninstall() {
   CLEANING_UP=1
   kill_all || true
   systemctl --user disable --now duendee-tunnel-tool.service >/dev/null 2>&1 || true
-  rm -f "$AUTO_UNIT" "$AUTO_DESKTOP" 2>/dev/null || true
+  rm -f "$AUTO_UNIT" "$AUTO_DESKTOP" "$(desktop_dir)/Duendee Tunnel Tool.desktop" \
+    "${HOME}/.local/share/applications/duendee-tunnel-tool.desktop" 2>/dev/null || true
   systemctl --user daemon-reload >/dev/null 2>&1 || true
 
   local rc

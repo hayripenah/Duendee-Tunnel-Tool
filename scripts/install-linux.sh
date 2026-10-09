@@ -339,6 +339,45 @@ fi
 install_shim_and_path
 SHIM_DONE=1
 
+write_desktop_shortcut() {
+  local desk icon launcher dest
+  desk=""
+  if [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/user-dirs.dirs" ]]; then
+    desk="$(. "${XDG_CONFIG_HOME:-$HOME/.config}/user-dirs.dirs" >/dev/null 2>&1; printf '%s' "${XDG_DESKTOP_DIR:-}")"
+    desk="${desk/#\~/$HOME}"
+  fi
+  if [[ -z "$desk" || ! -d "$desk" ]]; then
+    for cand in "$HOME/Desktop" "$HOME/Masaüstü" "$HOME/desktop"; do
+      if [[ -d "$cand" ]]; then desk="$cand"; break; fi
+    done
+  fi
+  [[ -n "$desk" && -d "$desk" ]] || return 0
+  icon="${INSTALL_DIR}/linux/duendee-tunnel-tool.png"
+  [[ -f "$icon" ]] || return 0
+  launcher="${BIN_DIR}/duendee-tunnel"
+  dest="${desk}/Duendee Tunnel Tool.desktop"
+  mkdir -p "${HOME}/.local/share/applications"
+  cat >"$dest" <<EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Duendee Tunnel Tool
+Comment=Duendee Tunnel Tool
+Exec=${launcher}
+Icon=${icon}
+Terminal=true
+Categories=Network;
+StartupNotify=true
+EOF
+  cp "$dest" "${HOME}/.local/share/applications/duendee-tunnel-tool.desktop"
+  chmod +x "$dest" "${HOME}/.local/share/applications/duendee-tunnel-tool.desktop" 2>/dev/null || true
+  if command -v gio >/dev/null 2>&1; then
+    gio set "$dest" metadata::trusted true >/dev/null 2>&1 || true
+  fi
+  echo "Desktop shortcut: ${dest}"
+}
+write_desktop_shortcut || true
+
 # Always export for this process; when sourced, caller gets PATH too.
 export PATH="${BIN_DIR}:${PATH}"
 hash -r 2>/dev/null || true

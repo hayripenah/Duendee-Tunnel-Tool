@@ -189,14 +189,17 @@ async function resolveSendJid(sock, rawPhone) {
     throw new Error('Telefon numarasi gecersiz: ' + rawPhone);
   }
   const pn = digits + '@s.whatsapp.net';
-  try {
-    const lid = await sock.signalRepository.lidMapping.getLIDForPN(pn);
-    if (lid) return lid;
-  } catch {
-    /* mapping lookup is optional */
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      const lid = await sock.signalRepository.lidMapping.getLIDForPN(pn);
+      if (lid) return lid;
+    } catch {
+      /* mapping lookup is optional */
+    }
+    const cached = lidFromCache(rawPhone);
+    if (cached) return cached;
+    if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, 1500));
   }
-  const cached = lidFromCache(rawPhone);
-  if (cached) return cached;
   try {
     const results = await sock.onWhatsApp(pn);
     const hit = Array.isArray(results) ? results.find((row) => row && (row.exists || row.jid)) : null;
