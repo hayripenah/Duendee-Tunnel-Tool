@@ -1463,6 +1463,7 @@ function Invoke-Uninstall {
   }
 
   Write-UiLine ''
+  Invoke-RetractWhatsApp
   $script:CleanupDone = $true
   Stop-AllToolProcesses
   Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'DuendeeTunnelTool' -ErrorAction SilentlyContinue

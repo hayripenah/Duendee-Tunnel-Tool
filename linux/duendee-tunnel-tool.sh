@@ -1415,6 +1415,7 @@ do_uninstall() {
   esac
 
   echo
+  retract_tunnel_whatsapp
   CLEANING_UP=1
   kill_all || true
   systemctl --user disable --now duendee-tunnel-tool.service >/dev/null 2>&1 || true
