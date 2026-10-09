@@ -14,6 +14,36 @@ while (Get-Process -Id $ToolPid -ErrorAction SilentlyContinue) {
   Start-Sleep -Milliseconds 500
 }
 
+# The tool terminal is gone. The link message stays only while the tool is running.
+$waJs = Join-Path $ToolRoot 'scripts\send-whatsapp.js'
+$sentFile = Join-Path $ToolRoot '.whatsapp-session\sent-links.json'
+$creds = Join-Path $ToolRoot '.whatsapp-session\creds.json'
+if ((Test-Path -LiteralPath $waJs) -and (Test-Path -LiteralPath $sentFile) -and (Test-Path -LiteralPath $creds)) {
+  $raw = Get-Content -LiteralPath $sentFile -Raw -ErrorAction SilentlyContinue
+  if (-not [string]::IsNullOrWhiteSpace($raw) -and $raw.Trim() -ne '[]') {
+    $node = $null
+    $cmd = Get-Command node -ErrorAction SilentlyContinue
+    if ($cmd) { $node = $cmd.Source }
+    if (-not $node) {
+      $pf86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+      foreach ($c in @(
+          (Join-Path $env:ProgramFiles 'nodejs\node.exe'),
+          $(if ($pf86) { Join-Path $pf86 'nodejs\node.exe' } else { $null }),
+          (Join-Path $env:LOCALAPPDATA 'Programs\nodejs\node.exe')
+        )) {
+        if ($c -and (Test-Path -LiteralPath $c)) { $node = $c; break }
+      }
+    }
+    if ($node) {
+      $env:DT_WA_ACTION = 'retract'
+      $env:DT_WA_TIMEOUT_MS = '45000'
+      & $node $waJs
+      Remove-Item Env:DT_WA_ACTION -ErrorAction SilentlyContinue
+      Remove-Item Env:DT_WA_TIMEOUT_MS -ErrorAction SilentlyContinue
+    }
+  }
+}
+
 taskkill /IM cloudflared.exe /F 2>$null | Out-Null
 
 foreach ($f in @($tunnelPidFile, $serverPidFile)) {

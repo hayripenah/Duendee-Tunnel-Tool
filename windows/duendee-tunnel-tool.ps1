@@ -1487,7 +1487,7 @@ function Invoke-Shutdown {
 }
 
 # Quiet cleanup when the main console is closed or Ctrl+C ends the process.
-# The hidden tunnel-watcher also cleans up if this process dies abruptly.
+# If this process is killed with the window, the watcher deletes the WhatsApp link.
 $script:CleanupDone = $false
 function Invoke-ExitCleanup {
   if ($script:CleanupDone) { return }
