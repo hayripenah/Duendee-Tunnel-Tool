@@ -850,13 +850,97 @@ start_watcher() {
   fi
 }
 
+pid_is_cloudflared() {
+  local pid="$1" comm=""
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  [[ -r "/proc/${pid}/comm" ]] || return 1
+  comm="$(tr -d '\0' < "/proc/${pid}/comm" 2>/dev/null || true)"
+  [[ "$comm" == "cloudflared" ]]
+}
+
+cloudflared_pids() {
+  local piddir pid comm argv0
+  for piddir in /proc/[0-9]*; do
+    pid="${piddir#/proc/}"
+    [[ "$pid" == "$$" ]] && continue
+    comm="$(tr -d '\0' < "${piddir}/comm" 2>/dev/null || true)"
+    if [[ "$comm" == "cloudflared" ]]; then
+      printf '%s\n' "$pid"
+      continue
+    fi
+    argv0="$(tr '\0' '\n' < "${piddir}/cmdline" 2>/dev/null | head -n 1 || true)"
+    case "$argv0" in
+      *cloudflared*) printf '%s\n' "$pid" ;;
+    esac
+  done
+}
+
+cloudflared_alive() {
+  local pid
+  pid="$(cloudflared_pids | head -n 1 || true)"
+  [[ -n "$pid" ]]
+}
+
 tunnel_running() {
   read_pid
-  if [[ -n "${TPID:-}" ]] && pid_alive "$TPID"; then
+  if [[ -n "${TPID:-}" ]] && pid_is_cloudflared "$TPID"; then
     return 0
   fi
-  pgrep -f "cloudflared tunnel --url" >/dev/null 2>&1 && return 0
+  cloudflared_alive
+}
+
+remember_cloudflared_pid() {
+  local pid
+  pid="$(cloudflared_pids | head -n 1 || true)"
+  [[ -n "$pid" ]] && printf '%s\n' "$pid" >"$PID_FILE"
+}
+
+url_from_cloudflared_logs() {
+  local pid fd target found
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    for fd in /proc/"$pid"/fd/*; do
+      target="$(readlink "$fd" 2>/dev/null || true)"
+      [[ -f "$target" ]] || continue
+      found="$(grep -Eo 'https://[A-Za-z0-9-]+\.(trycloudflare\.com|cfargotunnel\.com)' "$target" 2>/dev/null | tail -n 1 || true)"
+      if [[ -n "$found" ]]; then
+        printf '%s\n' "$found"
+        return 0
+      fi
+    done
+  done < <(cloudflared_pids)
   return 1
+}
+
+recover_tunnel_url() {
+  local found=""
+  if cloudflared_alive; then
+    found="$(url_from_cloudflared_logs || true)"
+  fi
+  if [[ -n "$found" ]]; then
+    URL="$found"
+    mkdir -p "$STATE"
+    printf '%s' "$URL" >"$URL_FILE"
+    TUNNEL_URL="$URL"
+    return 0
+  fi
+  refresh_url
+  [[ -n "${URL:-}" ]]
+}
+
+public_url_live() {
+  local pub
+  [[ -n "${URL:-}" ]] || return 1
+  pub="$(http_code "$URL" 4)"
+  pub="${pub:-000}"
+  (( pub >= 200 && pub <= 399 ))
+}
+
+link_already_sent() {
+  local want="$1" file
+  file="$(wa_session_dir)/sent-links.json"
+  [[ -f "$file" && -n "$want" ]] || return 1
+  grep -F -q "$want" "$file"
 }
 
 kill_tunnel() {
@@ -871,6 +955,12 @@ kill_tunnel() {
   fi
   pkill -f "cloudflared tunnel --url" 2>/dev/null || true
   killall cloudflared 2>/dev/null || true
+  local cpid
+  while IFS= read -r cpid; do
+    [[ -n "$cpid" ]] || continue
+    kill -TERM "$cpid" 2>/dev/null || true
+    kill -KILL "$cpid" 2>/dev/null || true
+  done < <(cloudflared_pids)
   rm -f "$PID_FILE" "$URL_FILE"
 }
 
@@ -964,50 +1054,11 @@ kill_all() {
   rm -f "$PID_FILE" "$URL_FILE" "${TMPDIR:-/tmp}/duendee-whatsapp-qr.png"
 }
 
-# Quiet cleanup for EXIT/INT/TERM/HUP (and the tunnel-watcher as backup)
+# Closing the tool terminal leaves the tunnel, the app origin, and the link message.
+# [4] and [5] are the only paths that stop them.
 CLEANING_UP=0
 cleanup_quiet() {
-  if [[ "$CLEANING_UP" == "1" ]]; then
-    return 0
-  fi
-  CLEANING_UP=1
-  # Kill the tunnel before the slower WhatsApp retract. Closing the window
-  # can cut the shell off while that retract is still running.
-  read_pid
-  if [[ -n "${TPID:-}" ]] && pid_alive "$TPID"; then
-    kill -TERM "$TPID" 2>/dev/null || true
-    kill -KILL "$TPID" 2>/dev/null || true
-  fi
-  pkill -f "cloudflared tunnel --url" 2>/dev/null || true
-  killall cloudflared 2>/dev/null || true
-  spawn_retract_detached || true
-  read_pid
-  if [[ -n "${TPID:-}" ]] && pid_alive "$TPID"; then
-    kill -TERM "-$TPID" 2>/dev/null || kill -TERM "$TPID" 2>/dev/null || true
-    kill -KILL "-$TPID" 2>/dev/null || kill -KILL "$TPID" 2>/dev/null || true
-  fi
-  pkill -f "cloudflared tunnel --url" 2>/dev/null || true
-  killall cloudflared 2>/dev/null || true
-  local spid=""
-  if [[ -f "$SERVER_PID" ]]; then
-    spid="$(tr -d '[:space:]' < "$SERVER_PID" || true)"
-  fi
-  if [[ -n "$spid" ]]; then
-    kill -TERM "-$spid" 2>/dev/null || kill -TERM "$spid" 2>/dev/null || true
-    kill -KILL "-$spid" 2>/dev/null || kill -KILL "$spid" 2>/dev/null || true
-    rm -f "$SERVER_PID"
-  fi
-  if [[ -n "${PROJECT:-}" ]]; then
-    local pat line pid
-    for pat in "npm run dev" "vite preview"; do
-      while read -r line; do
-        [[ "$line" == *"$PROJECT"* ]] || continue
-        pid="${line%% *}"
-        [[ "$pid" =~ ^[0-9]+$ ]] && kill -TERM "$pid" 2>/dev/null || true
-      done < <(pgrep -af "$pat" 2>/dev/null || true)
-    done
-  fi
-  rm -f "$PID_FILE" "$URL_FILE" "${TMPDIR:-/tmp}/duendee-whatsapp-qr.png" 2>/dev/null || true
+  return 0
 }
 
 wait_key() {
@@ -1046,7 +1097,7 @@ show_menu() {
   esac
   echo -e "  ${YEL}${BOLD}[7]${RST}  ${SKY}Aracı Cihazdan Kaldır${RST}"
   echo
-  echo -e "${DIM}      Kapatmak için pencereyi kapatın, [Ctrl]+[C] ya da [5]${RST}"
+  echo -e "${DIM}      Pencereyi kapatmak tüneli durdurmaz. Tüneli kapatmak için [4] veya [5].${RST}"
   echo
   printf "%b" "${CYN}   Seçim [1-7]: ${RST}"
 }
@@ -1198,15 +1249,14 @@ do_start() {
   fi
   echo -e "  ${CYN}[1/4]${RST} cloudflared: $CF"
 
-  if tunnel_running; then
+  if tunnel_running || { recover_tunnel_url && public_url_live; }; then
+    remember_cloudflared_pid
     echo -e "  ${GRN}   Aktif tünel bulundu. Yeni tünel açılmayacak.${RST}"
-    refresh_url
-    local adopt_tries=0
-    while [[ -z "${URL:-}" && "$adopt_tries" -lt 20 ]]; do
-      refresh_url
-      adopt_tries=$((adopt_tries + 1))
-      sleep 0.25
-    done
+    recover_tunnel_url || true
+    if ! port_listening "$PORT"; then
+      echo -e "  ${CYN}   Yerel uygulama kapalı. Mevcut tünel aynı adreste kalsın diye açılıyor...${RST}"
+      start_app_origin || echo -e "  ${YEL}   Uygulama açılamadı. Tünel duruyor ama sayfa erişilemeyebilir.${RST}"
+    fi
     if [[ -z "${URL:-}" ]]; then
       echo -e "  ${YEL}   Tünel çalışıyor ama yayın linki okunamadı. Kapatmak için [4].${RST}"
       wait_key
@@ -1214,7 +1264,12 @@ do_start() {
     fi
     echo -e "${BLUE}${BOLD}     ${URL}${RST}"
     copy_clipboard "$URL" >/dev/null 2>&1 || true
-    send_tunnel_whatsapp "$URL"
+    if link_already_sent "$URL"; then
+      echo -e "  ${GRN}   Bu adresin WhatsApp mesajı duruyor.${RST}"
+    else
+      DT_WA_KEEP_EXISTING=1 send_tunnel_whatsapp "$URL"
+      unset DT_WA_KEEP_EXISTING
+    fi
     echo
     wait_key
     return
@@ -1268,16 +1323,39 @@ do_start() {
   TUNNEL_URL=""
   PREV=""
   # 127.0.0.1 + IPv4 edge avoids localhost/IPv6 happy-eyeballs delay.
-  # No setsid: cloudflared stays a child of this shell. prctl(PDEATHSIG) makes
-  # the kernel deliver SIGTERM when this shell dies, including a hard kill.
+  # Detach from this shell so closing the tool terminal does not kill the tunnel.
   local target="http://127.0.0.1:${PORT}"
+  rm -f "$PID_FILE"
   if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import ctypes,os,sys; ctypes.CDLL("libc.so.6").prctl(1, 15); os.execvp(sys.argv[1], sys.argv[1:])' \
-      "$CF" tunnel --url "$target" --http-host-header "127.0.0.1:${PORT}" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 3 >"$OUT_LOG" 2>"$LOG" &
+    python3 -c '
+import os, sys
+pidfile, cmd = sys.argv[1], sys.argv[2:]
+if os.fork() > 0:
+    os._exit(0)
+os.setsid()
+if os.fork() > 0:
+    os._exit(0)
+fd = os.open(pidfile, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+os.write(fd, str(os.getpid()).encode())
+os.close(fd)
+os.execvp(cmd[0], cmd)
+' "$PID_FILE" "$CF" tunnel --url "$target" --http-host-header "127.0.0.1:${PORT}" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 3 >"$OUT_LOG" 2>"$LOG" </dev/null &
+    local helper=$!
+    local pid_wait
+    for pid_wait in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      [[ -s "$PID_FILE" ]] && break
+      sleep 0.1
+    done
+    wait "$helper" 2>/dev/null || true
   else
-    "$CF" tunnel --url "$target" --http-host-header "127.0.0.1:${PORT}" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 3 >"$OUT_LOG" 2>"$LOG" &
+    if command -v setsid >/dev/null 2>&1; then
+      setsid nohup "$CF" tunnel --url "$target" --http-host-header "127.0.0.1:${PORT}" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 3 >"$OUT_LOG" 2>"$LOG" </dev/null &
+    else
+      nohup "$CF" tunnel --url "$target" --http-host-header "127.0.0.1:${PORT}" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 3 >"$OUT_LOG" 2>"$LOG" </dev/null &
+    fi
+    echo $! >"$PID_FILE"
+    disown "$!" 2>/dev/null || true
   fi
-  echo $! >"$PID_FILE"
   read_pid
   if [[ -z "${TPID:-}" ]]; then
     echo -e "  ${RED}${BOLD}[HATA]${RST} Tünel başlatılamadı. Log: $LOG"
@@ -1953,7 +2031,6 @@ load_config
 ensure_requirements
 trap cleanup_quiet EXIT INT TERM HUP
 register_stable_launch || true
-start_watcher
 
 if [[ "${1:-}" == "boot-tunnel" ]]; then
   do_start

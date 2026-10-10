@@ -326,6 +326,12 @@ async function deliver(sock) {
   } catch {
     /* presence is optional */
   }
+  if (process.env.DT_WA_KEEP_EXISTING === '1' && loadSent().some((row) => sameUrl(row.url, url))) {
+    console.log('  Bu link zaten WhatsApp mesajinda.');
+    delivered = true;
+    finish(0, 'Mevcut link mesaji duruyor.');
+    return;
+  }
   await deleteStored(sock, url);
   const lid = await resolveSendJid(sock, phone);
   const pn = toDigits(phone) + '@s.whatsapp.net';

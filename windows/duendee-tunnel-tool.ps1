@@ -894,9 +894,6 @@ function Start-HiddenCmd([string]$Command) {
   $psi.CreateNoWindow = $true
   $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
   $proc = [System.Diagnostics.Process]::Start($psi)
-  # The job handle lives in this process. When the tool exits or the window is
-  # destroyed, Windows closes it and kills cloudflared plus the app server.
-  Add-ProcessToToolJob $proc
   return $proc
 }
 
@@ -1031,10 +1028,77 @@ function Show-LogTail {
   }
 }
 
+function Get-CloudflaredProcesses {
+  $list = New-Object System.Collections.Generic.List[object]
+  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | ForEach-Object {
+    $name = [string]$_.Name
+    $exe = [string]$_.ExecutablePath
+    if ($name -eq 'cloudflared.exe' -or $exe -match '(?i)\\cloudflared(\.exe)?$') {
+      [void]$list.Add($_)
+    }
+  }
+  return $list
+}
+
+function Test-CloudflaredAlive {
+  $found = @(Get-CloudflaredProcesses)
+  return ($found.Count -gt 0)
+}
+
+function Read-TryCloudflareUrl([string]$Text) {
+  if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+  $found = [regex]::Matches($Text, 'https://[a-zA-Z0-9\-]+\.(?:trycloudflare\.com|cfargotunnel\.com)')
+  if ($found.Count -eq 0) { return $null }
+  return $found[$found.Count - 1].Value.Trim().TrimEnd('/')
+}
+
+function Recover-TunnelUrl {
+  foreach ($proc in @(Get-CloudflaredProcesses)) {
+    $parentLine = ''
+    if ($proc.ParentProcessId) {
+      $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($proc.ParentProcessId)" -ErrorAction SilentlyContinue
+      if ($parent) { $parentLine = [string]$parent.CommandLine }
+    }
+    $blob = ([string]$proc.CommandLine) + ' ' + $parentLine
+    foreach ($match in [regex]::Matches($blob, '"([^"]+\.log)"')) {
+      $path = $match.Groups[1].Value
+      if (-not (Test-Path -LiteralPath $path)) { continue }
+      $text = Get-Content -LiteralPath $path -Raw -ErrorAction SilentlyContinue
+      $url = Read-TryCloudflareUrl $text
+      if ($url) {
+        $dir = Split-Path -Parent $UrlFile
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        [IO.File]::WriteAllText($UrlFile, $url)
+        return $url
+      }
+    }
+  }
+  return (Get-TunnelUrl)
+}
+
+function Test-PublicUrlLive([string]$Url) {
+  if ([string]::IsNullOrWhiteSpace($Url) -or $Url -notmatch '^https://') { return $false }
+  $pub = '000'
+  try { $pub = & curl.exe -s -o nul -w '%{http_code}' --max-time 4 $Url } catch { return $false }
+  $n = 0
+  return ([int]::TryParse("$pub", [ref]$n) -and $n -ge 200 -and $n -le 399)
+}
+
+function Test-LinkAlreadySent([string]$Url) {
+  if ([string]::IsNullOrWhiteSpace($Url)) { return $false }
+  $file = Join-Path (Get-WaSessionDir) 'sent-links.json'
+  if (-not (Test-Path -LiteralPath $file)) { return $false }
+  $raw = Get-Content -LiteralPath $file -Raw -ErrorAction SilentlyContinue
+  return ($raw -and $raw.Contains($Url))
+}
+
 function Test-TunnelRunning {
+  if (Test-CloudflaredAlive) { return $true }
   $tpid = Read-TunnelPid
-  if ($tpid -and (Test-PidAlive $tpid)) { return $true }
-  if (Get-Process cloudflared -ErrorAction SilentlyContinue) { return $true }
+  if ($tpid -and (Test-PidAlive $tpid)) {
+    $name = (Get-Process -Id $tpid -ErrorAction SilentlyContinue).ProcessName
+    if ($name -eq 'cloudflared') { return $true }
+  }
   return $false
 }
 
@@ -1117,7 +1181,7 @@ function Show-Menu {
   Write-UiLine "  $YEL$BOLD[6]$RST  ${SKY}Cihaz Açılışında Otomatik Başlat$RST  $autoLabel  $browserLabel"
   Write-UiLine "  $YEL$BOLD[7]$RST  ${SKY}Aracı Cihazdan Kaldır$RST"
   Write-UiLine ''
-  Write-UiLine "$DIM      Kapatmak için pencereyi kapatın, [Ctrl]+[C] ya da [5]$RST"
+  Write-UiLine "$DIM      Pencereyi kapatmak tüneli durdurmaz. Tüneli kapatmak için [4] veya [5].$RST"
   Write-UiLine ''
   Write-Ui "$CYN   Seçim [1-7]: $RST"
 }
@@ -1312,22 +1376,36 @@ function Invoke-Start {
   Write-UiLine "  ${CYN}[1/4]$RST cloudflared: $cf"
   $env:CF = $cf
 
-  if (Test-TunnelRunning) {
+  $tunnelAlive = Test-TunnelRunning
+  $existing = Recover-TunnelUrl
+  if (-not $tunnelAlive -and $existing) { $tunnelAlive = Test-PublicUrlLive $existing }
+  if ($tunnelAlive) {
     Write-UiLine "  $GRN   Aktif tünel bulundu. Yeni tünel açılmayacak.$RST"
-    $existing = $null
-    for ($i = 1; $i -le 20; $i++) {
-      $existing = Get-TunnelUrl
-      if ($existing) { break }
-      Start-Sleep -Milliseconds 250
+    $existing = Recover-TunnelUrl
+    if (-not (Test-PortListening $Port)) {
+      Write-UiLine "  ${CYN}   Yerel uygulama kapalı. Mevcut tünel aynı adreste kalsın diye açılıyor...$RST"
+      if (-not (Start-AppOrigin)) {
+        Write-UiLine "  $YEL   Uygulama açılamadı. Tünel duruyor ama sayfa erişilemeyebilir.$RST"
+      }
     }
     if (-not $existing) {
       Write-UiLine "  $YEL   Tünel çalışıyor ama yayın linki okunamadı. Kapatmak için [4].$RST"
       Complete-Action
       return
     }
+    $cfProc = @(Get-CloudflaredProcesses) | Select-Object -First 1
+    if ($cfProc -and $cfProc.ProcessId) {
+      Set-Content -LiteralPath $PidFile -Value $cfProc.ProcessId -Encoding Ascii
+    }
     Set-Clipboard -Value $existing
     Write-UiLine "  $BLUE$BOLD     $existing$RST"
-    Send-TunnelWhatsApp -PublicUrl $existing
+    if (Test-LinkAlreadySent $existing) {
+      Write-UiLine "  $GRN   Bu adresin WhatsApp mesajı duruyor.$RST"
+    } else {
+      $env:DT_WA_KEEP_EXISTING = '1'
+      Send-TunnelWhatsApp -PublicUrl $existing
+      Remove-Item Env:DT_WA_KEEP_EXISTING -ErrorAction SilentlyContinue
+    }
     Complete-Action
     return
   }
@@ -1921,32 +1999,12 @@ function Invoke-Shutdown {
   exit 0
 }
 
-# Quiet cleanup when the main console is closed or Ctrl+C ends the process.
-# If this process is killed with the window, the watcher deletes the WhatsApp link.
+# Closing the tool window leaves the tunnel, the app origin, and the link message.
+# [4] and [5] are the only paths that stop them.
 $script:CleanupDone = $false
 function Invoke-ExitCleanup {
   if ($script:CleanupDone) { return }
   $script:CleanupDone = $true
-  try {
-    # Spawn before any slow process cleanup. Closing the window kills this process quickly.
-    Start-DetachedRetract
-    $tpid = Read-TunnelPid
-    if ($tpid -and (Test-PidAlive $tpid)) { Stop-ProcessTree $tpid }
-    Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object { Stop-ProcessTree $_.Id }
-    if (Test-Path -LiteralPath $ServerPidFile) {
-      $spidRaw = Get-Content -LiteralPath $ServerPidFile -TotalCount 1 -ErrorAction SilentlyContinue
-      $spid = 0
-      if ([int]::TryParse("$spidRaw".Trim(), [ref]$spid) -and $spid -gt 0) { Stop-ProcessTree $spid }
-      Remove-Item -LiteralPath $ServerPidFile -Force -ErrorAction SilentlyContinue
-    }
-    if (-not [string]::IsNullOrWhiteSpace($Project)) {
-      $devPattern = "*cd /d $Project*"
-      Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -like $devPattern } |
-        ForEach-Object { Stop-ProcessTree ([int]$_.ProcessId) }
-    }
-    Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue
-  } catch {}
 }
 
 try {
@@ -1962,11 +2020,6 @@ public static class DuendeeConsoleCtrl {
   }
   $script:ConsoleCloseHandler = [DuendeeConsoleCtrl+Handler] {
     param([int]$ctrlType)
-    # 2 = window closed. Kill the tunnel before this process is torn down.
-    if ($ctrlType -eq 2) {
-      Start-DetachedRetract
-      Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    }
     return $false
   }
   [void][DuendeeConsoleCtrl]::SetConsoleCtrlHandler($script:ConsoleCloseHandler, $true)
@@ -1984,7 +2037,6 @@ try {
 
 if (-not $script:UninstallCli) {
   try { Install-StableLauncher } catch {}
-  Start-ToolWatcher
 }
 
 try {

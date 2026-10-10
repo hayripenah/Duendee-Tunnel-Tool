@@ -118,7 +118,7 @@ Shared pieces (repo root):
 6. Device-start autostart — **[T]** open only the tool, **[S]** open the tool and start the tunnel service, **[K]** turn it off  
 7. Uninstall — **[1]** tool only, **[2]** tool plus Node.js and cloudflared. Both paths ask **Emin misiniz?** before deleting anything.
 
-Closing the main tool window, Ctrl+C, or option **[5]** cleans up cloudflared, the dev server, and watchers. Helper processes run hidden in the background.
+Closing the main tool window or pressing Ctrl+C leaves the tunnel, the local app, and the WhatsApp link running. Only **[4]** and **[5]** stop the tunnel and remove that link message.
 
 ## Uninstall
 
