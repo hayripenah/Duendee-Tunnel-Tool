@@ -19,8 +19,9 @@ Add-Content -LiteralPath $closeLog -Value ("tool-closed " + (Get-Date).ToString(
 
 # The tool terminal is gone. The link message stays only while the tool is running.
 $waJs = Join-Path $ToolRoot 'scripts\send-whatsapp.js'
-$sentFile = Join-Path $ToolRoot '.whatsapp-session\sent-links.json'
-$creds = Join-Path $ToolRoot '.whatsapp-session\creds.json'
+$waSession = Join-Path $env:LOCALAPPDATA 'DuendeeWhatsApp'
+$sentFile = Join-Path $waSession 'sent-links.json'
+$creds = Join-Path $waSession 'creds.json'
 if ((Test-Path -LiteralPath $waJs) -and (Test-Path -LiteralPath $sentFile) -and (Test-Path -LiteralPath $creds)) {
   $raw = Get-Content -LiteralPath $sentFile -Raw -ErrorAction SilentlyContinue
   if (-not [string]::IsNullOrWhiteSpace($raw) -and $raw.Trim() -ne '[]') {

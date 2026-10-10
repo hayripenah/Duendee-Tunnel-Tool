@@ -630,6 +630,10 @@ function Ensure-WhatsAppDeps {
   return (Test-Path -LiteralPath $marker)
 }
 
+function Get-WaSessionDir {
+  Join-Path $env:LOCALAPPDATA 'DuendeeWhatsApp'
+}
+
 function Send-TunnelWhatsApp([string]$PublicUrl) {
   $waJs = Join-Path $Root 'scripts\send-whatsapp.js'
   $waCfg = Join-Path $Root 'scripts\whatsapp-config.json'
@@ -657,14 +661,8 @@ function Send-TunnelWhatsApp([string]$PublicUrl) {
       $phone = [string]$wc.targetPhone
     } catch {}
   }
-  $sessionCreds = Join-Path $Root '.whatsapp-session\creds.json'
   $line = if ($phone) { $phone } else { '5315162429' }
-  if (-not (Test-Path -LiteralPath $sessionCreds)) {
-    Write-UiLine "  $YEL   WhatsApp hatti $line bagli degil. Yeni QR olusturuluyor.$RST"
-    Write-UiLine "  $DIM   WhatsApp > Bagli Cihazlar > Cihaz Bagla. Tarama sonrasi link gider.$RST"
-  } else {
-    Write-UiLine "  WhatsApp hatti kontrol ediliyor ($line)..."
-  }
+  Write-UiLine "  WhatsApp baglantisi kontrol ediliyor ($line)..."
   Write-UiLine "  WhatsApp'a link gönderiliyor..."
   $prevEa = $ErrorActionPreference
   $ErrorActionPreference = 'Continue'
@@ -682,7 +680,7 @@ function Send-TunnelWhatsApp([string]$PublicUrl) {
     if ($ec -ne 0) {
       Write-UiLine "  $YEL   WhatsApp gönderimi başarısız (çıkış $ec).$RST"
       Write-UiLine "  $DIM   QR tarayin veya oturumu sifirlayip tekrar deneyin:$RST"
-      Write-UiLine "  $DIM   Remove-Item -Recurse -Force `"$Root\.whatsapp-session`"$RST"
+      Write-UiLine "  $DIM   Remove-Item -Recurse -Force `"$(Get-WaSessionDir)`"$RST"
       Write-UiLine "  $DIM   Manuel: node `"$waJs`" `"$PublicUrl`"$RST"
     } else {
       Write-UiLine "  $GRN   WhatsApp mesaji gonderildi.$RST"
@@ -697,8 +695,8 @@ function Send-TunnelWhatsApp([string]$PublicUrl) {
 
 function Invoke-RetractWhatsApp {
   $waJs = Join-Path $Root 'scripts\send-whatsapp.js'
-  $sentFile = Join-Path $Root '.whatsapp-session\sent-links.json'
-  $sessionCreds = Join-Path $Root '.whatsapp-session\creds.json'
+  $sentFile = Join-Path (Get-WaSessionDir) 'sent-links.json'
+  $sessionCreds = Join-Path (Get-WaSessionDir) 'creds.json'
   if (-not (Test-Path -LiteralPath $waJs) -or -not (Test-Path -LiteralPath $sentFile) -or -not (Test-Path -LiteralPath $sessionCreds)) {
     return
   }
@@ -904,8 +902,8 @@ function Start-HiddenCmd([string]$Command) {
 
 function Start-DetachedRetract {
   $waJs = Join-Path $Root 'scripts\send-whatsapp.js'
-  $sentFile = Join-Path $Root '.whatsapp-session\sent-links.json'
-  $sessionCreds = Join-Path $Root '.whatsapp-session\creds.json'
+  $sentFile = Join-Path (Get-WaSessionDir) 'sent-links.json'
+  $sessionCreds = Join-Path (Get-WaSessionDir) 'creds.json'
   if (-not (Test-Path -LiteralPath $waJs) -or -not (Test-Path -LiteralPath $sentFile) -or -not (Test-Path -LiteralPath $sessionCreds)) {
     return
   }
@@ -1141,10 +1139,13 @@ function Invoke-Status {
   } else {
     Write-UiLine "  Dev Server ........ ${RED}KAPALI$RST"
   }
-  $tpid = Read-TunnelPid
-  $alive = $tpid -and (Test-PidAlive $tpid)
-  if ($alive) {
-    Write-UiLine "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR$RST  -  PID $tpid"
+  if (Test-TunnelRunning) {
+    $tpid = Read-TunnelPid
+    if ($tpid -and (Test-PidAlive $tpid)) {
+      Write-UiLine "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR$RST  -  PID $tpid"
+    } else {
+      Write-UiLine "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR$RST"
+    }
     $url = Get-TunnelUrl
     if ($url) { Write-UiLine "  Yayın Linki ......... $BLUE$BOLD$url$RST" }
   } else {
@@ -1158,9 +1159,7 @@ function Invoke-CopyLink {
   Clear-Host
   Initialize-Utf8Console
   Write-UiLine ''
-  $tpid = Read-TunnelPid
-  $alive = $tpid -and (Test-PidAlive $tpid)
-  $url = if ($alive) { Get-TunnelUrl } else { $null }
+  $url = if (Test-TunnelRunning) { Get-TunnelUrl } else { $null }
   if (-not $url) {
     Write-UiLine "  $RED$BOLD[HATA]$RST Aktif yayın linki yok."
     Write-UiLine "  $DIM   Önce [1] ile tünel servisini başlatın.$RST"
@@ -1313,13 +1312,26 @@ function Invoke-Start {
   Write-UiLine "  ${CYN}[1/4]$RST cloudflared: $cf"
   $env:CF = $cf
 
-  $tpid = Read-TunnelPid
-  if ($tpid -and (Test-PidAlive $tpid)) {
-    Write-UiLine "  $RED$BOLD[HATA]$RST Servis zaten çalışıyor. Önce [4] ile iptal edin."
+  if (Test-TunnelRunning) {
+    Write-UiLine "  $GRN   Aktif tünel bulundu. Yeni tünel açılmayacak.$RST"
+    $existing = $null
+    for ($i = 1; $i -le 20; $i++) {
+      $existing = Get-TunnelUrl
+      if ($existing) { break }
+      Start-Sleep -Milliseconds 250
+    }
+    if (-not $existing) {
+      Write-UiLine "  $YEL   Tünel çalışıyor ama yayın linki okunamadı. Kapatmak için [4].$RST"
+      Complete-Action
+      return
+    }
+    Set-Clipboard -Value $existing
+    Write-UiLine "  $BLUE$BOLD     $existing$RST"
+    Send-TunnelWhatsApp -PublicUrl $existing
     Complete-Action
     return
   }
-  if ($tpid) { Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue }
+  if (Read-TunnelPid) { Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue }
 
   if (Test-PortListening $Port) {
     Stop-DevServer

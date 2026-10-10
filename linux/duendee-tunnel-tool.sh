@@ -512,12 +512,7 @@ send_tunnel_whatsapp() {
       phone="$(node -e 'const c=require(process.argv[1]); process.stdout.write(String(c.targetPhone||""))' "$wa_cfg" 2>/dev/null || true)"
     fi
   fi
-  if [[ ! -f "${ROOT}/.whatsapp-session/creds.json" ]]; then
-    echo -e "  ${YEL}   WhatsApp hatti ${phone:-5315162429} bagli degil. Yeni QR olusturuluyor.${RST}"
-    echo -e "  ${DIM}   WhatsApp > Bagli Cihazlar > Cihaz Bagla. Tarama sonrasi link gider.${RST}"
-  else
-    echo "  WhatsApp hatti kontrol ediliyor (${phone:-5315162429})..."
-  fi
+  echo "  WhatsApp baglantisi kontrol ediliyor (${phone:-5315162429})..."
   echo "  WhatsApp'a link gönderiliyor..."
   local ec=0
   export DT_WA_URL="$public_url"
@@ -530,17 +525,21 @@ send_tunnel_whatsapp() {
   unset DT_WA_URL DT_WA_PHONE
   if (( ec != 0 )); then
     echo -e "  ${YEL}   WhatsApp gönderimi başarısız (çıkış ${ec}).${RST}"
-    echo -e "  ${DIM}   QR tarayin veya: rm -rf \"${ROOT}/.whatsapp-session\" sonra tekrar.${RST}"
+    echo -e "  ${DIM}   QR tarayin veya: rm -rf \"$(wa_session_dir)\" sonra tekrar.${RST}"
     echo -e "  ${DIM}   Manuel: node \"${WHATSAPP_JS}\" \"${public_url}\"${RST}"
   else
     echo -e "  ${GRN}   WhatsApp mesaji gonderildi.${RST}"
   fi
 }
 
+wa_session_dir() {
+  printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/duendee-whatsapp"
+}
+
 spawn_retract_detached() {
   local wa_js="${WHATSAPP_JS:-${ROOT}/scripts/send-whatsapp.js}"
-  local sent_file="${ROOT}/.whatsapp-session/sent-links.json"
-  local creds="${ROOT}/.whatsapp-session/creds.json"
+  local sent_file="$(wa_session_dir)/sent-links.json"
+  local creds="$(wa_session_dir)/creds.json"
   local log="${STATE}/wa-retract.log"
   [[ -f "$wa_js" && -f "$sent_file" && -f "$creds" && -s "$sent_file" ]] || return 0
   grep -q '^\[\][[:space:]]*$' "$sent_file" && return 0
@@ -554,8 +553,8 @@ spawn_retract_detached() {
 
 retract_tunnel_whatsapp() {
   local wa_js="${WHATSAPP_JS:-${ROOT}/scripts/send-whatsapp.js}"
-  local sent_file="${ROOT}/.whatsapp-session/sent-links.json"
-  local creds="${ROOT}/.whatsapp-session/creds.json"
+  local sent_file="$(wa_session_dir)/sent-links.json"
+  local creds="$(wa_session_dir)/creds.json"
   [[ -f "$wa_js" && -f "$sent_file" && -f "$creds" ]] || return 0
   if [[ ! -s "$sent_file" ]] || grep -q '^\[\][[:space:]]*$' "$sent_file"; then
     return 0
@@ -1199,13 +1198,29 @@ do_start() {
   fi
   echo -e "  ${CYN}[1/4]${RST} cloudflared: $CF"
 
-  read_pid
-  if [[ -n "${TPID:-}" ]]; then
-    if pid_alive "$TPID"; then
-      echo -e "  ${RED}${BOLD}[HATA]${RST} Servis zaten çalışıyor. Önce [4] ile iptal edin."
+  if tunnel_running; then
+    echo -e "  ${GRN}   Aktif tünel bulundu. Yeni tünel açılmayacak.${RST}"
+    refresh_url
+    local adopt_tries=0
+    while [[ -z "${URL:-}" && "$adopt_tries" -lt 20 ]]; do
+      refresh_url
+      adopt_tries=$((adopt_tries + 1))
+      sleep 0.25
+    done
+    if [[ -z "${URL:-}" ]]; then
+      echo -e "  ${YEL}   Tünel çalışıyor ama yayın linki okunamadı. Kapatmak için [4].${RST}"
       wait_key
       return
     fi
+    echo -e "${BLUE}${BOLD}     ${URL}${RST}"
+    copy_clipboard "$URL" >/dev/null 2>&1 || true
+    send_tunnel_whatsapp "$URL"
+    echo
+    wait_key
+    return
+  fi
+  read_pid
+  if [[ -n "${TPID:-}" ]]; then
     rm -f "$PID_FILE" "$URL_FILE"
   fi
 
@@ -1373,9 +1388,13 @@ do_status() {
   else
     echo -e "  Dev Server ........ ${RED}KAPALI${RST}"
   fi
-  read_pid
-  if [[ -n "${TPID:-}" ]] && pid_alive "$TPID"; then
-    echo -e "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR${RST}  -  PID ${TPID}"
+  if tunnel_running; then
+    read_pid
+    if [[ -n "${TPID:-}" ]] && pid_alive "$TPID"; then
+      echo -e "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR${RST}  -  PID ${TPID}"
+    else
+      echo -e "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR${RST}"
+    fi
     refresh_url
     [[ -n "${URL:-}" ]] && echo -e "  Yayın Linki ......... ${BLUE}${BOLD}${URL}${RST}"
   else
@@ -1391,8 +1410,7 @@ do_status() {
 do_copylink() {
   clear
   echo
-  read_pid
-  if [[ -z "${TPID:-}" ]] || ! pid_alive "$TPID"; then
+  if ! tunnel_running; then
     echo -e "  ${RED}${BOLD}[HATA]${RST} Aktif yayın linki yok."
     echo -e "  ${DIM}   Önce [1] ile tünel servisini başlatın.${RST}"
     echo

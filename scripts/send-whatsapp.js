@@ -83,9 +83,30 @@ if (action === 'send' && !phone) {
   );
 }
 
-const sessionDir = path.isAbsolute(config.sessionDir)
-  ? config.sessionDir
-  : path.join(toolRoot, config.sessionDir || '.whatsapp-session');
+function stableSessionDir() {
+  if (process.env.DT_WA_SESSION) return process.env.DT_WA_SESSION;
+  if (process.platform === 'win32') {
+    const base = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+    return path.join(base, 'DuendeeWhatsApp');
+  }
+  const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
+  return path.join(base, 'duendee-whatsapp');
+}
+
+function migrateLegacySession(target) {
+  const legacy = path.join(toolRoot, '.whatsapp-session');
+  if (fs.existsSync(path.join(target, 'creds.json'))) return;
+  if (!fs.existsSync(path.join(legacy, 'creds.json'))) return;
+  fs.mkdirSync(target, { recursive: true });
+  for (const name of fs.readdirSync(legacy)) {
+    const from = path.join(legacy, name);
+    const to = path.join(target, name);
+    if (!fs.existsSync(to)) fs.cpSync(from, to, { recursive: true });
+  }
+}
+
+const sessionDir = stableSessionDir();
+migrateLegacySession(sessionDir);
 const sentPath = path.join(sessionDir, 'sent-links.json');
 const qrImage = path.join(os.tmpdir(), 'duendee-whatsapp-qr.png');
 const credsPath = path.join(sessionDir, 'creds.json');
@@ -397,7 +418,7 @@ async function main() {
   if (fs.existsSync(credsPath)) {
     console.log('  WhatsApp hatti kontrol ediliyor: ' + phone);
   } else {
-    console.log('  WhatsApp hatti ' + phone + ' bagli degil. Yeni QR olusturuluyor...');
+    console.log('  Kayitli WhatsApp oturumu yok. Baglanti deneniyor...');
   }
 
   let finished = false;
