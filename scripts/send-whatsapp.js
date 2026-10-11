@@ -108,6 +108,7 @@ function migrateLegacySession(target) {
 const sessionDir = stableSessionDir();
 migrateLegacySession(sessionDir);
 const sentPath = path.join(sessionDir, 'sent-links.json');
+const keepExisting = process.env.DT_WA_KEEP_EXISTING === '1';
 const qrImage = path.join(os.tmpdir(), 'duendee-whatsapp-qr.png');
 const credsPath = path.join(sessionDir, 'creds.json');
 const hasSession = fs.existsSync(credsPath);
@@ -403,7 +404,7 @@ async function sendText(sock, jid, message) {
 async function deliver(sock) {
   await waitUntilUsable(sock);
   const linked = sock.user?.id || readLinkedId();
-  if (!phonesMatch(linked, phone)) {
+  if (!keepExisting && !phonesMatch(linked, phone)) {
     const error = new Error('WRONG_LINE');
     error.linked = linked;
     throw error;
@@ -486,7 +487,12 @@ async function main() {
   }
 
   const linkedNow = readLinkedId();
-  if (action === 'send' && linkedNow && isPhoneAccount(linkedNow) && !phonesMatch(linkedNow, phone)) {
+  const keepLinked = action === 'send' && keepExisting && hasSession && Boolean(linkedNow);
+  if (keepLinked && loadSent().some((row) => sameUrl(row.url, url))) {
+    console.log('  Bu link zaten WhatsApp mesajinda.');
+    return;
+  }
+  if (!keepLinked && action === 'send' && linkedNow && isPhoneAccount(linkedNow) && !phonesMatch(linkedNow, phone)) {
     console.log('  Kayitli WhatsApp hatti ' + phone + ' degil. Yeni QR olusturuluyor...');
     try {
       fs.rmSync(sessionDir, { recursive: true, force: true });
@@ -514,12 +520,16 @@ async function main() {
   let attempts = 0;
   let qrCycles = 0;
   let generation = 0;
-  let allowQr = !fs.existsSync(credsPath);
+  let allowQr = !keepLinked && !fs.existsSync(credsPath);
   let sock = null;
   let timer = null;
 
   const replaceWithQr = (reason) => {
     if (finished) return;
+    if (keepLinked) {
+      finish(0, 'Kayitli WhatsApp baglantisi duruyor. Yeni QR istenmedi.');
+      return;
+    }
     if (qrCycles >= 2) {
       finish(1, reason);
       return;
@@ -569,6 +579,10 @@ async function main() {
   };
 
   timer = setTimeout(() => {
+    if (keepLinked) {
+      finish(0, 'Kayitli WhatsApp baglantisi duruyor. Yeni QR istenmedi.');
+      return;
+    }
     finish(
       1,
       'WhatsApp zaman asimi / timed out (' +
@@ -679,7 +693,7 @@ async function main() {
 
       if (connection === 'open') {
         const linked = current.user?.id || '';
-        if (action === 'send' && linked && isPhoneAccount(linked) && !phonesMatch(linked, phone)) {
+        if (!keepLinked && action === 'send' && linked && isPhoneAccount(linked) && !phonesMatch(linked, phone)) {
           replaceWithQr('Acilan oturum ' + linked + ' hattina ait.');
           return;
         }
