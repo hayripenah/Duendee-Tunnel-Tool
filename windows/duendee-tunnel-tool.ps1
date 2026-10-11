@@ -1681,7 +1681,14 @@ function Invoke-Cancel {
   Write-UiLine ''
   $fleetRole = "$(Invoke-Fleet role)".Trim()
   if ($fleetRole -eq 'other') {
-    Write-UiLine "  $YEL   Aktif tünel başka kopyada. Bu cihazdan kapatılmadı.$RST"
+    Write-UiLine "  ${CYN}   Aktif tünel kapatılıyor...$RST"
+    [void](Invoke-Fleet stop)
+    if ($script:FleetExit -eq 0) {
+      Invoke-RetractWhatsApp
+      Write-UiLine "  $GRN   Tünel servisi kapatıldı.$RST"
+    } else {
+      Write-UiLine "  $RED$BOLD[HATA]$RST Tünel servisi kapatılamadı."
+    }
     Complete-Action
     return
   }
@@ -2133,7 +2140,14 @@ function Invoke-Shutdown {
   Write-UiLine "$CYN   --- Tüm terminaller kapatılıyor ---$RST"
   $fleetRole = "$(Invoke-Fleet role)".Trim()
   if ($fleetRole -eq 'other') {
-    Write-UiLine "  $YEL   Aktif tünel başka kopyada. Bu cihazdan kapatılmadı.$RST"
+    Write-UiLine "  ${CYN}   Aktif tünel kapatılıyor...$RST"
+    [void](Invoke-Fleet stop)
+    if ($script:FleetExit -eq 0) {
+      Invoke-RetractWhatsApp
+      Write-UiLine "  $GRN   Tünel servisi kapatıldı. Çıkılıyor...$RST"
+    } else {
+      Write-UiLine "  $RED$BOLD[HATA]$RST Tünel servisi kapatılamadı."
+    }
     Write-UiLine ''
     exit 0
   }

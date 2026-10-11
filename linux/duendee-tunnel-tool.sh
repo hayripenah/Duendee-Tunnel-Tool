@@ -1659,7 +1659,13 @@ do_cancel() {
   local fleet_role="none"
   fleet_role="$(fleet_node role --root "$ROOT" 2>/dev/null || echo none)"
   if [[ "$fleet_role" == "other" ]]; then
-    echo -e "  ${YEL}   Aktif tünel başka kopyada. Bu cihazdan kapatılmadı.${RST}"
+    echo -e "  ${CYN}   Aktif tünel kapatılıyor...${RST}"
+    if fleet_node stop --root "$ROOT"; then
+      retract_tunnel_whatsapp
+      echo -e "  ${GRN}   Tünel servisi kapatıldı.${RST}"
+    else
+      echo -e "  ${RED}${BOLD}[HATA]${RST} Tünel servisi kapatılamadı."
+    fi
     echo
     wait_key
     return 0
@@ -2170,7 +2176,13 @@ do_shutdown() {
   local fleet_role="none"
   fleet_role="$(fleet_node role --root "$ROOT" 2>/dev/null || echo none)"
   if [[ "$fleet_role" == "other" ]]; then
-    echo -e "  ${YEL}   Aktif tünel başka kopyada. Bu cihazdan kapatılmadı.${RST}"
+    echo -e "  ${CYN}   Aktif tünel kapatılıyor...${RST}"
+    if fleet_node stop --root "$ROOT"; then
+      retract_tunnel_whatsapp
+      echo -e "  ${GRN}   Tünel servisi kapatıldı. Çıkılıyor...${RST}"
+    else
+      echo -e "  ${RED}${BOLD}[HATA]${RST} Tünel servisi kapatılamadı.${RST}"
+    fi
     echo
     exit 0
   fi

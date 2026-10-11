@@ -5,7 +5,7 @@ import pino from 'pino';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 
@@ -295,6 +295,93 @@ async function deleteStored(sock, keepUrl) {
   return keep;
 }
 
+function trycloudflareUrls(text) {
+  const found = String(text || '').match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com\/?(?!\S)/gi) || [];
+  return [...new Set(found.map((item) => item.replace(/\/+$/, '')))];
+}
+
+function messageText(msg) {
+  const content = msg?.message || {};
+  return (
+    content.conversation ||
+    content.extendedTextMessage?.text ||
+    content.ephemeralMessage?.message?.conversation ||
+    content.ephemeralMessage?.message?.extendedTextMessage?.text ||
+    ''
+  );
+}
+
+function activeTunnelUrl() {
+  const script = path.join(toolRoot, 'scripts', 'fleet.js');
+  if (!fs.existsSync(script)) return '';
+  const out = spawnSync(process.execPath, [script, 'lookup', '--root', toolRoot], { encoding: 'utf8' });
+  if (out.status !== 0) return '';
+  const url = String(out.stdout || '').trim().replace(/\/+$/, '');
+  return /^https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com$/i.test(url) ? url : '';
+}
+
+async function scanTunnelMessages(sock) {
+  const found = new Map();
+  const absorb = (msg) => {
+    const id = msg?.key?.id;
+    const jid = msg?.key?.remoteJid;
+    if (!id || !jid || msg.key.fromMe === false) return;
+    for (const url of trycloudflareUrls(messageText(msg))) {
+      found.set(id + '\n' + jid, { id, jid, url });
+    }
+  };
+  const onHistory = (payload) => {
+    for (const msg of payload?.messages || []) absorb(msg);
+  };
+  const onUpsert = (payload) => {
+    for (const msg of payload?.messages || []) absorb(msg);
+  };
+  sock.ev.on('messaging-history.set', onHistory);
+  sock.ev.on('messages.upsert', onUpsert);
+  for (const row of loadSent()) {
+    for (const url of trycloudflareUrls(row.url)) {
+      if (row.id && row.jid) found.set(row.id + '\n' + row.jid, { id: row.id, jid: row.jid, url });
+    }
+  }
+  const anchor = loadSent().find((row) => row.id && row.jid);
+  if (anchor && typeof sock.fetchMessageHistory === 'function') {
+    const stamp = Date.parse(anchor.at || '') || 0;
+    try {
+      await sock.fetchMessageHistory(50, { remoteJid: anchor.jid, fromMe: true, id: anchor.id }, stamp);
+    } catch (err) {
+      console.log('  Sohbet gecmisi alinamadi: ' + (err?.message || err));
+    }
+  }
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  sock.ev.off('messaging-history.set', onHistory);
+  sock.ev.off('messages.upsert', onUpsert);
+  return [...found.values()];
+}
+
+async function purgeInactiveTunnelLinks(sock) {
+  const keepUrl = activeTunnelUrl();
+  const rows = await scanTunnelMessages(sock);
+  const drop = rows.filter((row) => !sameUrl(row.url, keepUrl));
+  await Promise.all(
+    drop.map(async (row) => {
+      try {
+        await sock.sendMessage(row.jid, {
+          delete: { remoteJid: row.jid, fromMe: true, id: row.id },
+        });
+        row.removed = true;
+      } catch (err) {
+        console.error('  Mesaj kaldirilamadi (' + row.jid + '): ' + (err?.message || err));
+      }
+    })
+  );
+  const removedIds = new Set(drop.filter((row) => row.removed).map((row) => row.id));
+  saveSent(loadSent().filter((row) => !removedIds.has(row.id)));
+  const removed = removedIds.size;
+  if (keepUrl) console.log('  Aktif tunel linki birakildi.');
+  console.log('  Pasif tunel linkleri kaldirildi: ' + removed);
+  return { removed, failed: drop.length - removed };
+}
+
 function rememberSent(id, jid, messageUrl) {
   const rows = loadSent().filter((row) => row.id !== id);
   rows.push({ id, jid, url: messageUrl, at: new Date().toISOString() });
@@ -408,12 +495,6 @@ async function main() {
     }
   }
 
-  const stored = loadSent();
-  if (action === 'retract' && stored.length === 0) {
-    releaseRetractLock();
-    console.log('  Kaldirilacak eski link mesaji yok.');
-    return;
-  }
   if (action === 'retract' && !hasSession) {
     releaseRetractLock();
     fail('WhatsApp oturumu yok; eski link mesaji kaldirilamadi.');
@@ -512,10 +593,9 @@ async function main() {
     try {
       await waitUntilUsable(currentSock);
       if (action === 'retract') {
-        await deleteStored(currentSock, '');
+        const purged = await purgeInactiveTunnelLinks(currentSock);
         delivered = true;
-        const left = loadSent().length;
-        finish(left === 0 ? 0 : 1, left === 0 ? 'Eski tunnel linki mesajlari kaldirildi.' : 'Bazi mesajlar kaldirilamadi.');
+        finish(purged.failed ? 1 : 0, purged.failed ? 'Bazi pasif tunel linkleri kaldirilamadi.' : 'Pasif tunel link mesajlari tarandi.');
         return;
       }
       await deliver(currentSock);

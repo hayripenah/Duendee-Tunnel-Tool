@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from 'child_process'
+import { execFileSync, spawn, spawnSync } from 'child_process'
 import crypto from 'crypto'
 import fs from 'fs'
 import os from 'os'
@@ -9,7 +9,7 @@ const BRANCH = 'fleet'
 const FILE = 'active.json'
 const STARTING_MS = 180000
 const FRESH_MS = 70000
-const HEARTBEAT_MS = 25000
+const HEARTBEAT_MS = 4000
 
 function arg(name) {
   const i = process.argv.indexOf(name)
@@ -164,8 +164,48 @@ function age(rec) {
   return Date.now() - Number(rec && rec.updatedAt || 0)
 }
 
+function killPid(pid) {
+  if (!pid || pid <= 0) return
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' })
+    return
+  }
+  try { process.kill(-pid, 'SIGTERM') } catch { try { process.kill(pid, 'SIGTERM') } catch { /* gone */ } }
+  try { process.kill(-pid, 'SIGKILL') } catch { try { process.kill(pid, 'SIGKILL') } catch { /* gone */ } }
+}
+
+function stopLocalTunnel(root) {
+  const dir = stateDir(root)
+  for (const name of ['tunnel.pid', 'server.pid']) {
+    const file = path.join(dir, name)
+    if (!fs.existsSync(file)) continue
+    const pid = Number(fs.readFileSync(file, 'utf8').trim())
+    killPid(pid)
+    fs.rmSync(file, { force: true })
+  }
+  fs.rmSync(path.join(dir, 'tunnel.url'), { force: true })
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/IM', 'cloudflared.exe', '/T', '/F'], { stdio: 'ignore' })
+  } else {
+    spawnSync('pkill', ['-f', 'cloudflared tunnel --url'], { stdio: 'ignore' })
+  }
+}
+
+function retractWhatsApp(root) {
+  const js = path.join(root, 'scripts', 'send-whatsapp.js')
+  if (!fs.existsSync(js)) return
+  const child = spawn(process.execPath, [js, '--retract'], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+    env: { ...process.env, DT_WA_ACTION: 'retract', DT_WA_TIMEOUT_MS: '45000' },
+  })
+  child.unref()
+}
+
 async function classify(rec, me) {
   if (!rec || !rec.owner || rec.state === 'idle') return 'free'
+  if (rec.state === 'stop' && age(rec) < 90000) return rec.owner === me ? 'self' : 'wait'
   if (rec.owner === me) {
     if (rec.url && (age(rec) < FRESH_MS || await httpOk(rec.url))) return 'self'
     return 'free'
@@ -293,6 +333,46 @@ async function release(root) {
   }).catch(() => {})
 }
 
+async function requestStop(root) {
+  const token = ghToken(true)
+  const me = ownerId(root)
+  await ensureBranch(token)
+  const cur = await readRec(token)
+  if (!cur || !cur.owner || cur.state === 'idle') {
+    process.stdout.write('idle')
+    return
+  }
+  if (cur.owner === me) {
+    process.stdout.write('self')
+    return
+  }
+  await withRecord(token, async (rec) => {
+    if (!rec || !rec.owner || rec.owner === me || rec.state === 'idle') return null
+    return {
+      url: rec.url || '',
+      owner: rec.owner,
+      host: rec.host || '',
+      state: 'stop',
+      updatedAt: Date.now(),
+    }
+  })
+  const deadline = Date.now() + 45000
+  while (Date.now() < deadline) {
+    const rec = await readRec(token)
+    if (!rec || !rec.owner || rec.state === 'idle') {
+      process.stdout.write('stopped')
+      return
+    }
+    await new Promise((r) => setTimeout(r, 2000))
+  }
+  const rec = await readRec(token)
+  if (!rec || !rec.url || !(await httpOk(rec.url))) {
+    process.stdout.write('stopped')
+    return
+  }
+  throw new Error('Tünel servisi kapatılamadı')
+}
+
 async function lookup(root) {
   const token = ghToken(false)
   if (!token) process.exit(2)
@@ -333,6 +413,12 @@ async function heartbeat(root) {
     try {
       const cur = await readRec(token)
       if (!cur || cur.owner !== me) break
+      if (cur.state === 'stop') {
+        stopLocalTunnel(root)
+        retractWhatsApp(root)
+        await writeRec(token, { url: '', owner: '', host: '', state: 'idle', updatedAt: Date.now() }, cur.sha)
+        break
+      }
       const pidFile = path.join(dir, 'tunnel.pid')
       let procAlive = false
       if (fs.existsSync(pidFile)) {
@@ -456,6 +542,7 @@ const run = {
   lookup,
   role,
   heartbeat,
+  stop: requestStop,
 }[cmd]
 
 if (!run) {
