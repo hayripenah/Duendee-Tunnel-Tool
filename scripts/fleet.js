@@ -1,0 +1,470 @@
+import { execFileSync, spawnSync } from 'child_process'
+import crypto from 'crypto'
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
+
+const REPO = process.env.DT_TOOL_REPO || 'hayripenah/Duendee-Tunnel-Tool'
+const BRANCH = 'fleet'
+const FILE = 'active.json'
+const STARTING_MS = 180000
+const FRESH_MS = 70000
+const HEARTBEAT_MS = 25000
+
+function arg(name) {
+  const i = process.argv.indexOf(name)
+  if (i < 0 || i + 1 >= process.argv.length) return ''
+  return process.argv[i + 1]
+}
+
+function stateDir(root) {
+  const dir = path.join(root, '.tunnelstate')
+  fs.mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+function ownerId(root) {
+  const file = path.join(stateDir(root), 'fleet-owner')
+  if (fs.existsSync(file)) {
+    const id = fs.readFileSync(file, 'utf8').trim()
+    if (id) return id
+  }
+  const id = `${os.hostname()}-${crypto.randomBytes(4).toString('hex')}`
+  fs.writeFileSync(file, id)
+  return id
+}
+
+function findExe(name) {
+  const exts = process.platform === 'win32' ? ['.cmd', '.exe', ''] : ['']
+  const dirs = (process.env.PATH || '').split(path.delimiter)
+  if (process.platform !== 'win32') dirs.unshift(path.join(os.homedir(), '.local', 'bin'))
+  const localGh = process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'DuendeeTunnel', 'gh')
+  if (localGh && fs.existsSync(localGh)) {
+    const stack = [localGh]
+    while (stack.length) {
+      const dir = stack.pop()
+      for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, ent.name)
+        if (ent.isDirectory()) stack.push(full)
+        else if (exts.some((ext) => ent.name.toLowerCase() === `${name}${ext}`.toLowerCase())) return full
+      }
+    }
+  }
+  for (const dir of dirs) {
+    if (!dir) continue
+    for (const ext of exts) {
+      const full = path.join(dir, name + ext)
+      if (fs.existsSync(full)) return full
+    }
+  }
+  return ''
+}
+
+function ghToken(interactive) {
+  const envTok = (process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '').trim()
+  if (envTok) return envTok
+  const gh = findExe('gh')
+  if (!gh) {
+    if (interactive) throw new Error('GitHub CLI yok')
+    return ''
+  }
+  const read = () => {
+    const out = spawnSync(gh, ['auth', 'token'], { encoding: 'utf8' })
+    return out.status === 0 ? String(out.stdout || '').trim() : ''
+  }
+  let token = read()
+  if (!token && interactive) {
+    const login = spawnSync(gh, ['auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web'], {
+      stdio: 'inherit',
+    })
+    if (login.status !== 0) throw new Error('GitHub girişi tamamlanmadı')
+    token = read()
+  }
+  if (!token && interactive) throw new Error('GitHub girişi yok')
+  return token
+}
+
+async function api(token, method, apiPath, body) {
+  const res = await fetch(`https://api.github.com${apiPath}`, {
+    method,
+    headers: {
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${token}`,
+      'User-Agent': 'DuendeeTunnelTool',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(20000),
+  })
+  if (res.status === 404) return null
+  const text = await res.text()
+  let data = null
+  if (text) {
+    try { data = JSON.parse(text) } catch { data = { message: text } }
+  }
+  if (!res.ok) {
+    const err = new Error((data && data.message) || `GitHub ${res.status}`)
+    err.status = res.status
+    throw err
+  }
+  return data
+}
+
+async function ensureBranch(token) {
+  const existing = await api(token, 'GET', `/repos/${REPO}/git/ref/heads/${BRANCH}`)
+  if (existing) return
+  const main = await api(token, 'GET', `/repos/${REPO}/git/ref/heads/main`)
+  if (!main || !main.object) throw new Error('main dalı okunamadı')
+  try {
+    await api(token, 'POST', `/repos/${REPO}/git/refs`, {
+      ref: `refs/heads/${BRANCH}`,
+      sha: main.object.sha,
+    })
+  } catch (err) {
+    if (err.status !== 422) throw err
+  }
+}
+
+async function readRec(token) {
+  const data = await api(token, 'GET', `/repos/${REPO}/contents/${FILE}?ref=${BRANCH}`)
+  if (!data || !data.content) return null
+  const rec = JSON.parse(Buffer.from(data.content, 'base64').toString('utf8'))
+  rec.sha = data.sha
+  return rec
+}
+
+async function writeRec(token, rec, sha) {
+  const payload = {
+    url: rec.url || '',
+    owner: rec.owner || '',
+    host: rec.host || '',
+    state: rec.state || 'idle',
+    updatedAt: rec.updatedAt || Date.now(),
+  }
+  const body = {
+    message: 'tunnel',
+    content: Buffer.from(JSON.stringify(payload)).toString('base64'),
+    branch: BRANCH,
+  }
+  if (sha) body.sha = sha
+  await api(token, 'PUT', `/repos/${REPO}/contents/${FILE}`, body)
+}
+
+async function httpOk(url) {
+  if (!url || !/^https:\/\//i.test(url)) return false
+  try {
+    const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(8000) })
+    return res.status >= 200 && res.status < 400
+  } catch {
+    return false
+  }
+}
+
+function age(rec) {
+  return Date.now() - Number(rec && rec.updatedAt || 0)
+}
+
+async function classify(rec, me) {
+  if (!rec || !rec.owner || rec.state === 'idle') return 'free'
+  if (rec.owner === me) {
+    if (rec.url && (age(rec) < FRESH_MS || await httpOk(rec.url))) return 'self'
+    return 'free'
+  }
+  if (rec.state === 'starting' && !rec.url && age(rec) < STARTING_MS) return 'wait'
+  if (rec.url && (age(rec) < FRESH_MS || await httpOk(rec.url))) return 'foreign'
+  return 'free'
+}
+
+function stopHeartbeat(root) {
+  const dir = stateDir(root)
+  const flag = path.join(dir, 'fleet-heartbeat.on')
+  const pidFile = path.join(dir, 'fleet-heartbeat.pid')
+  fs.rmSync(flag, { force: true })
+  if (!fs.existsSync(pidFile)) return
+  const pid = Number(fs.readFileSync(pidFile, 'utf8').trim())
+  fs.rmSync(pidFile, { force: true })
+  if (pid > 0) {
+    try { process.kill(pid) } catch { /* already gone */ }
+  }
+}
+
+async function withRecord(token, mutate) {
+  await ensureBranch(token)
+  let last = null
+  for (let i = 0; i < 6; i++) {
+    const cur = await readRec(token)
+    const next = await mutate(cur)
+    if (!next) return cur
+    try {
+      await writeRec(token, next, cur && cur.sha)
+      return next
+    } catch (err) {
+      last = err
+      if (err.status !== 409 && err.status !== 422) throw err
+    }
+  }
+  throw last || new Error('kayıt yazılamadı')
+}
+
+async function begin(root) {
+  const token = ghToken(true)
+  const me = ownerId(root)
+  const localAlive = arg('--local-alive') === '1'
+  let localUrl = arg('--local-url').trim()
+  if (localUrl === '-') localUrl = ''
+  await ensureBranch(token)
+  let rec = await readRec(token)
+  let kind = await classify(rec, me)
+  const waitUntil = Date.now() + STARTING_MS
+  while (kind === 'wait' && Date.now() < waitUntil) {
+    await new Promise((r) => setTimeout(r, 2000))
+    rec = await readRec(token)
+    kind = await classify(rec, me)
+  }
+  if (kind === 'wait') kind = 'free'
+  if (kind === 'foreign') {
+    process.stdout.write(`adopt\t${rec.url}`)
+    return
+  }
+  if (kind === 'self' && !localAlive) {
+    process.stdout.write(`adopt\t${rec.url}`)
+    return
+  }
+  if (localAlive || kind === 'self') {
+    const url = localUrl || (rec && rec.url) || ''
+    if (url) {
+      const saved = await withRecord(token, async (cur) => {
+        const curKind = await classify(cur, me)
+        if (curKind === 'foreign') return null
+        return { url, owner: me, host: os.hostname(), state: 'live', updatedAt: Date.now() }
+      })
+      if (saved && saved.owner && saved.owner !== me && saved.url) {
+        process.stdout.write(`adopt\t${saved.url}`)
+        return
+      }
+    }
+    process.stdout.write(url ? `keep\t${url}` : 'keep')
+    return
+  }
+  const claimed = await withRecord(token, async (cur) => {
+    const curKind = await classify(cur, me)
+    if (curKind === 'foreign' || curKind === 'wait' || curKind === 'self') return null
+    return { url: '', owner: me, host: os.hostname(), state: 'starting', updatedAt: Date.now() }
+  })
+  if (!claimed || claimed.owner !== me || claimed.state !== 'starting') {
+    const again = await readRec(token)
+    const againKind = await classify(again, me)
+    if ((againKind === 'foreign' || againKind === 'self') && again.url) {
+      process.stdout.write(`adopt\t${again.url}`)
+      return
+    }
+    throw new Error('Aktif tünel kaydı alınamadı')
+  }
+  process.stdout.write('own')
+}
+
+async function publish(root) {
+  const token = ghToken(true)
+  const me = ownerId(root)
+  const url = arg('--url').trim()
+  if (!/^https:\/\//i.test(url)) throw new Error('yayın adresi yok')
+  const saved = await withRecord(token, async (cur) => {
+    if (cur && cur.owner && cur.owner !== me) {
+      const kind = await classify(cur, me)
+      if (kind === 'foreign') return null
+    }
+    return { url, owner: me, host: os.hostname(), state: 'live', updatedAt: Date.now() }
+  })
+  if (!saved || saved.owner !== me || saved.url !== url) {
+    process.exitCode = 4
+    throw new Error('Aktif tünel başka kopyada')
+  }
+}
+
+async function release(root) {
+  const token = ghToken(false)
+  if (!token) return
+  const me = ownerId(root)
+  stopHeartbeat(root)
+  await ensureBranch(token).catch(() => {})
+  await withRecord(token, async (cur) => {
+    if (!cur || cur.owner !== me) return null
+    return { url: '', owner: '', host: '', state: 'idle', updatedAt: Date.now() }
+  }).catch(() => {})
+}
+
+async function lookup(root) {
+  const token = ghToken(false)
+  if (!token) process.exit(2)
+  const me = ownerId(root)
+  await ensureBranch(token).catch(() => {})
+  const rec = await readRec(token)
+  const kind = await classify(rec, me)
+  if ((kind === 'foreign' || kind === 'self') && rec.url) {
+    process.stdout.write(rec.url)
+    return
+  }
+  process.exit(2)
+}
+
+async function role(root) {
+  const token = ghToken(false)
+  if (!token) {
+    process.stdout.write('none')
+    return
+  }
+  const me = ownerId(root)
+  const rec = await readRec(token).catch(() => null)
+  const kind = rec ? await classify(rec, me) : 'free'
+  if (kind === 'self') process.stdout.write('self')
+  else if (kind === 'foreign' || kind === 'wait') process.stdout.write('other')
+  else process.stdout.write('none')
+}
+
+async function heartbeat(root) {
+  const token = ghToken(false)
+  if (!token) return
+  const me = ownerId(root)
+  const dir = stateDir(root)
+  const flag = path.join(dir, 'fleet-heartbeat.on')
+  fs.writeFileSync(path.join(dir, 'fleet-heartbeat.pid'), String(process.pid))
+  if (!fs.existsSync(flag)) fs.writeFileSync(flag, '1')
+  while (fs.existsSync(flag)) {
+    try {
+      const cur = await readRec(token)
+      if (!cur || cur.owner !== me) break
+      const pidFile = path.join(dir, 'tunnel.pid')
+      let procAlive = false
+      if (fs.existsSync(pidFile)) {
+        const pid = Number(fs.readFileSync(pidFile, 'utf8').trim())
+        if (pid > 0) {
+          try {
+            process.kill(pid, 0)
+            procAlive = true
+          } catch (err) {
+            procAlive = err && err.code === 'EPERM'
+          }
+        }
+      }
+      const urlOk = cur.url ? await httpOk(cur.url) : false
+      if (cur.state === 'live' && !procAlive && !urlOk) {
+        await writeRec(token, { url: '', owner: '', host: '', state: 'idle', updatedAt: Date.now() }, cur.sha)
+        break
+      }
+      await writeRec(token, {
+        url: cur.url || '',
+        owner: me,
+        host: cur.host || os.hostname(),
+        state: cur.state === 'starting' ? 'starting' : 'live',
+        updatedAt: Date.now(),
+      }, cur.sha)
+    } catch {
+      /* next tick */
+    }
+    await new Promise((r) => setTimeout(r, HEARTBEAT_MS))
+  }
+}
+
+function git(root, args) {
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+  const gh = findExe('gh')
+  const prefix = []
+  if (gh) {
+    const auth = spawnSync(gh, ['auth', 'status'], { encoding: 'utf8' })
+    if (auth.status === 0) prefix.push('-c', 'credential.helper=!gh auth git-credential')
+  }
+  return execFileSync('git', [...prefix, '-C', root, ...args], { encoding: 'utf8', env })
+}
+
+async function update(root) {
+  if (process.env.DT_SKIP_UPDATE === '1') return
+  if (fs.existsSync(path.join(root, '.git'))) {
+    let dirty = ''
+    try { dirty = git(root, ['status', '--porcelain']).trim() } catch { return }
+    if (dirty) return
+    let before = ''
+    try { before = git(root, ['rev-parse', 'HEAD']).trim() } catch { return }
+    try {
+      git(root, ['fetch', '--quiet', 'origin', 'main'])
+      git(root, ['pull', '--ff-only', '--quiet', 'origin', 'main'])
+    } catch {
+      return
+    }
+    let after = before
+    try { after = git(root, ['rev-parse', 'HEAD']).trim() } catch { /* keep before */ }
+    if (after && before && after !== before) {
+      process.stderr.write('Tool güncellendi, yeniden açılıyor.\n')
+      process.exit(20)
+    }
+    return
+  }
+  const res = await fetch(`https://api.github.com/repos/${REPO}/commits/main`, {
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'DuendeeTunnelTool' },
+    signal: AbortSignal.timeout(20000),
+  })
+  if (!res.ok) return
+  const meta = await res.json()
+  const sha = meta && meta.sha
+  if (!sha) return
+  const marker = path.join(stateDir(root), 'tool.sha')
+  const local = fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim() : ''
+  if (local === sha) return
+  const pack = await fetch(`https://codeload.github.com/${REPO}/tar.gz/refs/heads/main`, {
+    headers: { 'User-Agent': 'DuendeeTunnelTool' },
+    signal: AbortSignal.timeout(60000),
+  })
+  if (!pack.ok) return
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'duendee-tool-'))
+  const tgz = path.join(tmp, 'src.tgz')
+  fs.writeFileSync(tgz, Buffer.from(await pack.arrayBuffer()))
+  execFileSync('tar', ['-xzf', tgz, '-C', tmp])
+  const extracted = fs.readdirSync(tmp, { withFileTypes: true })
+    .filter((ent) => ent.isDirectory())
+    .map((ent) => path.join(tmp, ent.name))[0]
+  if (!extracted) return
+  const keep = new Set(['config.json', '.whatsapp-session', '.tunnelstate', 'node_modules', '.git'])
+  const oldLock = path.join(root, 'package-lock.json')
+  const newLock = path.join(extracted, 'package-lock.json')
+  const oldHash = fs.existsSync(oldLock) ? fs.readFileSync(oldLock) : Buffer.alloc(0)
+  const newHash = fs.existsSync(newLock) ? fs.readFileSync(newLock) : Buffer.alloc(0)
+  for (const name of fs.readdirSync(root)) {
+    if (keep.has(name)) continue
+    fs.rmSync(path.join(root, name), { recursive: true, force: true })
+  }
+  for (const name of fs.readdirSync(extracted)) {
+    if (keep.has(name)) continue
+    fs.cpSync(path.join(extracted, name), path.join(root, name), { recursive: true })
+  }
+  fs.writeFileSync(marker, sha)
+  if (!oldHash.equals(newHash)) {
+    const npm = findExe('npm')
+    if (npm) spawnSync(npm, ['install', '--omit=dev'], { cwd: root, stdio: 'inherit' })
+  }
+  fs.rmSync(tmp, { recursive: true, force: true })
+  process.stderr.write('Tool güncellendi, yeniden açılıyor.\n')
+  process.exit(20)
+}
+
+const root = path.resolve(arg('--root') || path.join(path.dirname(new URL(import.meta.url).pathname), '..'))
+const cmd = process.argv[2] || ''
+
+const run = {
+  update,
+  begin,
+  publish,
+  release,
+  lookup,
+  role,
+  heartbeat,
+}[cmd]
+
+if (!run) {
+  process.stderr.write('fleet komutu yok\n')
+  process.exit(1)
+}
+
+run(root).catch((err) => {
+  process.stderr.write(`${err.message || err}\n`)
+  if (!process.exitCode) process.exitCode = 1
+  process.exit(process.exitCode)
+})

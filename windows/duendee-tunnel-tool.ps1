@@ -1203,6 +1203,8 @@ function Invoke-Status {
   } else {
     Write-UiLine "  Dev Server ........ ${RED}KAPALI$RST"
   }
+  $fleetUrl = Invoke-Fleet lookup
+  if ($script:FleetExit -ne 0) { $fleetUrl = '' }
   if (Test-TunnelRunning) {
     $tpid = Read-TunnelPid
     if ($tpid -and (Test-PidAlive $tpid)) {
@@ -1212,6 +1214,9 @@ function Invoke-Status {
     }
     $url = Get-TunnelUrl
     if ($url) { Write-UiLine "  Yayın Linki ......... $BLUE$BOLD$url$RST" }
+  } elseif ($fleetUrl) {
+    Write-UiLine "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR$RST  -  diğer kopya"
+    Write-UiLine "  Yayın Linki ......... $BLUE$BOLD$fleetUrl$RST"
   } else {
     Write-UiLine "  Tünel Servisi ..... ${RED}KAPALI$RST"
   }
@@ -1224,6 +1229,10 @@ function Invoke-CopyLink {
   Initialize-Utf8Console
   Write-UiLine ''
   $url = if (Test-TunnelRunning) { Get-TunnelUrl } else { $null }
+  if (-not $url) {
+    $remote = Invoke-Fleet lookup
+    if ($script:FleetExit -eq 0) { $url = "$remote".Trim() }
+  }
   if (-not $url) {
     Write-UiLine "  $RED$BOLD[HATA]$RST Aktif yayın linki yok."
     Write-UiLine "  $DIM   Önce [1] ile tünel servisini başlatın.$RST"
@@ -1360,6 +1369,53 @@ function Ensure-SupabaseEnv {
   Write-UiLine "  $DIM   Supabase istemci ayarı yazıldı (.env yoktu).$RST"
 }
 
+function Invoke-Fleet {
+  param([Parameter(ValueFromRemainingArguments = $true)][string[]]$FleetArgs)
+  $script:FleetExit = 1
+  $node = Find-NodeExe
+  $js = Join-Path $Root 'scripts\fleet.js'
+  if (-not $node -or -not (Test-Path -LiteralPath $js)) { return $null }
+  $out = & $node $js @FleetArgs --root $Root
+  $script:FleetExit = $LASTEXITCODE
+  if ($out -is [System.Array]) { return ($out -join "`n") }
+  return "$out"
+}
+
+function Invoke-FleetRelease {
+  [void](Invoke-Fleet release)
+}
+
+function Start-FleetHeartbeat {
+  $pidFile = Join-Path $StateDir 'fleet-heartbeat.pid'
+  if (Test-Path -LiteralPath $pidFile) {
+    $raw = Get-Content -LiteralPath $pidFile -TotalCount 1 -ErrorAction SilentlyContinue
+    $hpid = 0
+    if ([int]::TryParse("$raw".Trim(), [ref]$hpid) -and (Test-PidAlive $hpid)) { return }
+  }
+  $node = Find-NodeExe
+  $js = Join-Path $Root 'scripts\fleet.js'
+  if (-not $node) { return }
+  if (-not (Test-Path -LiteralPath $StateDir)) { New-Item -ItemType Directory -Force -Path $StateDir | Out-Null }
+  Set-Content -LiteralPath (Join-Path $StateDir 'fleet-heartbeat.on') -Value '1' -Encoding Ascii
+  [void](Start-HiddenDetached -CommandLine "`"$node`" `"$js`" heartbeat --root `"$Root`"")
+}
+
+function Update-ToolCopy {
+  if ($env:DT_SKIP_UPDATE -eq '1') { return }
+  $node = Find-NodeExe
+  $js = Join-Path $Root 'scripts\fleet.js'
+  if (-not $node -or -not (Test-Path -LiteralPath $js)) { return }
+  & $node $js update --root $Root
+  if ($LASTEXITCODE -eq 20) {
+    $script:CleanupDone = $true
+    $reargs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath)
+    if ($Action) { $reargs += $Action }
+    if ($UninstallChoice) { $reargs += $UninstallChoice }
+    & powershell.exe @reargs
+    exit $LASTEXITCODE
+  }
+}
+
 function Invoke-Start {
   Clear-Host
   Initialize-Utf8Console
@@ -1376,9 +1432,48 @@ function Invoke-Start {
   Write-UiLine "  ${CYN}[1/4]$RST cloudflared: $cf"
   $env:CF = $cf
 
-  $tunnelAlive = Test-TunnelRunning
+  $script:FleetClaimed = $false
+  try {
+  $localAlive = Test-TunnelRunning
+  $localUrl = if ($localAlive) { Recover-TunnelUrl } else { '' }
+  if ([string]::IsNullOrWhiteSpace($localUrl)) { $localUrl = '-' }
+  $aliveFlag = if ($localAlive) { '1' } else { '0' }
+  $decision = Invoke-Fleet begin --local-alive $aliveFlag --local-url "$localUrl"
+  if ($script:FleetExit -ne 0 -or [string]::IsNullOrWhiteSpace($decision)) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST Tünel kaydı okunamadı. Yeni tünel açılmadı."
+    Complete-Action
+    return
+  }
+  $decision = "$decision".Trim()
+  if ($decision.StartsWith('adopt' + "`t") -or $decision.StartsWith('adopt ')) {
+    $adoptUrl = ($decision -split "[`t ]", 2)[1].Trim()
+    if (Test-TunnelRunning) { Stop-TunnelOnly }
+    if ($adoptUrl) {
+      $dir = Split-Path -Parent $UrlFile
+      if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+      [IO.File]::WriteAllText($UrlFile, $adoptUrl)
+    }
+    Write-UiLine "  $GRN   Aktif tünel başka kopyada. Yeni tünel açılmayacak.$RST"
+    Set-Clipboard -Value $adoptUrl
+    Write-UiLine "  $BLUE$BOLD     $adoptUrl$RST"
+    if (Test-LinkAlreadySent $adoptUrl) {
+      Write-UiLine "  $GRN   Bu adresin WhatsApp mesajı duruyor.$RST"
+    } else {
+      $env:DT_WA_KEEP_EXISTING = '1'
+      Send-TunnelWhatsApp -PublicUrl $adoptUrl
+      Remove-Item Env:DT_WA_KEEP_EXISTING -ErrorAction SilentlyContinue
+    }
+    Complete-Action
+    return
+  }
+  if ($decision -eq 'keep' -or $decision.StartsWith('keep' + "`t") -or $decision.StartsWith('keep ')) {
+    if ($decision -ne 'keep') {
+      $keepUrl = ($decision -split "[`t ]", 2)[1].Trim()
+      if ($keepUrl) { [IO.File]::WriteAllText($UrlFile, $keepUrl) }
+    }
+    Start-FleetHeartbeat
+  $tunnelAlive = $true
   $existing = Recover-TunnelUrl
-  if (-not $tunnelAlive -and $existing) { $tunnelAlive = Test-PublicUrlLive $existing }
   if ($tunnelAlive) {
     Write-UiLine "  $GRN   Aktif tünel bulundu. Yeni tünel açılmayacak.$RST"
     $existing = Recover-TunnelUrl
@@ -1409,6 +1504,13 @@ function Invoke-Start {
     Complete-Action
     return
   }
+  }
+  if ($decision -ne 'own') {
+    Write-UiLine "  $RED$BOLD[HATA]$RST Tünel kaydı okunamadı. Yeni tünel açılmadı."
+    Complete-Action
+    return
+  }
+  $script:FleetClaimed = $true
   if (Read-TunnelPid) { Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue }
 
   if (Test-PortListening $Port) {
@@ -1545,7 +1647,30 @@ function Invoke-Start {
     }
     Send-TunnelWhatsApp -PublicUrl $url
   }
+  if ($script:FleetClaimed) {
+    if (-not $url) {
+      Write-UiLine "  $RED$BOLD[HATA]$RST Tünel kaydı yazılamadı. Yerel tünel kapatıldı."
+      Stop-TunnelOnly
+      Complete-Action
+      return
+    }
+    [void](Invoke-Fleet publish --url "$url")
+    if ($script:FleetExit -ne 0) {
+      Write-UiLine "  $RED$BOLD[HATA]$RST Tünel kaydı yazılamadı. Yerel tünel kapatıldı."
+      Stop-TunnelOnly
+      Complete-Action
+      return
+    }
+    $script:FleetClaimed = $false
+    Start-FleetHeartbeat
+  }
   Complete-Action
+  } finally {
+    if ($script:FleetClaimed) {
+      Invoke-FleetRelease
+      $script:FleetClaimed = $false
+    }
+  }
 }
 
 function Invoke-Cancel {
@@ -1554,6 +1679,12 @@ function Invoke-Cancel {
   Write-UiLine ''
   Write-UiLine "$CYN   --- Tünel servisini iptal et ---$RST"
   Write-UiLine ''
+  $fleetRole = "$(Invoke-Fleet role)".Trim()
+  if ($fleetRole -eq 'other') {
+    Write-UiLine "  $YEL   Aktif tünel başka kopyada. Bu cihazdan kapatılmadı.$RST"
+    Complete-Action
+    return
+  }
   $hadTunnel = Test-TunnelRunning
   $hadServer = $false
   if (Test-Path -LiteralPath $ServerPidFile) {
@@ -1562,12 +1693,20 @@ function Invoke-Cancel {
     if ([int]::TryParse("$spidRaw".Trim(), [ref]$spid) -and (Test-PidAlive $spid)) { $hadServer = $true }
   }
   if (-not $hadTunnel -and -not $hadServer) {
+    if ($fleetRole -eq 'self') {
+      Invoke-FleetRelease
+      Invoke-RetractWhatsApp
+      Write-UiLine "  $GRN   Tünel kaydı kapatıldı.$RST"
+      Complete-Action
+      return
+    }
     Write-UiLine "  $YEL   Aktif tünel servisi yok.$RST"
     Write-UiLine "  $DIM   İptal edilecek bir şey yok. Başlatmak için menüden [1] kullanın.$RST"
     Complete-Action
     return
   }
   Stop-TunnelAndDevServer
+  Invoke-FleetRelease
   Invoke-RetractWhatsApp
   Write-UiLine "  $GRN   Tünel ve dev server iptal edildi. Yeni tünel otomatik başlatılmadı.$RST"
   Complete-Action
@@ -1992,8 +2131,15 @@ function Invoke-Shutdown {
   Initialize-Utf8Console
   Write-UiLine ''
   Write-UiLine "$CYN   --- Tüm terminaller kapatılıyor ---$RST"
+  $fleetRole = "$(Invoke-Fleet role)".Trim()
+  if ($fleetRole -eq 'other') {
+    Write-UiLine "  $YEL   Aktif tünel başka kopyada. Bu cihazdan kapatılmadı.$RST"
+    Write-UiLine ''
+    exit 0
+  }
   Invoke-RetractWhatsApp
   Stop-AllToolProcesses
+  Invoke-FleetRelease
   Write-UiLine "  $GRN   Tool'a bağlı terminaller kapatıldı. Çıkılıyor...$RST"
   Write-UiLine ''
   exit 0
@@ -2046,6 +2192,7 @@ try {
     exit 0
   }
   Ensure-RuntimeRequirements
+  Update-ToolCopy
   if ($script:BootTunnel) {
     Invoke-Start
   }

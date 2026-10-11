@@ -1236,6 +1236,68 @@ start_app_origin() {
   return 1
 }
 
+fleet_node() {
+  local n=""
+  if command -v node >/dev/null 2>&1; then
+    n="$(command -v node)"
+  elif [[ -x "${HOME}/.local/bin/node" ]]; then
+    n="${HOME}/.local/bin/node"
+  fi
+  [[ -n "$n" && -f "${ROOT}/scripts/fleet.js" ]] || return 1
+  "$n" "${ROOT}/scripts/fleet.js" "$@"
+}
+
+fleet_release() {
+  fleet_node release --root "$ROOT" >/dev/null 2>&1 || true
+}
+
+start_fleet_heartbeat() {
+  local hpid="" n=""
+  if [[ -f "${STATE}/fleet-heartbeat.pid" ]]; then
+    hpid="$(tr -d '[:space:]' < "${STATE}/fleet-heartbeat.pid" || true)"
+    if [[ -n "$hpid" ]] && pid_alive "$hpid"; then
+      return 0
+    fi
+  fi
+  mkdir -p "$STATE"
+  printf '1\n' > "${STATE}/fleet-heartbeat.on"
+  if command -v node >/dev/null 2>&1; then
+    n="$(command -v node)"
+  elif [[ -x "${HOME}/.local/bin/node" ]]; then
+    n="${HOME}/.local/bin/node"
+  fi
+  [[ -n "$n" ]] || return 0
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import os, sys
+pidfile, cmd = sys.argv[1], sys.argv[2:]
+if os.fork() > 0:
+    os._exit(0)
+os.setsid()
+if os.fork() > 0:
+    os._exit(0)
+fd = os.open(pidfile, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+os.write(fd, str(os.getpid()).encode())
+os.close(fd)
+os.execvp(cmd[0], cmd)
+' "${STATE}/fleet-heartbeat.pid" "$n" "${ROOT}/scripts/fleet.js" heartbeat --root "$ROOT" >/dev/null 2>&1 &
+    wait "$!" 2>/dev/null || true
+  else
+    setsid nohup "$n" "${ROOT}/scripts/fleet.js" heartbeat --root "$ROOT" >/dev/null 2>&1 &
+    echo $! > "${STATE}/fleet-heartbeat.pid"
+    disown "$!" 2>/dev/null || true
+  fi
+}
+
+sync_tool_copy() {
+  local ec=0
+  [[ "${DT_SKIP_UPDATE:-}" == "1" ]] && return 0
+  fleet_node update --root "$ROOT" || ec=$?
+  if [[ "$ec" -eq 20 ]]; then
+    exec bash "$0" "$@"
+  fi
+}
+
 do_start() {
   clear
   echo
@@ -1249,10 +1311,59 @@ do_start() {
   fi
   echo -e "  ${CYN}[1/4]${RST} cloudflared: $CF"
 
-  if tunnel_running || { recover_tunnel_url && public_url_live; }; then
-    remember_cloudflared_pid
-    echo -e "  ${GRN}   Aktif tünel bulundu. Yeni tünel açılmayacak.${RST}"
+  local local_url="" decision=""
+  rm -f "${STATE}/fleet-claimed"
+  if tunnel_running; then
     recover_tunnel_url || true
+    local_url="${URL:-}"
+  fi
+  if ! decision="$(fleet_node begin --root "$ROOT" --local-alive "$(if tunnel_running; then echo 1; else echo 0; fi)" --local-url "$local_url")"; then
+    echo -e "  ${RED}${BOLD}[HATA]${RST} Tünel kaydı okunamadı. Yeni tünel açılmadı."
+    wait_key
+    return
+  fi
+  case "$decision" in
+    adopt$'\t'*)
+      URL="${decision#*$'\t'}"
+      if tunnel_running; then
+        kill_tunnel
+      fi
+      mkdir -p "$STATE"
+      printf '%s' "$URL" >"$URL_FILE"
+      echo -e "  ${GRN}   Aktif tünel başka kopyada. Yeni tünel açılmayacak.${RST}"
+      echo -e "${BLUE}${BOLD}     ${URL}${RST}"
+      copy_clipboard "$URL" >/dev/null 2>&1 || true
+      if link_already_sent "$URL"; then
+        echo -e "  ${GRN}   Bu adresin WhatsApp mesajı duruyor.${RST}"
+      else
+        DT_WA_KEEP_EXISTING=1 send_tunnel_whatsapp "$URL"
+        unset DT_WA_KEEP_EXISTING
+      fi
+      echo
+      wait_key
+      return
+      ;;
+    keep|keep$'\t'*)
+      if [[ "$decision" == keep$'\t'* ]]; then
+        URL="${decision#*$'\t'}"
+        printf '%s' "$URL" >"$URL_FILE"
+      fi
+      remember_cloudflared_pid
+      start_fleet_heartbeat
+      echo -e "  ${GRN}   Aktif tünel bulundu. Yeni tünel açılmayacak.${RST}"
+      recover_tunnel_url || true
+      ;;
+    own)
+      : > "${STATE}/fleet-claimed"
+      trap 'trap - RETURN; if [[ -f "${STATE}/fleet-claimed" ]]; then rm -f "${STATE}/fleet-claimed"; fleet_release; fi' RETURN
+      ;;
+    *)
+      echo -e "  ${RED}${BOLD}[HATA]${RST} Tünel kaydı okunamadı. Yeni tünel açılmadı."
+      wait_key
+      return
+      ;;
+  esac
+  if [[ "$decision" == keep || "$decision" == keep$'\t'* ]]; then
     if ! port_listening "$PORT"; then
       echo -e "  ${CYN}   Yerel uygulama kapalı. Mevcut tünel aynı adreste kalsın diye açılıyor...${RST}"
       start_app_origin || echo -e "  ${YEL}   Uygulama açılamadı. Tünel duruyor ama sayfa erişilemeyebilir.${RST}"
@@ -1452,6 +1563,20 @@ os.execvp(cmd[0], cmd)
     fi
     send_tunnel_whatsapp "$URL"
   fi
+  if [[ -f "${STATE}/fleet-claimed" ]]; then
+    if ! fleet_node publish --root "$ROOT" --url "$URL"; then
+      echo -e "  ${RED}${BOLD}[HATA]${RST} Tünel kaydı yazılamadı. Yerel tünel kapatıldı."
+      kill_tunnel
+      rm -f "${STATE}/fleet-claimed"
+      trap - RETURN
+      fleet_release
+      wait_key
+      return
+    fi
+    rm -f "${STATE}/fleet-claimed"
+    trap - RETURN
+    start_fleet_heartbeat
+  fi
   echo
   wait_key
 }
@@ -1466,6 +1591,8 @@ do_status() {
   else
     echo -e "  Dev Server ........ ${RED}KAPALI${RST}"
   fi
+  local fleet_url=""
+  fleet_url="$(fleet_node lookup --root "$ROOT" 2>/dev/null || true)"
   if tunnel_running; then
     read_pid
     if [[ -n "${TPID:-}" ]] && pid_alive "$TPID"; then
@@ -1475,6 +1602,9 @@ do_status() {
     fi
     refresh_url
     [[ -n "${URL:-}" ]] && echo -e "  Yayın Linki ......... ${BLUE}${BOLD}${URL}${RST}"
+  elif [[ -n "$fleet_url" ]]; then
+    echo -e "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR${RST}  -  diğer kopya"
+    echo -e "  Yayın Linki ......... ${BLUE}${BOLD}${fleet_url}${RST}"
   else
     echo -e "  Tünel Servisi ..... ${RED}KAPALI${RST}"
   fi
@@ -1488,14 +1618,22 @@ do_status() {
 do_copylink() {
   clear
   echo
+  local fleet_url=""
   if ! tunnel_running; then
+    fleet_url="$(fleet_node lookup --root "$ROOT" 2>/dev/null || true)"
+  fi
+  if ! tunnel_running && [[ -z "$fleet_url" ]]; then
     echo -e "  ${RED}${BOLD}[HATA]${RST} Aktif yayın linki yok."
     echo -e "  ${DIM}   Önce [1] ile tünel servisini başlatın.${RST}"
     echo
     wait_key
     return
   fi
-  refresh_url
+  if [[ -n "$fleet_url" ]]; then
+    URL="$fleet_url"
+  else
+    refresh_url
+  fi
   if [[ -z "${URL:-}" ]]; then
     echo -e "  ${RED}${BOLD}[HATA]${RST} Aktif yayın linki yok."
     echo -e "  ${DIM}   Önce [1] ile tünel servisini başlatın.${RST}"
@@ -1518,6 +1656,14 @@ do_cancel() {
   echo
   echo -e "${CYN}   --- Tünel servisini iptal et ---${RST}"
   echo
+  local fleet_role="none"
+  fleet_role="$(fleet_node role --root "$ROOT" 2>/dev/null || echo none)"
+  if [[ "$fleet_role" == "other" ]]; then
+    echo -e "  ${YEL}   Aktif tünel başka kopyada. Bu cihazdan kapatılmadı.${RST}"
+    echo
+    wait_key
+    return 0
+  fi
   local had_tunnel=0
   local had_server=0
   tunnel_running && had_tunnel=1
@@ -1529,6 +1675,14 @@ do_cancel() {
     fi
   fi
   if [[ "$had_tunnel" -eq 0 && "$had_server" -eq 0 ]]; then
+    if [[ "$fleet_role" == "self" ]]; then
+      fleet_release
+      retract_tunnel_whatsapp
+      echo -e "  ${GRN}   Tünel kaydı kapatıldı.${RST}"
+      echo
+      wait_key
+      return 0
+    fi
     retract_tunnel_whatsapp
     echo -e "  ${YEL}   Aktif tünel servisi yok.${RST}"
     echo -e "  ${DIM}   İptal edilecek bir şey yok. Başlatmak için menüden [1] kullanın.${RST}"
@@ -1537,6 +1691,7 @@ do_cancel() {
     return 0
   fi
   kill_tunnel_and_server
+  fleet_release
   URL=""
   TUNNEL_URL=""
   PREV=""
@@ -2012,8 +2167,16 @@ do_shutdown() {
   clear
   echo
   echo -e "${CYN}   --- Tüm terminaller kapatılıyor ---${RST}"
+  local fleet_role="none"
+  fleet_role="$(fleet_node role --root "$ROOT" 2>/dev/null || echo none)"
+  if [[ "$fleet_role" == "other" ]]; then
+    echo -e "  ${YEL}   Aktif tünel başka kopyada. Bu cihazdan kapatılmadı.${RST}"
+    echo
+    exit 0
+  fi
   retract_tunnel_whatsapp
   kill_all
+  fleet_release
   CLEANING_UP=1
   echo -e "${GRN}   Tool'a bağlı terminaller kapatıldı. Çıkılıyor...${RST}"
   echo
@@ -2029,6 +2192,7 @@ fi
 
 load_config
 ensure_requirements
+sync_tool_copy "$@"
 trap cleanup_quiet EXIT INT TERM HUP
 register_stable_launch || true
 
