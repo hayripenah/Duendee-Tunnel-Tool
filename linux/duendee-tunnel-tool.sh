@@ -1335,13 +1335,17 @@ do_start() {
   echo -e "  ${CYN}[1/4]${RST} cloudflared: $CF"
 
   local local_url="" decision=""
+  mkdir -p "$STATE"
   rm -f "${STATE}/fleet-claimed"
   if tunnel_running; then
     recover_tunnel_url || true
     local_url="${URL:-}"
   fi
-  if ! decision="$(fleet_node begin --root "$ROOT" --local-alive "$(if tunnel_running; then echo 1; else echo 0; fi)" --local-url "$local_url")"; then
+  if ! decision="$(fleet_node begin --root "$ROOT" --local-alive "$(if tunnel_running; then echo 1; else echo 0; fi)" --local-url "${local_url:--}" 2>"${STATE}/fleet-begin.err")"; then
     echo -e "  ${RED}${BOLD}[HATA]${RST} Tünel kaydı okunamadı. Yeni tünel açılmadı."
+    if [[ -s "${STATE}/fleet-begin.err" ]]; then
+      echo -e "  ${DIM}   $(tr '\n' ' ' < "${STATE}/fleet-begin.err")${RST}"
+    fi
     wait_key
     return
   fi

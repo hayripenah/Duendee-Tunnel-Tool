@@ -252,13 +252,18 @@ async function begin(root) {
   await ensureBranch(token)
   let rec = await readRec(token)
   let kind = await classify(rec, me)
+  let waited = false
   const waitUntil = Date.now() + STARTING_MS
   while (kind === 'wait' && Date.now() < waitUntil) {
+    waited = true
     await new Promise((r) => setTimeout(r, 2000))
     rec = await readRec(token)
     kind = await classify(rec, me)
   }
-  if (kind === 'wait') kind = 'free'
+  if (kind === 'wait') {
+    waited = true
+    kind = 'free'
+  }
   if (kind === 'foreign') {
     process.stdout.write(`adopt\t${rec.url}`)
     return
@@ -285,7 +290,8 @@ async function begin(root) {
   }
   const claimed = await withRecord(token, async (cur) => {
     const curKind = await classify(cur, me)
-    if (curKind === 'foreign' || curKind === 'wait' || curKind === 'self') return null
+    const abandoned = waited && cur && cur.state === 'starting' && !cur.url
+    if (!abandoned && (curKind === 'foreign' || curKind === 'wait' || curKind === 'self')) return null
     return { url: '', owner: me, host: os.hostname(), state: 'starting', updatedAt: Date.now() }
   })
   if (!claimed || claimed.owner !== me || claimed.state !== 'starting') {
@@ -451,6 +457,14 @@ async function heartbeat(root) {
             procAlive = err && err.code === 'EPERM'
           }
         }
+      }
+      if (cur.state === 'starting') {
+        if (!cur.url && age(cur) > STARTING_MS) {
+          await writeRec(token, { url: '', owner: '', host: '', state: 'idle', updatedAt: Date.now() }, cur.sha)
+          break
+        }
+        await new Promise((r) => setTimeout(r, HEARTBEAT_MS))
+        continue
       }
       const urlOk = cur.url ? await httpOk(cur.url) : false
       const cfAlive = cloudflaredAlive()

@@ -1408,13 +1408,32 @@ function Ensure-SupabaseEnv {
 function Invoke-Fleet {
   param([Parameter(ValueFromRemainingArguments = $true)][string[]]$FleetArgs)
   $script:FleetExit = 1
+  $script:FleetError = ''
   $node = Find-NodeExe
   $js = Join-Path $Root 'scripts\fleet.js'
   if (-not $node -or -not (Test-Path -LiteralPath $js)) { return $null }
-  $out = & $node $js @FleetArgs --root $Root
-  $script:FleetExit = $LASTEXITCODE
-  if ($out -is [System.Array]) { return ($out -join "`n") }
-  return "$out"
+  $prevEa = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  $prevNative = $null
+  if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+    $prevNative = $PSNativeCommandUseErrorActionPreference
+    $PSNativeCommandUseErrorActionPreference = $false
+  }
+  try {
+    $lines = @(& $node $js @FleetArgs --root $Root 2>&1)
+    $script:FleetExit = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $prevEa
+    if ($null -ne $prevNative) { $PSNativeCommandUseErrorActionPreference = $prevNative }
+  }
+  $stdout = New-Object System.Collections.Generic.List[string]
+  $stderr = New-Object System.Collections.Generic.List[string]
+  foreach ($line in @($lines)) {
+    if ($line -is [System.Management.Automation.ErrorRecord]) { [void]$stderr.Add("$line") }
+    else { [void]$stdout.Add("$line") }
+  }
+  $script:FleetError = ($stderr -join "`n").Trim()
+  return ($stdout -join "`n").Trim()
 }
 
 function Invoke-FleetRelease {
@@ -1477,6 +1496,7 @@ function Invoke-Start {
   $decision = Invoke-Fleet begin --local-alive $aliveFlag --local-url "$localUrl"
   if ($script:FleetExit -ne 0 -or [string]::IsNullOrWhiteSpace($decision)) {
     Write-UiLine "  $RED$BOLD[HATA]$RST Tünel kaydı okunamadı. Yeni tünel açılmadı."
+    if ($script:FleetError) { Write-UiLine "  $DIM   $($script:FleetError)$RST" }
     Complete-Action
     return
   }
