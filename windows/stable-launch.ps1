@@ -54,16 +54,16 @@ if ($hits.Count -gt 0) {
   foreach ($item in $near) { Add-Unique $hits $item }
   $desktop = [Environment]::GetFolderPath('Desktop')
   $docs = [Environment]::GetFolderPath('MyDocuments')
-  $home = $env:USERPROFILE
+  $userHome = $env:USERPROFILE
   foreach ($seed in @(
       (Join-Path $env:LOCALAPPDATA 'DuendeeTunnelTool'),
-      (Join-Path $home 'YEK\Cursor'),
+      (Join-Path $userHome 'YEK\Cursor'),
       (Join-Path $desktop 'YEK\Cursor'),
-      (Join-Path $home 'YEK'),
+      (Join-Path $userHome 'YEK'),
       (Join-Path $desktop 'YEK'),
-      (Join-Path $home 'Cursor'),
+      (Join-Path $userHome 'Cursor'),
       (Join-Path $desktop 'Cursor'),
-      $desktop, $docs, $home
+      $desktop, $docs, $userHome
     )) {
     Search-Tree $seed 3 $hits $false
   }

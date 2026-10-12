@@ -274,21 +274,77 @@ async function revokeTargets(sock) {
       lid = '';
     }
     if (!lid) lid = lidFromCache(phone);
+    if (!lid) {
+      try {
+        const results = await sock.onWhatsApp(pn);
+        const hit = Array.isArray(results) ? results.find((row) => row && (row.lid || row.jid)) : null;
+        if (hit?.lid) lid = hit.lid;
+      } catch {
+        /* optional */
+      }
+    }
   }
   return { pn, lid };
 }
 
+function revokeConfirmed(sock, messageId, waitMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      sock.ev.off('messages.update', onUpdate);
+      sock.ev.off('messages.delete', onDelete);
+      resolve(ok);
+    };
+    const matches = (key) => key?.id === messageId;
+    const onUpdate = (updates) => {
+      for (const update of updates || []) {
+        const stub = Number(update?.update?.messageStubType);
+        if (matches(update?.key) && stub === 1) finish(true);
+      }
+    };
+    const onDelete = (item) => {
+      const keys = item?.keys || item || [];
+      if ([].concat(keys).some(matches)) finish(true);
+    };
+    sock.ev.on('messages.update', onUpdate);
+    sock.ev.on('messages.delete', onDelete);
+    const timer = setTimeout(() => finish(false), waitMs);
+  });
+}
+
 async function revokeMessage(sock, row, targets) {
-  const jids = [...new Set([row.jid, targets.lid, targets.pn].filter(Boolean))];
+  const jids = [...new Set([targets.lid, row.key?.remoteJid, row.jid, targets.pn].filter(Boolean))];
   let lastError = '';
   for (const jid of jids) {
+    const pending = revokeConfirmed(sock, row.id, 5000);
     try {
       await sock.sendMessage(jid, {
         delete: { remoteJid: jid, fromMe: true, id: row.id }
       });
-      return true;
     } catch (err) {
       lastError = err?.message || String(err);
+      await pending;
+      continue;
+    }
+    if (await pending) return true;
+  }
+  if (typeof sock.chatModify === 'function') {
+    for (const jid of jids) {
+      try {
+        await sock.chatModify({
+          deleteForMe: {
+            deleteMedia: false,
+            key: { remoteJid: jid, fromMe: true, id: row.id },
+            timestamp: Math.floor((row.stamp || Date.now()) / 1000)
+          }
+        }, jid);
+        return true;
+      } catch (err) {
+        lastError = err?.message || String(err);
+      }
     }
   }
   if (lastError) console.error('  Mesaj kaldirilamadi (' + (row.jid || '') + '): ' + lastError);
@@ -361,7 +417,13 @@ async function scanTunnelMessages(sock) {
     for (const url of trycloudflareUrls(messageText(msg))) {
       const key = id + '\n' + jid;
       const prev = found.get(key);
-      found.set(key, { id, jid, url, stamp: stamp || prev?.stamp || 0 });
+      found.set(key, {
+        id,
+        jid,
+        url,
+        stamp: stamp || prev?.stamp || 0,
+        key: msg.key || prev?.key
+      });
     }
   };
   const drain = () => {
@@ -380,7 +442,7 @@ async function scanTunnelMessages(sock) {
     }
   }
   drain();
-  await new Promise((resolve) => setTimeout(resolve, 1500));
+  await new Promise((resolve) => setTimeout(resolve, 6000));
   drain();
   const used = new Set();
   for (let page = 0; page < 20 && typeof sock.fetchMessageHistory === 'function'; page += 1) {
@@ -435,6 +497,16 @@ async function sendText(sock, jid, message) {
   }
   const remoteJid = sentMsg.key?.remoteJid || jid;
   rememberSent(id, remoteJid, url);
+  const rows = loadSent();
+  const saved = rows.find((row) => row.id === id);
+  if (saved && sentMsg.key) {
+    saved.key = {
+      remoteJid: sentMsg.key.remoteJid,
+      fromMe: true,
+      id: sentMsg.key.id
+    };
+    saveSent(rows);
+  }
   const acked = await waitForServerAck(sock, id, 12000);
   return { sentMsg, id, jid: remoteJid, acked };
 }
