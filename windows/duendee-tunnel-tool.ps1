@@ -1143,6 +1143,9 @@ function Stop-TunnelOnly {
     Stop-ProcessTree $tpid
     Write-UiLine "  $GRN   Tünel durduruldu - PID $tpid.$RST"
   }
+  foreach ($proc in @(Get-CloudflaredProcesses)) {
+    if ($proc.ProcessId) { Stop-ProcessTree $proc.ProcessId }
+  }
   Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object { Stop-ProcessTree $_.Id }
   Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue
 }
@@ -1244,7 +1247,7 @@ function Invoke-Status {
     [void](Invoke-Fleet publish --url "$localUrl")
     Remove-Item Env:DT_FLEET_QUIET -ErrorAction SilentlyContinue
   }
-  $fleetUrl = "$(Invoke-Fleet lookup)".Trim()
+  $fleetUrl = "$(Invoke-Fleet show)".Trim()
   if ($script:FleetExit -ne 0) { $fleetUrl = '' }
   $url = if ($fleetUrl) { $fleetUrl } else { $localUrl }
   if ($url) {
@@ -1263,7 +1266,7 @@ function Invoke-CopyLink {
   Write-UiLine ''
   $url = if (Test-TunnelRunning) { Get-TunnelUrl } else { $null }
   if (-not $url) {
-    $remote = Invoke-Fleet lookup
+    $remote = Invoke-Fleet show
     if ($script:FleetExit -eq 0) { $url = "$remote".Trim() }
   }
   if (-not $url) {
@@ -1699,41 +1702,14 @@ function Invoke-Cancel {
   Write-UiLine ''
   Write-UiLine "$CYN   --- Tünel servisini iptal et ---$RST"
   Write-UiLine ''
+  Stop-TunnelOnly
+  Stop-DevServer
   $fleetRole = "$(Invoke-Fleet role)".Trim()
   if ($fleetRole -eq 'other') {
     Write-UiLine "  ${CYN}   Aktif tünel kapatılıyor...$RST"
     [void](Invoke-Fleet stop)
-    if ($script:FleetExit -eq 0) {
-      Invoke-RetractWhatsApp
-      Write-UiLine "  $GRN   Tünel servisi kapatıldı.$RST"
-    } else {
-      Write-UiLine "  $RED$BOLD[HATA]$RST Tünel servisi kapatılamadı."
-    }
-    Complete-Action
-    return
   }
-  $hadTunnel = Test-TunnelRunning
-  $hadServer = $false
-  if (Test-Path -LiteralPath $ServerPidFile) {
-    $spidRaw = Get-Content -LiteralPath $ServerPidFile -TotalCount 1 -ErrorAction SilentlyContinue
-    $spid = 0
-    if ([int]::TryParse("$spidRaw".Trim(), [ref]$spid) -and (Test-PidAlive $spid)) { $hadServer = $true }
-  }
-  if (-not $hadTunnel -and -not $hadServer) {
-    if ($fleetRole -eq 'self') {
-      Invoke-FleetRelease
-      Invoke-RetractWhatsApp
-      Write-UiLine "  $GRN   Tünel kaydı kapatıldı.$RST"
-      Complete-Action
-      return
-    }
-    Write-UiLine "  $YEL   Aktif tünel yok.$RST"
-    Invoke-RetractWhatsApp
-    Complete-Action
-    return
-  }
-  Stop-TunnelAndDevServer
-  Invoke-FleetRelease
+  [void](Invoke-Fleet clear)
   Invoke-RetractWhatsApp
   Write-UiLine "  $GRN   Tünel kapatıldı.$RST"
   Complete-Action

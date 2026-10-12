@@ -1611,7 +1611,7 @@ do_status() {
       DT_FLEET_QUIET=1 fleet_node publish --root "$ROOT" --url "$local_url" >/dev/null 2>&1 || true
     fi
   fi
-  fleet_url="$(fleet_node lookup --root "$ROOT" 2>/dev/null || true)"
+  fleet_url="$(fleet_node show --root "$ROOT" 2>/dev/null || true)"
   URL="${fleet_url:-$local_url}"
   if [[ -n "$URL" ]]; then
     echo -e "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR${RST}"
@@ -1631,7 +1631,7 @@ do_copylink() {
   echo
   local fleet_url=""
   if ! tunnel_running; then
-    fleet_url="$(fleet_node lookup --root "$ROOT" 2>/dev/null || true)"
+    fleet_url="$(fleet_node show --root "$ROOT" 2>/dev/null || true)"
   fi
   if ! tunnel_running && [[ -z "$fleet_url" ]]; then
     echo -e "  ${RED}${BOLD}[HATA]${RST} Aktif yayın linki yok."
@@ -1667,47 +1667,15 @@ do_cancel() {
   echo
   echo -e "${CYN}   --- Tünel servisini iptal et ---${RST}"
   echo
+  kill_tunnel
+  kill_dev_server
   local fleet_role="none"
   fleet_role="$(fleet_node role --root "$ROOT" 2>/dev/null || echo none)"
   if [[ "$fleet_role" == "other" ]]; then
     echo -e "  ${CYN}   Aktif tünel kapatılıyor...${RST}"
-    if fleet_node stop --root "$ROOT"; then
-      retract_tunnel_whatsapp
-      echo -e "  ${GRN}   Tünel servisi kapatıldı.${RST}"
-    else
-      echo -e "  ${RED}${BOLD}[HATA]${RST} Tünel servisi kapatılamadı."
-    fi
-    echo
-    wait_key
-    return 0
+    fleet_node stop --root "$ROOT" >/dev/null 2>&1 || true
   fi
-  local had_tunnel=0
-  local had_server=0
-  tunnel_running && had_tunnel=1
-  if [[ -f "$SERVER_PID" ]]; then
-    local spid
-    spid="$(tr -d '[:space:]' < "$SERVER_PID" || true)"
-    if [[ -n "$spid" ]] && pid_alive "$spid"; then
-      had_server=1
-    fi
-  fi
-  if [[ "$had_tunnel" -eq 0 && "$had_server" -eq 0 ]]; then
-    if [[ "$fleet_role" == "self" ]]; then
-      fleet_release
-      retract_tunnel_whatsapp
-      echo -e "  ${GRN}   Tünel kaydı kapatıldı.${RST}"
-      echo
-      wait_key
-      return 0
-    fi
-    retract_tunnel_whatsapp
-      echo -e "  ${YEL}   Aktif tünel yok.${RST}"
-    echo
-    wait_key
-    return 0
-  fi
-  kill_tunnel_and_server
-  fleet_release
+  fleet_node clear --root "$ROOT" >/dev/null 2>&1 || true
   URL=""
   TUNNEL_URL=""
   PREV=""

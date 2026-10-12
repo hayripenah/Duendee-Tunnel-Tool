@@ -384,6 +384,30 @@ async function lookup(root) {
   process.exit(2)
 }
 
+async function show(root) {
+  const token = ghToken(false)
+  if (!token) process.exit(2)
+  const me = ownerId(root)
+  await ensureBranch(token).catch(() => {})
+  const rec = await readRec(token)
+  const kind = await classify(rec, me)
+  if ((kind === 'foreign' || kind === 'self') && rec && rec.url) {
+    process.stdout.write(rec.url)
+    return
+  }
+  process.exit(2)
+}
+
+async function clearRecord(root) {
+  const token = ghToken(true)
+  if (!token) return
+  stopHeartbeat(root)
+  await ensureBranch(token).catch(() => {})
+  await withRecord(token, async () => (
+    { url: '', owner: '', host: '', state: 'idle', updatedAt: Date.now() }
+  )).catch(() => {})
+}
+
 async function role(root) {
   const token = ghToken(false)
   if (!token) {
@@ -543,6 +567,8 @@ const run = {
   publish,
   release,
   lookup,
+  show,
+  clear: clearRecord,
   role,
   heartbeat,
   stop: requestStop,
