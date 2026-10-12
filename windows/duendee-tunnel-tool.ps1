@@ -572,17 +572,18 @@ function Test-PidAlive([int]$ProcessId) {
 }
 
 function Test-PortListening([int]$PortNum) {
-  # TcpClient is much faster than Get-NetTCPConnection on Windows
-  try {
-    $tcp = [System.Net.Sockets.TcpClient]::new()
-    $iar = $tcp.BeginConnect('127.0.0.1', $PortNum, $null, $null)
-    if ($iar.AsyncWaitHandle.WaitOne(120) -and $tcp.Connected) {
-      try { $tcp.EndConnect($iar) } catch {}
+  foreach ($hostName in @('127.0.0.1', '::1')) {
+    try {
+      $tcp = [System.Net.Sockets.TcpClient]::new()
+      $iar = $tcp.BeginConnect($hostName, $PortNum, $null, $null)
+      if ($iar.AsyncWaitHandle.WaitOne(200) -and $tcp.Connected) {
+        try { $tcp.EndConnect($iar) } catch {}
+        $tcp.Close()
+        return $true
+      }
       $tcp.Close()
-      return $true
-    }
-    $tcp.Close()
-  } catch {}
+    } catch {}
+  }
   return $false
 }
 
@@ -1045,6 +1046,13 @@ function Test-CloudflaredAlive {
   return ($found.Count -gt 0)
 }
 
+function Sync-CloudflaredPid {
+  $proc = @(Get-CloudflaredProcesses) | Select-Object -First 1
+  if ($proc -and $proc.ProcessId) {
+    Set-Content -LiteralPath $PidFile -Value $proc.ProcessId -Encoding Ascii
+  }
+}
+
 function Read-TryCloudflareUrl([string]$Text) {
   if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
   $found = [regex]::Matches($Text, 'https://[a-zA-Z0-9\-]+\.(?:trycloudflare\.com|cfargotunnel\.com)')
@@ -1171,7 +1179,6 @@ function Show-Menu {
   Write-UiLine "  $YEL$BOLD[2]$RST  ${SKY}Servis Durumunu Kontrol Et$RST"
   Write-UiLine "  $YEL$BOLD[3]$RST  ${SKY}Yayın Linkini Kopyala$RST"
   Write-UiLine "  $YEL$BOLD[4]$RST  ${SKY}Tünel Servisini İptal Et$RST"
-  Write-UiLine "  $YEL$BOLD[5]$RST  ${SKY}Tüm Terminalleri Kapat ve Çık$RST"
   $autoLabel = switch ($autoMode) {
     'tool' { "$GRN[TOOL]$RST" }
     'tunnel' { "$GRN[TOOL+TÜNEL]$RST" }
@@ -1181,9 +1188,9 @@ function Show-Menu {
   Write-UiLine "  $YEL$BOLD[6]$RST  ${SKY}Cihaz Açılışında Otomatik Başlat$RST  $autoLabel  $browserLabel"
   Write-UiLine "  $YEL$BOLD[7]$RST  ${SKY}Aracı Cihazdan Kaldır$RST"
   Write-UiLine ''
-  Write-UiLine "$DIM      Pencereyi kapatmak tüneli durdurmaz. Tüneli kapatmak için [4] veya [5].$RST"
+  Write-UiLine "$DIM      Kapatmak için [4].$RST"
   Write-UiLine ''
-  Write-Ui "$CYN   Seçim [1-7]: $RST"
+  Write-Ui "$CYN   Seçim: $RST"
 }
 
 function Complete-Action {
@@ -1203,20 +1210,19 @@ function Invoke-Status {
   } else {
     Write-UiLine "  Dev Server ........ ${RED}KAPALI$RST"
   }
-  $fleetUrl = Invoke-Fleet lookup
+  if (Test-TunnelRunning) { Sync-CloudflaredPid }
+  $localUrl = if (Test-TunnelRunning) { Recover-TunnelUrl } else { '' }
+  if ($localUrl) {
+    $env:DT_FLEET_QUIET = '1'
+    [void](Invoke-Fleet publish --url "$localUrl")
+    Remove-Item Env:DT_FLEET_QUIET -ErrorAction SilentlyContinue
+  }
+  $fleetUrl = "$(Invoke-Fleet lookup)".Trim()
   if ($script:FleetExit -ne 0) { $fleetUrl = '' }
-  if (Test-TunnelRunning) {
-    $tpid = Read-TunnelPid
-    if ($tpid -and (Test-PidAlive $tpid)) {
-      Write-UiLine "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR$RST  -  PID $tpid"
-    } else {
-      Write-UiLine "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR$RST"
-    }
-    $url = Get-TunnelUrl
-    if ($url) { Write-UiLine "  Yayın Linki ......... $BLUE$BOLD$url$RST" }
-  } elseif ($fleetUrl) {
-    Write-UiLine "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR$RST  -  diğer kopya"
-    Write-UiLine "  Yayın Linki ......... $BLUE$BOLD$fleetUrl$RST"
+  $url = if ($fleetUrl) { $fleetUrl } else { $localUrl }
+  if ($url) {
+    Write-UiLine "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR$RST"
+    Write-UiLine "  Yayın Linki ......... $BLUE$BOLD$url$RST"
   } else {
     Write-UiLine "  Tünel Servisi ..... ${RED}KAPALI$RST"
   }
@@ -1453,7 +1459,7 @@ function Invoke-Start {
       if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
       [IO.File]::WriteAllText($UrlFile, $adoptUrl)
     }
-    Write-UiLine "  $GRN   Aktif tünel başka kopyada. Yeni tünel açılmayacak.$RST"
+    Write-UiLine "  $GRN   Aktif tünel var.$RST"
     Set-Clipboard -Value $adoptUrl
     Write-UiLine "  $BLUE$BOLD     $adoptUrl$RST"
     if (Test-LinkAlreadySent $adoptUrl) {
@@ -1475,7 +1481,7 @@ function Invoke-Start {
   $tunnelAlive = $true
   $existing = Recover-TunnelUrl
   if ($tunnelAlive) {
-    Write-UiLine "  $GRN   Aktif tünel bulundu. Yeni tünel açılmayacak.$RST"
+    Write-UiLine "  $GRN   Aktif tünel var.$RST"
     $existing = Recover-TunnelUrl
     if (-not (Test-PortListening $Port)) {
       Write-UiLine "  ${CYN}   Yerel uygulama kapalı. Mevcut tünel aynı adreste kalsın diye açılıyor...$RST"
@@ -1557,6 +1563,7 @@ function Invoke-Start {
     return
   }
   Set-Content -LiteralPath $PidFile -Value $tp.Id -Encoding Ascii
+  Sync-CloudflaredPid
   Start-Sleep -Milliseconds 300
   if (-not (Test-PidAlive $tp.Id)) {
     Write-UiLine "  $RED$BOLD[HATA]$RST Tünel açılır açılmaz çıktı. Son log:"
@@ -1707,15 +1714,14 @@ function Invoke-Cancel {
       Complete-Action
       return
     }
-    Write-UiLine "  $YEL   Aktif tünel servisi yok.$RST"
-    Write-UiLine "  $DIM   İptal edilecek bir şey yok. Başlatmak için menüden [1] kullanın.$RST"
+    Write-UiLine "  $YEL   Aktif tünel yok.$RST"
     Complete-Action
     return
   }
   Stop-TunnelAndDevServer
   Invoke-FleetRelease
   Invoke-RetractWhatsApp
-  Write-UiLine "  $GRN   Tünel ve dev server iptal edildi. Yeni tünel otomatik başlatılmadı.$RST"
+  Write-UiLine "  $GRN   Tünel kapatıldı.$RST"
   Complete-Action
 }
 
@@ -2160,7 +2166,7 @@ function Invoke-Shutdown {
 }
 
 # Closing the tool window leaves the tunnel, the app origin, and the link message.
-# [4] and [5] are the only paths that stop them.
+# [4] stops the tunnel.
 $script:CleanupDone = $false
 function Invoke-ExitCleanup {
   if ($script:CleanupDone) { return }
@@ -2215,13 +2221,12 @@ try {
     '2' { Invoke-Status; exit 0 }
     '3' { Invoke-CopyLink; exit 0 }
     '4' { Invoke-Cancel; exit 0 }
-    '5' { Invoke-Shutdown }
     '6' { Invoke-Autostart; exit 0 }
   }
 
   while ($true) {
     Show-Menu
-    $choice = Get-Choice '1234567'
+    $choice = Get-Choice '123467'
     Write-UiLine ''
     try {
       switch ($choice) {
@@ -2229,7 +2234,6 @@ try {
         '2' { Invoke-Status }
         '3' { Invoke-CopyLink }
         '4' { Invoke-Cancel }
-        '5' { Invoke-Shutdown }
         '6' { Invoke-Autostart }
         '7' { Invoke-Uninstall }
       }

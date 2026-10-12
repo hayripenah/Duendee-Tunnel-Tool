@@ -1055,7 +1055,7 @@ kill_all() {
 }
 
 # Closing the tool terminal leaves the tunnel, the app origin, and the link message.
-# [4] and [5] are the only paths that stop them.
+# [4] stops the tunnel.
 CLEANING_UP=0
 cleanup_quiet() {
   return 0
@@ -1089,7 +1089,6 @@ show_menu() {
   echo -e "  ${YEL}${BOLD}[2]${RST}  ${SKY}Servis Durumunu Kontrol Et${RST}"
   echo -e "  ${YEL}${BOLD}[3]${RST}  ${SKY}Yayın Linkini Kopyala${RST}"
   echo -e "  ${YEL}${BOLD}[4]${RST}  ${SKY}Tünel Servisini İptal Et${RST}"
-  echo -e "  ${YEL}${BOLD}[5]${RST}  ${SKY}Tüm Terminalleri Kapat ve Çık${RST}"
   case "${AUTOMODE}" in
     tool) echo -e "  ${YEL}${BOLD}[6]${RST}  ${SKY}Cihaz Açılışında Otomatik Başlat${RST}  ${GRN}[TOOL]${RST}  $(browser_mark)" ;;
     tunnel) echo -e "  ${YEL}${BOLD}[6]${RST}  ${SKY}Cihaz Açılışında Otomatik Başlat${RST}  ${GRN}[TOOL+TÜNEL]${RST}  $(browser_mark)" ;;
@@ -1097,9 +1096,9 @@ show_menu() {
   esac
   echo -e "  ${YEL}${BOLD}[7]${RST}  ${SKY}Aracı Cihazdan Kaldır${RST}"
   echo
-  echo -e "${DIM}      Pencereyi kapatmak tüneli durdurmaz. Tüneli kapatmak için [4] veya [5].${RST}"
+  echo -e "${DIM}      Kapatmak için [4].${RST}"
   echo
-  printf "%b" "${CYN}   Seçim [1-7]: ${RST}"
+  printf "%b" "${CYN}   Seçim: ${RST}"
 }
 
 # Public Supabase client values. Clones omit .env, so vite build otherwise
@@ -1330,7 +1329,7 @@ do_start() {
       fi
       mkdir -p "$STATE"
       printf '%s' "$URL" >"$URL_FILE"
-      echo -e "  ${GRN}   Aktif tünel başka kopyada. Yeni tünel açılmayacak.${RST}"
+      echo -e "  ${GRN}   Aktif tünel var.${RST}"
       echo -e "${BLUE}${BOLD}     ${URL}${RST}"
       copy_clipboard "$URL" >/dev/null 2>&1 || true
       if link_already_sent "$URL"; then
@@ -1350,7 +1349,7 @@ do_start() {
       fi
       remember_cloudflared_pid
       start_fleet_heartbeat
-      echo -e "  ${GRN}   Aktif tünel bulundu. Yeni tünel açılmayacak.${RST}"
+      echo -e "  ${GRN}   Aktif tünel var.${RST}"
       recover_tunnel_url || true
       ;;
     own)
@@ -1591,20 +1590,20 @@ do_status() {
   else
     echo -e "  Dev Server ........ ${RED}KAPALI${RST}"
   fi
-  local fleet_url=""
-  fleet_url="$(fleet_node lookup --root "$ROOT" 2>/dev/null || true)"
+  local fleet_url="" local_url=""
   if tunnel_running; then
-    read_pid
-    if [[ -n "${TPID:-}" ]] && pid_alive "$TPID"; then
-      echo -e "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR${RST}  -  PID ${TPID}"
-    else
-      echo -e "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR${RST}"
+    remember_cloudflared_pid
+    recover_tunnel_url || true
+    local_url="${URL:-}"
+    if [[ -n "$local_url" ]]; then
+      DT_FLEET_QUIET=1 fleet_node publish --root "$ROOT" --url "$local_url" >/dev/null 2>&1 || true
     fi
-    refresh_url
-    [[ -n "${URL:-}" ]] && echo -e "  Yayın Linki ......... ${BLUE}${BOLD}${URL}${RST}"
-  elif [[ -n "$fleet_url" ]]; then
-    echo -e "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR${RST}  -  diğer kopya"
-    echo -e "  Yayın Linki ......... ${BLUE}${BOLD}${fleet_url}${RST}"
+  fi
+  fleet_url="$(fleet_node lookup --root "$ROOT" 2>/dev/null || true)"
+  URL="${fleet_url:-$local_url}"
+  if [[ -n "$URL" ]]; then
+    echo -e "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR${RST}"
+    echo -e "  Yayın Linki ......... ${BLUE}${BOLD}${URL}${RST}"
   else
     echo -e "  Tünel Servisi ..... ${RED}KAPALI${RST}"
   fi
@@ -1690,8 +1689,7 @@ do_cancel() {
       return 0
     fi
     retract_tunnel_whatsapp
-    echo -e "  ${YEL}   Aktif tünel servisi yok.${RST}"
-    echo -e "  ${DIM}   İptal edilecek bir şey yok. Başlatmak için menüden [1] kullanın.${RST}"
+      echo -e "  ${YEL}   Aktif tünel yok.${RST}"
     echo
     wait_key
     return 0
@@ -1702,7 +1700,7 @@ do_cancel() {
   TUNNEL_URL=""
   PREV=""
   retract_tunnel_whatsapp
-  echo -e "  ${GRN}   Tünel ve dev server iptal edildi. Yeni tünel otomatik başlatılmadı.${RST}"
+  echo -e "  ${GRN}   Tünel kapatıldı.${RST}"
   echo
   wait_key
 }
@@ -2217,7 +2215,6 @@ elif [[ "${1:-}" != "" ]]; then
     2) do_status; exit 0 ;;
     3) do_copylink; exit 0 ;;
     4) do_cancel; exit 0 ;;
-    5) do_shutdown ;;
     6) do_autostart; exit 0 ;;
   esac
 fi
@@ -2231,7 +2228,6 @@ while true; do
     2) do_status ;;
     3) do_copylink ;;
     4) do_cancel ;;
-    5) do_shutdown ;;
     6) do_autostart ;;
     7) do_uninstall ;;
     *) ;;

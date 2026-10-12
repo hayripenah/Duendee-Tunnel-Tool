@@ -8,7 +8,7 @@ const REPO = process.env.DT_TOOL_REPO || 'hayripenah/Duendee-Tunnel-Tool'
 const BRANCH = 'fleet'
 const FILE = 'active.json'
 const STARTING_MS = 180000
-const FRESH_MS = 70000
+const FRESH_MS = 600000
 const HEARTBEAT_MS = 4000
 
 function arg(name) {
@@ -164,6 +164,15 @@ function age(rec) {
   return Date.now() - Number(rec && rec.updatedAt || 0)
 }
 
+function cloudflaredAlive() {
+  if (process.platform === 'win32') {
+    const out = spawnSync('tasklist', ['/FI', 'IMAGENAME eq cloudflared.exe', '/NH'], { encoding: 'utf8' })
+    return /cloudflared\.exe/i.test(String(out.stdout || ''))
+  }
+  const out = spawnSync('pgrep', ['-x', 'cloudflared'], { encoding: 'utf8' })
+  return out.status === 0 && String(out.stdout || '').trim() !== ''
+}
+
 function killPid(pid) {
   if (!pid || pid <= 0) return
   if (process.platform === 'win32') {
@@ -304,7 +313,8 @@ async function begin(root) {
 }
 
 async function publish(root) {
-  const token = ghToken(true)
+  const token = ghToken(process.env.DT_FLEET_QUIET !== '1')
+  if (!token) return
   const me = ownerId(root)
   const url = arg('--url').trim()
   if (!/^https:\/\//i.test(url)) throw new Error('yayın adresi yok')
@@ -316,6 +326,7 @@ async function publish(root) {
     return { url, owner: me, host: os.hostname(), state: 'live', updatedAt: Date.now() }
   })
   if (!saved || saved.owner !== me || saved.url !== url) {
+    if (process.env.DT_FLEET_QUIET === '1') return
     process.exitCode = 4
     throw new Error('Aktif tünel başka kopyada')
   }
@@ -433,7 +444,8 @@ async function heartbeat(root) {
         }
       }
       const urlOk = cur.url ? await httpOk(cur.url) : false
-      if (cur.state === 'live' && !procAlive && !urlOk) {
+      const cfAlive = cloudflaredAlive()
+      if (cur.state === 'live' && !procAlive && !cfAlive && !urlOk) {
         await writeRec(token, { url: '', owner: '', host: '', state: 'idle', updatedAt: Date.now() }, cur.sha)
         break
       }
