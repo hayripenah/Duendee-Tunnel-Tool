@@ -46,7 +46,7 @@ ensure_node() {
       ;;
   esac
   dest="${HOME}/.local/share/duendee-node"
-  echo "Node.js kuruluyor (${ver}, hesap gerekmez)..."
+  echo "Node.js kuruluyor..."
   tmp="$(mktemp)"
   curl -fsSL -o "$tmp" "https://nodejs.org/dist/${ver}/node-${ver}-linux-${node_arch}.tar.xz"
   mkdir -p "$dest" "${HOME}/.local/bin"
@@ -73,7 +73,7 @@ ensure_cloudflared() {
       return 1
       ;;
   esac
-  echo "cloudflared kuruluyor (hesap gerekmez)..."
+  echo "cloudflared kuruluyor..."
   mkdir -p "${HOME}/.cloudflared" "${HOME}/.local/bin"
   curl -fsSL -L -o "${HOME}/.cloudflared/cloudflared" \
     "https://github.com/cloudflare/cloudflared/releases/latest/download/${name}"
@@ -181,7 +181,7 @@ install_shim_and_path() {
   if [[ -d /usr/local/bin && -w /usr/local/bin ]]; then
     write_launcher /usr/local/bin/duendee-tunnel
     SHIM_EXTRA="/usr/local/bin/duendee-tunnel"
-    echo "Also installed: ${SHIM_EXTRA} (usually already on PATH)"
+    echo "Also installed: ${SHIM_EXTRA}"
   fi
 
   # Persist for bash / zsh / login shells (update every relevant rc — do not stop at first)
@@ -202,18 +202,7 @@ install_shim_and_path() {
 }
 
 print_path_help() {
-  echo
-  echo "════════════════════════════════════════════════════════════"
-  echo " SAME TERMINAL (curl|bash is a subshell — run this next):"
-  echo "   export PATH=\"${BIN_DIR}:\$PATH\"; hash -r; duendee-tunnel"
-  echo
-  echo " Full one-liner (install + PATH + run):"
-  echo "   curl -fsSL https://raw.githubusercontent.com/hayripenah/Duendee-Tunnel-Tool/main/scripts/install-linux.sh | bash; export PATH=\"\$HOME/.local/bin:\$PATH\"; hash -r; duendee-tunnel"
-  echo
-  echo " Or source (PATH applies in this shell immediately):"
-  echo "   source <(curl -fsSL https://raw.githubusercontent.com/hayripenah/Duendee-Tunnel-Tool/main/scripts/install-linux.sh); duendee-tunnel"
-  echo "════════════════════════════════════════════════════════════"
-  echo " New terminals: ~/.local/bin was added to bashrc/zshrc/profile when missing."
+  echo "Bu kabuk: export PATH=\"${BIN_DIR}:\$PATH\"; hash -r; duendee-tunnel"
 }
 
 echo "Installing Duendee Tunnel Tool -> ${INSTALL_DIR}"
@@ -264,7 +253,7 @@ fi
 [[ -n "$extracted" ]] || { echo "Archive layout unexpected (linux/duendee-tunnel-tool.sh missing)." >&2; exit 1; }
 
 if [[ ! -f "${extracted}/linux/stable-launch.sh" ]] || ! grep -q 'ensure_supabase_env' "${extracted}/linux/duendee-tunnel-tool.sh" 2>/dev/null; then
-  echo "Release package is incomplete or missing the tunnel Supabase fix. Downloading current main (public, no login)..."
+  echo "Güncel sürüm indiriliyor..."
   curl -fsSL -o "${tmp}/main.tgz" "https://codeload.github.com/${REPO}/tar.gz/refs/heads/main"
   mkdir -p "${tmp}/main-src"
   tar -xzf "${tmp}/main.tgz" -C "${tmp}/main-src"
@@ -305,19 +294,19 @@ if [[ ! -f "${INSTALL_DIR}/config.example.json" ]]; then
 fi
 if [[ ! -f "${INSTALL_DIR}/config.json" ]]; then
   cp "${INSTALL_DIR}/config.example.json" "${INSTALL_DIR}/config.json"
-  echo "Created config.json from example — first run will ask for projectPath if needed."
+  echo "config.json oluşturuldu."
 fi
 
 chmod +x "${INSTALL_DIR}/linux/duendee-tunnel-tool.sh" \
   "${INSTALL_DIR}/linux/scripts/"*.sh 2>/dev/null || true
 
-ensure_node || echo "WARNING: Node.js kurulamadı. WhatsApp ve dev server için node gerekli."
-ensure_cloudflared || echo "WARNING: cloudflared kurulamadı. Tünel için cloudflared gerekli."
-ensure_gh || echo "WARNING: GitHub CLI kurulamadı. Private Duendee indirmek için gh gerekli."
+ensure_node || echo "WARNING: Node.js kurulamadı."
+ensure_cloudflared || echo "WARNING: cloudflared kurulamadı."
+ensure_gh || echo "WARNING: GitHub CLI kurulamadı."
 
 if [[ "$SKIP_NPM" != "1" ]]; then
   if command -v npm >/dev/null 2>&1; then
-    echo "Running npm install (WhatsApp helper)..."
+    echo "npm install..."
     # npm warnings must not abort shim creation (set -e); ignore non-zero only after retry
     set +e
     (cd "$INSTALL_DIR" && npm install --omit=dev)
@@ -328,7 +317,7 @@ if [[ "$SKIP_NPM" != "1" ]]; then
     fi
     set -e
     if [[ $npm_ec -ne 0 ]]; then
-      echo "WARNING: npm install failed (exit ${npm_ec}). WhatsApp may need: npm install in ${INSTALL_DIR}"
+      echo "WARNING: npm install failed (${npm_ec})."
     fi
   else
     echo "npm not found — install Node.js, then run: npm install  (in ${INSTALL_DIR})"
@@ -388,13 +377,7 @@ echo "  Location : ${INSTALL_DIR}"
 echo "  Shim     : ${SHIM_PRIMARY:-${BIN_DIR}/duendee-tunnel}"
 [[ -n "${SHIM_EXTRA:-}" ]] && echo "  Shim+    : ${SHIM_EXTRA}"
 echo "  Run      : duendee-tunnel"
-if command -v duendee-tunnel >/dev/null 2>&1; then
-  echo "  Verified : $(command -v duendee-tunnel)"
-else
-  echo "  Verified : shim written; parent shell still needs PATH (see below)"
-fi
-echo "  Edit     : ${INSTALL_DIR}/config.json"
-echo "  WhatsApp : first send shows QR; session saved in .whatsapp-session"
+echo "  Config   : ${INSTALL_DIR}/config.json"
 print_path_help
 
 if [[ "$_DT_SOURCED" == "1" ]]; then

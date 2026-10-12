@@ -290,7 +290,7 @@ function Resolve-ProjectPathInteractive([string]$CurrentProj) {
       Write-UiLine ("  $DIM   [{0}] {1}$RST" -f ($i + 1), $found[$i])
     }
     Write-UiLine ''
-    Write-UiLine "  $DIM   Enter = [1] kullan ve güncelle | numara | C = özel yol | B = klasör seç | G = Desktop'a klonla$RST"
+    Write-UiLine "  $DIM   Enter=[1]  numara  C=yol  B=klasör  G=klonla$RST"
     Write-Ui '  seçim> '
     $choice = (Read-Host).Trim()
     if ([string]::IsNullOrWhiteSpace($choice) -or $choice -eq '1') {
@@ -319,7 +319,7 @@ function Resolve-ProjectPathInteractive([string]$CurrentProj) {
     # fall through to custom path prompt
   } else {
     Write-UiLine "  $YEL   Yerel Duendee bulunamadı.$RST"
-    Write-UiLine "  $DIM   Enter = Desktop'a klonla ($desktop\$($script:DuendeeCloneName))$RST"
+    Write-UiLine "  $DIM   Enter = Desktop'a klonla$RST"
     Write-UiLine "  $DIM   C = özel klasör yolu | B = klasör seçici | yol yaz = o dizine klonla/kullan$RST"
     Write-Ui '  seçim> '
     $choice = (Read-Host).Trim().Trim('"')
@@ -424,7 +424,7 @@ function Ensure-ToolConfig {
 }
 
 function Test-UninstallAction([string]$Name) {
-  return $Name -match '^(?i)(7|uninstall|kaldir|kaldır|remove)$'
+  return $Name -match '^(?i)(6|uninstall|kaldir|kaldır|remove)$'
 }
 
 $script:UninstallCli = Test-UninstallAction $Action
@@ -1185,8 +1185,8 @@ function Show-Menu {
     default { "$DIM[KAPALI]$RST" }
   }
   $browserLabel = if (Test-BrowserOpens) { "$GRN[TARAYICI]$RST" } else { "$DIM[TARAYICI KAPALI]$RST" }
-  Write-UiLine "  $YEL$BOLD[6]$RST  ${SKY}Cihaz Açılışında Otomatik Başlat$RST  $autoLabel  $browserLabel"
-  Write-UiLine "  $YEL$BOLD[7]$RST  ${SKY}Aracı Cihazdan Kaldır$RST"
+  Write-UiLine "  $YEL$BOLD[5]$RST  ${SKY}Cihaz Açılışında Otomatik Başlat$RST  $autoLabel  $browserLabel"
+  Write-UiLine "  $YEL$BOLD[6]$RST  ${SKY}Aracı Cihazdan Kaldır$RST"
   Write-UiLine ''
   Write-UiLine "$DIM      Kapatmak için [4].$RST"
   Write-UiLine ''
@@ -1650,7 +1650,7 @@ function Invoke-Start {
       Write-UiLine '  Varsayılan tarayıcıda açılıyor...'
       Start-Process $url
     } else {
-      Write-UiLine "  $DIM   Tarayıcı kapalı. Açmak için [6] > [B].$RST"
+      Write-UiLine "  $DIM   Tarayıcı kapalı. [5] > [B].$RST"
     }
     Send-TunnelWhatsApp -PublicUrl $url
   }
@@ -1751,24 +1751,15 @@ function Invoke-Autostart {
   Write-UiLine ''
   $mode = Get-AutoMode
   switch ($mode) {
-    'tool' {
-      Write-UiLine "  $DIM   Durum:$RST $GRN$BOLD[TOOL]$RST"
-      Write-UiLine "  $DIM   Cihaz açıldığında yalnızca tool açılır. Tünel servisini [1] ile başlatırsın.$RST"
-    }
-    'tunnel' {
-      Write-UiLine "  $DIM   Durum:$RST $GRN$BOLD[TOOL+TÜNEL]$RST"
-      Write-UiLine "  $DIM   Cihaz açıldığında tool açılır ve tünel servisi kendiliğinden başlar.$RST"
-    }
-    default {
-      Write-UiLine "  $DIM   Durum:$RST $RED$BOLD[KAPALI]$RST"
-      Write-UiLine "  $DIM   Cihaz açıldığında tool açılmıyor.$RST"
-    }
+    'tool' { Write-UiLine "  $DIM   Durum:$RST $GRN$BOLD[TOOL]$RST" }
+    'tunnel' { Write-UiLine "  $DIM   Durum:$RST $GRN$BOLD[TOOL+TÜNEL]$RST" }
+    default { Write-UiLine "  $DIM   Durum:$RST $RED$BOLD[KAPALI]$RST" }
   }
   Write-UiLine ''
   if (Test-BrowserOpens) {
-    Write-UiLine "  $DIM   Tarayıcı:$RST $GRN$BOLD[AÇIK]$RST  $DIM   Tünel başlayınca yayın linki açılır.$RST"
+    Write-UiLine "  $DIM   Tarayıcı:$RST $GRN$BOLD[AÇIK]$RST"
   } else {
-    Write-UiLine "  $DIM   Tarayıcı:$RST $RED$BOLD[KAPALI]$RST  $DIM   Tünel başlayınca tarayıcı açılmaz.$RST"
+    Write-UiLine "  $DIM   Tarayıcı:$RST $RED$BOLD[KAPALI]$RST"
   }
   Write-UiLine ''
   Write-UiLine "  $YEL$BOLD[T]$RST  ${SKY}Yalnızca tool'u otomatik başlat$RST"
@@ -2039,8 +2030,8 @@ function Get-UninstallLines([string]$Mode) {
   if (Test-Path -LiteralPath $stable) { [void]$lines.Add("Sabit başlatıcı: $stable") }
   [void]$lines.Add('Açılış kaydı: HKCU\...\Run\DuendeeTunnelTool')
   if ($Mode -eq '2') {
-    [void]$lines.Add('Node.js (bu cihazdaki kurulum; diğer programlar da etkilenir)')
-    [void]$lines.Add('cloudflared (bu cihazdaki kurulum)')
+    [void]$lines.Add('Node.js')
+    [void]$lines.Add('cloudflared')
   }
   return $lines
 }
@@ -2054,9 +2045,7 @@ function Invoke-Uninstall {
   Write-UiLine ''
   if ($Mode -notin @('1', '2')) {
     Write-UiLine "  $YEL$BOLD[1]$RST  ${SKY}Yalnızca Duendee Tunnel Tool$RST"
-    Write-UiLine "  $DIM      Kurulum, komut, PATH, kısayol ve otomatik başlatma silinir.$RST"
-    Write-UiLine "  $YEL$BOLD[2]$RST  ${SKY}Tool ile birlikte Node.js ve cloudflared$RST"
-    Write-UiLine "  $DIM      [1] ile aynı, artı bu cihazdaki Node.js ve cloudflared.$RST"
+    Write-UiLine "  $YEL$BOLD[2]$RST  ${SKY}Tool, Node.js ve cloudflared$RST"
     Write-UiLine "  $YEL$BOLD[X]$RST  ${SKY}Vazgeç$RST"
     Write-UiLine ''
     Write-Ui "$CYN   Seçim [1/2/X]: $RST"
@@ -2221,12 +2210,12 @@ try {
     '2' { Invoke-Status; exit 0 }
     '3' { Invoke-CopyLink; exit 0 }
     '4' { Invoke-Cancel; exit 0 }
-    '6' { Invoke-Autostart; exit 0 }
+    '5' { Invoke-Autostart; exit 0 }
   }
 
   while ($true) {
     Show-Menu
-    $choice = Get-Choice '123467'
+    $choice = Get-Choice '123456'
     Write-UiLine ''
     try {
       switch ($choice) {
@@ -2234,8 +2223,8 @@ try {
         '2' { Invoke-Status }
         '3' { Invoke-CopyLink }
         '4' { Invoke-Cancel }
-        '6' { Invoke-Autostart }
-        '7' { Invoke-Uninstall }
+        '5' { Invoke-Autostart }
+        '6' { Invoke-Uninstall }
       }
     } catch {
       Write-UiLine "  $RED$BOLD[HATA]$RST $($_.Exception.Message)"

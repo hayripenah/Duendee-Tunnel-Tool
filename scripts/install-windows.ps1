@@ -47,13 +47,13 @@ function Invoke-NpmInstallSafe {
   try {
     Push-Location $WorkDir
     try {
-      Write-Host "Running npm install (WhatsApp helper)..."
+      Write-Host "npm install..."
       & cmd.exe /c "npm.cmd install --omit=dev"
       if ($LASTEXITCODE -ne 0) {
         & cmd.exe /c "npm.cmd install"
       }
       if ($LASTEXITCODE -ne 0) {
-        Write-Host "WARNING: npm install failed (exit $LASTEXITCODE). WhatsApp send may need: npm install in $WorkDir"
+        Write-Host "WARNING: npm install failed ($LASTEXITCODE)."
       }
     } finally {
       Pop-Location
@@ -221,7 +221,7 @@ try {
   $extracted = Get-ToolTree $tmp
   $hasStable = $extracted -and (Test-Path -LiteralPath (Join-Path $extracted.FullName 'windows\stable-launch.ps1'))
   if (-not $hasStable) {
-    Write-Host "Release package has no current launcher. Downloading main source..."
+    Write-Host "Güncel sürüm indiriliyor..."
     $mainZip = Join-Path $tmp 'main.zip'
     Invoke-WebRequest -Uri "https://github.com/$Repo/archive/refs/heads/main.zip" -OutFile $mainZip -UseBasicParsing
     $mainDir = Join-Path $tmp 'main-src'
@@ -259,13 +259,13 @@ try {
   if (-not (Test-Path $cfgEx)) { throw 'Portable zip missing config.example.json' }
   if (-not (Test-Path $cfg)) {
     Copy-Item $cfgEx $cfg -Force
-    Write-Host "Created config.json from example - first run will ask for projectPath if needed."
+    Write-Host "config.json oluşturuldu."
   }
 
   $nodeZip = Join-Path $tmp 'node-win.zip'
   $nodeHome = Join-Path $env:LOCALAPPDATA 'DuendeeTunnel\node'
   if (-not ((Get-Command node -ErrorAction SilentlyContinue) -or (Test-Path (Join-Path $env:ProgramFiles 'nodejs\node.exe')))) {
-    Write-Host "Node.js kuruluyor (hesap gerekmez)..."
+    Write-Host "Node.js kuruluyor..."
     try {
       Invoke-WebRequest -Uri 'https://nodejs.org/dist/v22.14.0/node-v22.14.0-win-x64.zip' -OutFile $nodeZip -UseBasicParsing
       if (Test-Path $nodeHome) { Remove-Item $nodeHome -Recurse -Force }
@@ -279,7 +279,7 @@ try {
   }
   $cfExe = Join-Path $env:USERPROFILE '.cloudflared\cloudflared.exe'
   if (-not ((Get-Command cloudflared -ErrorAction SilentlyContinue) -or (Test-Path $cfExe))) {
-    Write-Host "cloudflared kuruluyor (hesap gerekmez)..."
+    Write-Host "cloudflared kuruluyor..."
     try {
       New-Item -ItemType Directory -Force -Path (Split-Path $cfExe) | Out-Null
       $cfArch = if ($env:PROCESSOR_ARCHITECTURE -match 'ARM64') { 'arm64' } else { 'amd64' }
@@ -371,13 +371,7 @@ Write-Host "Install OK ($($info.Tag))"
 Write-Host "  Location : $InstallDir"
 Write-Host "  Shim     : $(if ($shimInfo) { $shimInfo.Shim } else { Join-Path $BinDir 'duendee-tunnel.cmd' })"
 Write-Host "  Run      : duendee-tunnel"
-if ($cmdCheck) {
-  Write-Host "  Verified : $($cmdCheck.Source)  (same terminal OK)"
-} else {
-  Write-Host "  Note     : run: `$env:Path = '$BinDir;' + `$env:Path; duendee-tunnel"
+if (-not $cmdCheck) {
+  Write-Host "  PATH     : `$env:Path = '$BinDir;' + `$env:Path"
 }
-Write-Host ""
-Write-Host "Same-session one-liner:"
-Write-Host "  irm https://raw.githubusercontent.com/hayripenah/Duendee-Tunnel-Tool/main/scripts/install-windows.ps1 | iex; duendee-tunnel"
-Write-Host "  Edit     : $InstallDir\config.json"
-Write-Host "  WhatsApp : first send shows QR (WhatsApp > Linked Devices); session saved in .whatsapp-session"
+Write-Host "  Config   : $InstallDir\config.json"

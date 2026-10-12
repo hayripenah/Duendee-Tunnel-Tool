@@ -10,13 +10,10 @@ os="$(uname -s 2>/dev/null || echo unknown)"
 case "$os" in
   Linux*|linux*|Darwin*|darwin*)
     curl -fsSL "${RAW_BASE}/scripts/install-linux.sh" | bash
-    echo
-    echo "Next (same terminal): export PATH=\"\$HOME/.local/bin:\$PATH\"; hash -r; duendee-tunnel"
+    echo "Next: export PATH=\"\$HOME/.local/bin:\$PATH\"; hash -r; duendee-tunnel"
     ;;
   MINGW*|MSYS*|CYGWIN*)
-    echo "Windows detected in a Unix shell."
-    echo "Prefer PowerShell (recommended):"
-    echo "  irm https://raw.githubusercontent.com/hayripenah/Duendee-Tunnel-Tool/main/scripts/install-windows.ps1 | iex"
+    echo "Windows: irm https://raw.githubusercontent.com/hayripenah/Duendee-Tunnel-Tool/main/scripts/install-windows.ps1 | iex"
     if command -v powershell.exe >/dev/null 2>&1; then
       powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
         "irm https://raw.githubusercontent.com/hayripenah/Duendee-Tunnel-Tool/main/scripts/install-windows.ps1 | iex"

@@ -334,7 +334,7 @@ resolve_project_path_interactive() {
       echo -e "  ${DIM}   [$((i + 1))] ${found[$i]}${RST}" >&2
     done
     echo >&2
-    echo -e "  ${DIM}   Enter = [1] kullan ve güncelle | numara | C = özel yol | B = klasör seç | G = Desktop'a klonla${RST}" >&2
+    echo -e "  ${DIM}   Enter=[1]  numara  C=yol  B=klasör  G=klonla${RST}" >&2
     printf '  seçim> '
     read -r choice
     choice="${choice//\"/}"
@@ -365,7 +365,7 @@ resolve_project_path_interactive() {
     fi
   else
     echo -e "  ${YEL}   Yerel Duendee bulunamadı.${RST}" >&2
-    echo -e "  ${DIM}   Enter = Desktop'a klonla (${desktop}/${DUENDEE_CLONE_NAME})${RST}" >&2
+    echo -e "  ${DIM}   Enter = Desktop'a klonla${RST}" >&2
     echo -e "  ${DIM}   C = özel klasör yolu | B = klasör seçici | yol yaz = o dizine klonla/kullan${RST}" >&2
     printf '  seçim> '
     read -r choice
@@ -1090,11 +1090,11 @@ show_menu() {
   echo -e "  ${YEL}${BOLD}[3]${RST}  ${SKY}Yayın Linkini Kopyala${RST}"
   echo -e "  ${YEL}${BOLD}[4]${RST}  ${SKY}Tünel Servisini İptal Et${RST}"
   case "${AUTOMODE}" in
-    tool) echo -e "  ${YEL}${BOLD}[6]${RST}  ${SKY}Cihaz Açılışında Otomatik Başlat${RST}  ${GRN}[TOOL]${RST}  $(browser_mark)" ;;
-    tunnel) echo -e "  ${YEL}${BOLD}[6]${RST}  ${SKY}Cihaz Açılışında Otomatik Başlat${RST}  ${GRN}[TOOL+TÜNEL]${RST}  $(browser_mark)" ;;
-    *) echo -e "  ${YEL}${BOLD}[6]${RST}  ${SKY}Cihaz Açılışında Otomatik Başlat${RST}  ${DIM}[KAPALI]${RST}  $(browser_mark)" ;;
+    tool) echo -e "  ${YEL}${BOLD}[5]${RST}  ${SKY}Cihaz Açılışında Otomatik Başlat${RST}  ${GRN}[TOOL]${RST}  $(browser_mark)" ;;
+    tunnel) echo -e "  ${YEL}${BOLD}[5]${RST}  ${SKY}Cihaz Açılışında Otomatik Başlat${RST}  ${GRN}[TOOL+TÜNEL]${RST}  $(browser_mark)" ;;
+    *) echo -e "  ${YEL}${BOLD}[5]${RST}  ${SKY}Cihaz Açılışında Otomatik Başlat${RST}  ${DIM}[KAPALI]${RST}  $(browser_mark)" ;;
   esac
-  echo -e "  ${YEL}${BOLD}[7]${RST}  ${SKY}Aracı Cihazdan Kaldır${RST}"
+  echo -e "  ${YEL}${BOLD}[6]${RST}  ${SKY}Aracı Cihazdan Kaldır${RST}"
   echo
   echo -e "${DIM}      Kapatmak için [4].${RST}"
   echo
@@ -1558,7 +1558,7 @@ os.execvp(cmd[0], cmd)
       echo "  Varsayılan tarayıcıda açılıyor..."
       open_url "$URL"
     else
-      echo -e "  ${DIM}   Tarayıcı kapalı. Açmak için [6] > [B].${RST}"
+      echo -e "  ${DIM}   Tarayıcı kapalı. [5] > [B].${RST}"
     fi
     send_tunnel_whatsapp "$URL"
   fi
@@ -1835,24 +1835,15 @@ do_autostart() {
   echo
   autostate
   case "$AUTOMODE" in
-    tool)
-      echo -e "  ${DIM}   Durum:${RST} ${GRN}${BOLD}[TOOL]${RST}"
-      echo -e "  ${DIM}   Cihaz açıldığında yalnızca tool açılır. Tünel servisini [1] ile başlatırsın.${RST}"
-      ;;
-    tunnel)
-      echo -e "  ${DIM}   Durum:${RST} ${GRN}${BOLD}[TOOL+TÜNEL]${RST}"
-      echo -e "  ${DIM}   Cihaz açıldığında tool açılır ve tünel servisi kendiliğinden başlar.${RST}"
-      ;;
-    *)
-      echo -e "  ${DIM}   Durum:${RST} ${RED}${BOLD}[KAPALI]${RST}"
-      echo -e "  ${DIM}   Cihaz açıldığında tool açılmıyor.${RST}"
-      ;;
+    tool) echo -e "  ${DIM}   Durum:${RST} ${GRN}${BOLD}[TOOL]${RST}" ;;
+    tunnel) echo -e "  ${DIM}   Durum:${RST} ${GRN}${BOLD}[TOOL+TÜNEL]${RST}" ;;
+    *) echo -e "  ${DIM}   Durum:${RST} ${RED}${BOLD}[KAPALI]${RST}" ;;
   esac
   echo
   if browser_opens; then
-    echo -e "  ${DIM}   Tarayıcı:${RST} ${GRN}${BOLD}[AÇIK]${RST}  ${DIM}Tünel başlayınca yayın linki açılır.${RST}"
+    echo -e "  ${DIM}   Tarayıcı:${RST} ${GRN}${BOLD}[AÇIK]${RST}"
   else
-    echo -e "  ${DIM}   Tarayıcı:${RST} ${RED}${BOLD}[KAPALI]${RST}  ${DIM}Tünel başlayınca tarayıcı açılmaz.${RST}"
+    echo -e "  ${DIM}   Tarayıcı:${RST} ${RED}${BOLD}[KAPALI]${RST}"
   fi
   echo
   echo -e "  ${YEL}${BOLD}[T]${RST}  ${SKY}Yalnızca tool'u otomatik başlat${RST}"
@@ -1916,7 +1907,7 @@ do_autostart() {
 
 is_uninstall_arg() {
   case "${1:-}" in
-    7|uninstall|kaldir|kaldır|remove) return 0 ;;
+    6|uninstall|kaldir|kaldır|remove) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -2069,8 +2060,8 @@ print_uninstall_plan() {
   fi
   echo -e "  ${DIM}   - Masaüstü kısayolu: $(desktop_dir)/Duendee Tunnel Tool.desktop${RST}"
   if [[ "$mode" == "2" ]]; then
-    echo -e "  ${DIM}   - Node.js (bu cihazdaki kurulum; diğer programlar da etkilenir)${RST}"
-    echo -e "  ${DIM}   - cloudflared (bu cihazdaki kurulum)${RST}"
+    echo -e "  ${DIM}   - Node.js${RST}"
+    echo -e "  ${DIM}   - cloudflared${RST}"
   fi
 }
 
@@ -2083,9 +2074,7 @@ do_uninstall() {
   echo
   if [[ "$mode" != "1" && "$mode" != "2" ]]; then
     echo -e "  ${YEL}${BOLD}[1]${RST}  ${SKY}Yalnızca Duendee Tunnel Tool${RST}"
-    echo -e "  ${DIM}      Kurulum, komut, PATH ve otomatik başlatma silinir.${RST}"
-    echo -e "  ${YEL}${BOLD}[2]${RST}  ${SKY}Tool ile birlikte Node.js ve cloudflared${RST}"
-    echo -e "  ${DIM}      [1] ile aynı, artı bu cihazdaki Node.js ve cloudflared.${RST}"
+    echo -e "  ${YEL}${BOLD}[2]${RST}  ${SKY}Tool, Node.js ve cloudflared${RST}"
     echo -e "  ${YEL}${BOLD}[X]${RST}  ${SKY}Vazgeç${RST}"
     echo
     printf "%b" "${CYN}   Seçim [1/2/X]: ${RST}"
@@ -2215,7 +2204,7 @@ elif [[ "${1:-}" != "" ]]; then
     2) do_status; exit 0 ;;
     3) do_copylink; exit 0 ;;
     4) do_cancel; exit 0 ;;
-    6) do_autostart; exit 0 ;;
+    5) do_autostart; exit 0 ;;
   esac
 fi
 
@@ -2228,8 +2217,8 @@ while true; do
     2) do_status ;;
     3) do_copylink ;;
     4) do_cancel ;;
-    6) do_autostart ;;
-    7) do_uninstall ;;
+    5) do_autostart ;;
+    6) do_uninstall ;;
     *) ;;
   esac
 done

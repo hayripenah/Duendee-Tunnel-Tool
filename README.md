@@ -113,15 +113,15 @@ Shared pieces (repo root):
 1. Start tunnel service  
 2. Check status  
 3. Copy public link  
-4. **Cancel tunnel** (stops the shared tunnel and the dev server on the machine that started it)  
-6. Device-start autostart — **[T]** open only the tool, **[S]** open the tool and start the tunnel service, **[K]** turn it off  
-7. Uninstall — **[1]** tool only, **[2]** tool plus Node.js and cloudflared. Both paths ask **Emin misiniz?** before deleting anything.
+4. Cancel tunnel  
+5. Autostart — **[T]** tool, **[S]** tool and tunnel, **[K]** off  
+6. Uninstall — **[1]** tool, **[2]** tool plus Node.js and cloudflared
 
-Closing the tool window leaves the tunnel running. **[4]** stops it.
+Closing the window leaves the tunnel running. **[4]** stops it.
 
 ## Uninstall
 
-From the menu, choose **[7]**. From a terminal:
+From the menu, choose **[6]**. From a terminal:
 
 ```text
 duendee-tunnel uninstall
@@ -129,7 +129,7 @@ duendee-tunnel uninstall 1
 duendee-tunnel uninstall 2
 ```
 
-`1` removes the tool copy you are running, the installed copy (`%LOCALAPPDATA%\DuendeeTunnelTool` or `~/.local/share/duendee-tunnel-tool`), the `duendee-tunnel` command, PATH entry, shortcut, and autostart. `2` does the same and also removes Node.js and cloudflared from this device. Passing `1` or `2` still asks for confirmation. `duendee-tunnel 7` opens the same prompt.
+`1` removes the tool. `2` also removes Node.js and cloudflared. Both ask for confirmation. `duendee-tunnel 6` opens the same prompt.
 
 ## Build portable packages (maintainers)
 
