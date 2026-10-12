@@ -166,34 +166,67 @@ function Save-PublicGitHubTree([string]$RepoUrl, [string]$Target) {
   return $ok
 }
 
-function Update-DuendeeRepoSafe([string]$Path) {
-  if (-not (Test-Path -LiteralPath (Join-Path $Path '.git'))) { return }
-  if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return }
-  try {
-    $env:GIT_TERMINAL_PROMPT = '0'
-    $gh = Get-Command gh -ErrorAction SilentlyContinue
-    $cred = @('-c', 'credential.helper=')
-    if ($gh) {
-      & $gh.Source auth status 1>$null 2>$null
-      if ($LASTEXITCODE -eq 0) { $cred = @('-c', 'credential.helper=!gh auth git-credential') }
-    }
-    $dirty = (& git @cred -C $Path status --porcelain 2>$null)
-    if ($dirty) {
-      Write-UiLine "  $DIM   Git: yerel değişiklikler var — pull atlandı ($Path)$RST"
-      return
-    }
-    Write-UiLine "  $DIM   Duendee güncelleniyor (git fetch/pull --ff-only)...$RST"
-    $env:GIT_TERMINAL_PROMPT = '0'
-    & git @cred -C $Path fetch --quiet 2>$null | Out-Null
-    & git @cred -C $Path pull --ff-only --quiet 2>$null | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-      Write-UiLine "  $GRN   Repo güncel.$RST"
-    } else {
-      Write-UiLine "  $YEL   Pull atlandı/başarısız (ff-only). Mevcut kopya kullanılacak.$RST"
-    }
-  } catch {
-    Write-UiLine "  $YEL   Git güncelleme atlandı: $($_.Exception.Message)$RST"
+function Update-DuendeeSnapshot([string]$Path) {
+  $stageParent = Join-Path $env:TEMP ("duendee-upd-" + [guid]::NewGuid().ToString('n'))
+  New-Item -ItemType Directory -Force -Path $stageParent | Out-Null
+  $stage = Join-Path $stageParent 'src'
+  if (-not (Save-PublicGitHubTree -RepoUrl $script:DuendeeRepoUrl -Target $stage)) {
+    Remove-Item -LiteralPath $stageParent -Recurse -Force -ErrorAction SilentlyContinue
+    Write-UiLine "  $YEL   Duendee güncellenemedi.$RST"
+    return
   }
+  $keepRoot = Join-Path $stageParent 'keep'
+  New-Item -ItemType Directory -Force -Path $keepRoot | Out-Null
+  foreach ($item in @('.env', '.env.local', 'node_modules')) {
+    $src = Join-Path $Path $item
+    if (Test-Path -LiteralPath $src) {
+      Move-Item -LiteralPath $src -Destination (Join-Path $keepRoot $item) -Force
+    }
+  }
+  Get-ChildItem -LiteralPath $Path -Force | Where-Object { $_.Name -ne '.git' } | ForEach-Object {
+    Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  Get-ChildItem -LiteralPath $stage -Force | ForEach-Object {
+    Move-Item -LiteralPath $_.FullName -Destination (Join-Path $Path $_.Name) -Force
+  }
+  foreach ($item in @('.env', '.env.local', 'node_modules')) {
+    $saved = Join-Path $keepRoot $item
+    if (Test-Path -LiteralPath $saved) {
+      $dest = Join-Path $Path $item
+      if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Recurse -Force }
+      Move-Item -LiteralPath $saved -Destination $dest -Force
+    }
+  }
+  Remove-Item -LiteralPath $stageParent -Recurse -Force -ErrorAction SilentlyContinue
+  Write-UiLine "  $GRN   Repo güncel.$RST"
+}
+
+function Update-DuendeeRepoSafe([string]$Path) {
+  if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return }
+  Write-UiLine "  $DIM   Duendee güncelleniyor...$RST"
+  $gitOk = $false
+  if ((Test-Path -LiteralPath (Join-Path $Path '.git')) -and (Get-Command git -ErrorAction SilentlyContinue)) {
+    try {
+      $env:GIT_TERMINAL_PROMPT = '0'
+      $gh = Get-Command gh -ErrorAction SilentlyContinue
+      $cred = @('-c', 'credential.helper=')
+      if ($gh) {
+        & $gh.Source auth status 1>$null 2>$null
+        if ($LASTEXITCODE -eq 0) { $cred = @('-c', 'credential.helper=!gh auth git-credential') }
+      }
+      & git @cred -C $Path fetch --depth 1 origin main 2>$null | Out-Null
+      if ($LASTEXITCODE -ne 0) { & git @cred -C $Path fetch origin main 2>$null | Out-Null }
+      if ($LASTEXITCODE -eq 0) {
+        & git @cred -C $Path reset --hard origin/main 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) { $gitOk = $true }
+      }
+    } catch {}
+  }
+  if ($gitOk) {
+    Write-UiLine "  $GRN   Repo güncel.$RST"
+    return
+  }
+  Update-DuendeeSnapshot -Path $Path
 }
 
 function Find-LocalDuendeeRepos {
@@ -1456,13 +1489,6 @@ function Invoke-Start {
     Write-UiLine "  $GRN   Aktif tünel var.$RST"
     Set-Clipboard -Value $adoptUrl
     Write-UiLine "  $BLUE$BOLD     $adoptUrl$RST"
-    if (Test-LinkAlreadySent $adoptUrl) {
-      Write-UiLine "  $GRN   Bu adresin WhatsApp mesajı duruyor.$RST"
-    } else {
-      $env:DT_WA_KEEP_EXISTING = '1'
-      Send-TunnelWhatsApp -PublicUrl $adoptUrl
-      Remove-Item Env:DT_WA_KEEP_EXISTING -ErrorAction SilentlyContinue
-    }
     Complete-Action
     return
   }
@@ -1494,13 +1520,6 @@ function Invoke-Start {
     }
     Set-Clipboard -Value $existing
     Write-UiLine "  $BLUE$BOLD     $existing$RST"
-    if (Test-LinkAlreadySent $existing) {
-      Write-UiLine "  $GRN   Bu adresin WhatsApp mesajı duruyor.$RST"
-    } else {
-      $env:DT_WA_KEEP_EXISTING = '1'
-      Send-TunnelWhatsApp -PublicUrl $existing
-      Remove-Item Env:DT_WA_KEEP_EXISTING -ErrorAction SilentlyContinue
-    }
     Complete-Action
     return
   }

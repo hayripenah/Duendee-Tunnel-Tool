@@ -60,7 +60,7 @@ On Windows, keep using the PowerShell one-liner above.
 On first run the tool copies `config.example.json` → `config.json`, then resolves `projectPath`:
 
 1. Searches common locations for a local **Duendee** / **Duendee-main** repo (Desktop, home, Documents, `YEK/Cursor`, git remotes matching `hayripenah/Duendee`).
-2. If found: offers that path (Enter accepts #1) and runs a safe `git pull --ff-only` when the tree is clean.
+2. If found: offers that path (Enter accepts #1). Every later launch moves that repo to the latest `origin/main`.
 3. If not found: **Enter clones** `https://github.com/hayripenah/Duendee.git` to **Desktop/`Duendee-main`** by default.
 4. Always allows a custom directory (typed path; Windows folder browser; Linux `zenity`/`kdialog` when available).
 
@@ -71,6 +71,8 @@ Override with env vars: `DT_DUENDEE_DIR`, `DT_DUENDEE_REPO_URL`, `DT_DUENDEE_CLO
 ```text
 duendee-tunnel
 ```
+
+Each launch updates this tool from GitHub `main` and restarts it when that branch has moved.
 
 From a git clone:
 

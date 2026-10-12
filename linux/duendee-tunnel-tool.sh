@@ -212,20 +212,50 @@ fetch_public_github() {
   fetch_private_github "$repo" "$target"
 }
 
+refresh_duendee_snapshot() {
+  local path="$1"
+  local tmp stage item
+  tmp="$(mktemp -d)"
+  stage="${tmp}/stage"
+  if ! fetch_public_github "$DUENDEE_REPO_URL" "$stage"; then
+    rm -rf "$tmp"
+    echo -e "  ${YEL}   Duendee güncellenemedi.${RST}" >&2
+    return 1
+  fi
+  mkdir -p "${tmp}/keep"
+  for item in .env .env.local node_modules; do
+    if [[ -e "${path}/${item}" ]]; then
+      mv "${path}/${item}" "${tmp}/keep/${item}"
+    fi
+  done
+  find "$path" -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+  shopt -s dotglob
+  mv "${stage}/"* "${path}/"
+  shopt -u dotglob
+  for item in .env .env.local node_modules; do
+    if [[ -e "${tmp}/keep/${item}" ]]; then
+      rm -rf "${path}/${item}"
+      mv "${tmp}/keep/${item}" "${path}/${item}"
+    fi
+  done
+  rm -rf "$tmp"
+  echo -e "  ${GRN}   Repo güncel.${RST}" >&2
+}
+
 update_duendee_safe() {
   local path="$1"
-  [[ -d "$path/.git" ]] || return 0
-  command -v git >/dev/null 2>&1 || return 0
-  if [[ -n "$(git_with_gh -C "$path" status --porcelain 2>/dev/null || true)" ]]; then
-    echo -e "  ${DIM}   Git: yerel değişiklikler var — pull atlandı (${path})${RST}" >&2
-    return 0
+  [[ -d "$path" ]] || return 0
+  echo -e "  ${DIM}   Duendee güncelleniyor...${RST}" >&2
+  if [[ -d "$path/.git" ]] && command -v git >/dev/null 2>&1; then
+    if git_with_gh -C "$path" fetch --depth 1 origin main >/dev/null 2>&1 \
+      || git_with_gh -C "$path" fetch origin main >/dev/null 2>&1; then
+      if git_with_gh -C "$path" reset --hard origin/main >/dev/null 2>&1; then
+        echo -e "  ${GRN}   Repo güncel.${RST}" >&2
+        return 0
+      fi
+    fi
   fi
-  echo -e "  ${DIM}   Duendee güncelleniyor (git fetch/pull --ff-only)...${RST}" >&2
-  if git_with_gh -C "$path" fetch --quiet 2>/dev/null && git_with_gh -C "$path" pull --ff-only --quiet 2>/dev/null; then
-    echo -e "  ${GRN}   Repo güncel.${RST}" >&2
-  else
-    echo -e "  ${YEL}   Pull atlandı/başarısız (ff-only). Mevcut kopya kullanılacak.${RST}" >&2
-  fi
+  refresh_duendee_snapshot "$path" || true
 }
 
 find_local_duendee() {
@@ -1326,12 +1356,6 @@ do_start() {
       echo -e "  ${GRN}   Aktif tünel var.${RST}"
       echo -e "${BLUE}${BOLD}     ${URL}${RST}"
       copy_clipboard "$URL" >/dev/null 2>&1 || true
-      if link_already_sent "$URL"; then
-        echo -e "  ${GRN}   Bu adresin WhatsApp mesajı duruyor.${RST}"
-      else
-        DT_WA_KEEP_EXISTING=1 send_tunnel_whatsapp "$URL"
-        unset DT_WA_KEEP_EXISTING
-      fi
       echo
       wait_key
       return
@@ -1368,12 +1392,6 @@ do_start() {
     fi
     echo -e "${BLUE}${BOLD}     ${URL}${RST}"
     copy_clipboard "$URL" >/dev/null 2>&1 || true
-    if link_already_sent "$URL"; then
-      echo -e "  ${GRN}   Bu adresin WhatsApp mesajı duruyor.${RST}"
-    else
-      DT_WA_KEEP_EXISTING=1 send_tunnel_whatsapp "$URL"
-      unset DT_WA_KEEP_EXISTING
-    fi
     echo
     wait_key
     return

@@ -462,25 +462,31 @@ function git(root, args) {
 async function update(root) {
   if (process.env.DT_SKIP_UPDATE === '1') return
   if (fs.existsSync(path.join(root, '.git'))) {
-    let dirty = ''
-    try { dirty = git(root, ['status', '--porcelain']).trim() } catch { return }
-    if (dirty) return
-    let before = ''
-    try { before = git(root, ['rev-parse', 'HEAD']).trim() } catch { return }
     try {
-      git(root, ['fetch', '--quiet', 'origin', 'main'])
-      git(root, ['pull', '--ff-only', '--quiet', 'origin', 'main'])
-    } catch {
-      return
-    }
-    let after = before
-    try { after = git(root, ['rev-parse', 'HEAD']).trim() } catch { /* keep before */ }
-    if (after && before && after !== before) {
+      const before = git(root, ['rev-parse', 'HEAD']).trim()
+      try {
+        git(root, ['fetch', '--depth', '1', '--quiet', 'origin', 'main'])
+      } catch {
+        git(root, ['fetch', '--quiet', 'origin', 'main'])
+      }
+      const remote = git(root, ['rev-parse', 'origin/main']).trim()
+      if (!remote || remote === before) return
+      git(root, ['reset', '--hard', 'origin/main'])
       process.stderr.write('Tool güncellendi, yeniden açılıyor.\n')
       process.exit(20)
+    } catch {
+      process.stderr.write('Tool güncellenemedi.\n')
+      return
     }
-    return
   }
+  try {
+    await updateFromArchive(root)
+  } catch {
+    process.stderr.write('Tool güncellenemedi.\n')
+  }
+}
+
+async function updateFromArchive(root) {
   const res = await fetch(`https://api.github.com/repos/${REPO}/commits/main`, {
     headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'DuendeeTunnelTool' },
     signal: AbortSignal.timeout(20000),
@@ -500,7 +506,7 @@ async function update(root) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'duendee-tool-'))
   const tgz = path.join(tmp, 'src.tgz')
   fs.writeFileSync(tgz, Buffer.from(await pack.arrayBuffer()))
-  execFileSync('tar', ['-xzf', tgz, '-C', tmp])
+  execFileSync('tar', ['-xzf', tgz, '-C', tmp], { stdio: 'ignore' })
   const extracted = fs.readdirSync(tmp, { withFileTypes: true })
     .filter((ent) => ent.isDirectory())
     .map((ent) => path.join(tmp, ent.name))[0]
