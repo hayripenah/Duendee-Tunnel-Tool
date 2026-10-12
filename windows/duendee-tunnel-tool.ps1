@@ -696,13 +696,10 @@ function Send-TunnelWhatsApp([string]$PublicUrl) {
 
 function Invoke-RetractWhatsApp {
   $waJs = Join-Path $Root 'scripts\send-whatsapp.js'
-  $sentFile = Join-Path (Get-WaSessionDir) 'sent-links.json'
   $sessionCreds = Join-Path (Get-WaSessionDir) 'creds.json'
-  if (-not (Test-Path -LiteralPath $waJs) -or -not (Test-Path -LiteralPath $sentFile) -or -not (Test-Path -LiteralPath $sessionCreds)) {
+  if (-not (Test-Path -LiteralPath $waJs) -or -not (Test-Path -LiteralPath $sessionCreds)) {
     return
   }
-  $raw = Get-Content -LiteralPath $sentFile -Raw -ErrorAction SilentlyContinue
-  if ([string]::IsNullOrWhiteSpace($raw) -or $raw.Trim() -eq '[]') { return }
   $node = Find-NodeExe
   if (-not $node) { return }
   if (-not (Ensure-WhatsAppDeps)) { return }
@@ -716,7 +713,7 @@ function Invoke-RetractWhatsApp {
   }
   try {
     $env:DT_WA_ACTION = 'retract'
-    if (-not $env:DT_WA_TIMEOUT_MS) { $env:DT_WA_TIMEOUT_MS = '45000' }
+    if (-not $env:DT_WA_TIMEOUT_MS) { $env:DT_WA_TIMEOUT_MS = '90000' }
     & $node $waJs
     if ($LASTEXITCODE -ne 0) {
       Write-UiLine "  $YEL   Eski WhatsApp link mesaji kaldirilamadi (çıkış $LASTEXITCODE).$RST"
@@ -900,13 +897,10 @@ function Start-HiddenCmd([string]$Command) {
 
 function Start-DetachedRetract {
   $waJs = Join-Path $Root 'scripts\send-whatsapp.js'
-  $sentFile = Join-Path (Get-WaSessionDir) 'sent-links.json'
   $sessionCreds = Join-Path (Get-WaSessionDir) 'creds.json'
-  if (-not (Test-Path -LiteralPath $waJs) -or -not (Test-Path -LiteralPath $sentFile) -or -not (Test-Path -LiteralPath $sessionCreds)) {
+  if (-not (Test-Path -LiteralPath $waJs) -or -not (Test-Path -LiteralPath $sessionCreds)) {
     return
   }
-  $raw = Get-Content -LiteralPath $sentFile -Raw -ErrorAction SilentlyContinue
-  if ([string]::IsNullOrWhiteSpace($raw) -or $raw.Trim() -eq '[]') { return }
   $node = Find-NodeExe
   if (-not $node) { return }
   [void](Start-HiddenDetached -CommandLine "`"$node`" `"$waJs`" --retract")
@@ -1715,6 +1709,7 @@ function Invoke-Cancel {
       return
     }
     Write-UiLine "  $YEL   Aktif tünel yok.$RST"
+    Invoke-RetractWhatsApp
     Complete-Action
     return
   }

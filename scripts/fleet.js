@@ -1,4 +1,4 @@
-import { execFileSync, spawn, spawnSync } from 'child_process'
+import { execFileSync, spawnSync } from 'child_process'
 import crypto from 'crypto'
 import fs from 'fs'
 import os from 'os'
@@ -200,18 +200,6 @@ function stopLocalTunnel(root) {
   }
 }
 
-function retractWhatsApp(root) {
-  const js = path.join(root, 'scripts', 'send-whatsapp.js')
-  if (!fs.existsSync(js)) return
-  const child = spawn(process.execPath, [js, '--retract'], {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-    env: { ...process.env, DT_WA_ACTION: 'retract', DT_WA_TIMEOUT_MS: '45000' },
-  })
-  child.unref()
-}
-
 async function classify(rec, me) {
   if (!rec || !rec.owner || rec.state === 'idle') return 'free'
   if (rec.state === 'stop' && age(rec) < 90000) return rec.owner === me ? 'self' : 'wait'
@@ -387,11 +375,9 @@ async function requestStop(root) {
 async function lookup(root) {
   const token = ghToken(false)
   if (!token) process.exit(2)
-  const me = ownerId(root)
   await ensureBranch(token).catch(() => {})
   const rec = await readRec(token)
-  const kind = await classify(rec, me)
-  if ((kind === 'foreign' || kind === 'self') && rec.url) {
+  if (rec && rec.state === 'live' && rec.url && await httpOk(rec.url)) {
     process.stdout.write(rec.url)
     return
   }
@@ -426,7 +412,6 @@ async function heartbeat(root) {
       if (!cur || cur.owner !== me) break
       if (cur.state === 'stop') {
         stopLocalTunnel(root)
-        retractWhatsApp(root)
         await writeRec(token, { url: '', owner: '', host: '', state: 'idle', updatedAt: Date.now() }, cur.sha)
         break
       }

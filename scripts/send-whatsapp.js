@@ -8,6 +8,7 @@ import os from 'os';
 import { spawn, spawnSync } from 'child_process';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
+import { sameUrl, trycloudflareUrls } from './tunnel-links.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const toolRoot = path.resolve(__dirname, '..');
@@ -60,11 +61,6 @@ function resolveUrl(raw) {
   return String(value || '').replace(/[\r\n\s]+/g, '').replace(/\/+$/, '');
 }
 
-function sameUrl(a, b) {
-  const norm = (value) => String(value || '').trim().replace(/\/+$/, '').toLowerCase();
-  return norm(a) !== '' && norm(a) === norm(b);
-}
-
 const url = action === 'retract' ? '' : resolveUrl(process.argv[2] || process.env.DT_WA_URL || '');
 const phone = String(process.argv[3] || process.env.DT_WA_PHONE || config.targetPhone || '').trim();
 
@@ -113,7 +109,7 @@ const qrImage = path.join(os.tmpdir(), 'duendee-whatsapp-qr.png');
 const credsPath = path.join(sessionDir, 'creds.json');
 const hasSession = fs.existsSync(credsPath);
 
-const CONNECT_TIMEOUT_MS = Number(process.env.DT_WA_TIMEOUT_MS) || (action === 'retract' ? 45000 : 180000);
+const CONNECT_TIMEOUT_MS = Number(process.env.DT_WA_TIMEOUT_MS) || (action === 'retract' ? 90000 : 180000);
 const MAX_RECONNECT = 4;
 const READY_FALLBACK_MS = 5000;
 const SEND_DELAY_MS = 800;
@@ -268,48 +264,82 @@ async function waitUntilUsable(sock) {
   }
 }
 
+async function revokeTargets(sock) {
+  const pn = toDigits(phone) ? toDigits(phone) + '@s.whatsapp.net' : '';
+  let lid = '';
+  if (pn) {
+    try {
+      lid = await sock.signalRepository.lidMapping.getLIDForPN(pn);
+    } catch {
+      lid = '';
+    }
+    if (!lid) lid = lidFromCache(phone);
+  }
+  return { pn, lid };
+}
+
+async function revokeMessage(sock, row, targets) {
+  const jids = [...new Set([row.jid, targets.lid, targets.pn].filter(Boolean))];
+  let lastError = '';
+  for (const jid of jids) {
+    try {
+      await sock.sendMessage(jid, {
+        delete: { remoteJid: jid, fromMe: true, id: row.id }
+      });
+      return true;
+    } catch (err) {
+      lastError = err?.message || String(err);
+    }
+  }
+  if (lastError) console.error('  Mesaj kaldirilamadi (' + (row.jid || '') + '): ' + lastError);
+  return false;
+}
+
 async function deleteStored(sock, keepUrl) {
   const rows = loadSent();
   const keep = [];
+  const targets = await revokeTargets(sock);
   for (const row of rows) {
     if (keepUrl && sameUrl(row.url, keepUrl)) {
       keep.push(row);
       continue;
     }
-    const pn = toDigits(phone) + '@s.whatsapp.net';
-    const jids = [...new Set([row.jid, pn].filter(Boolean))];
-    let removed = false;
-    for (const jid of jids) {
-      try {
-        await sock.sendMessage(jid, {
-          delete: { remoteJid: jid, fromMe: true, id: row.id }
-        });
-        removed = true;
-      } catch (err) {
-        console.error('  Mesaj kaldirilamadi (' + jid + '): ' + (err?.message || err));
-      }
+    if (await revokeMessage(sock, row, targets)) {
+      console.log('  Eski link mesaji kaldirildi: ' + (row.url || row.id));
+    } else {
+      keep.push(row);
     }
-    if (removed) console.log('  Eski link mesaji kaldirildi: ' + (row.url || row.id));
-    else keep.push(row);
   }
   saveSent(keep);
   return keep;
 }
 
-function trycloudflareUrls(text) {
-  const found = String(text || '').match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com\/?(?!\S)/gi) || [];
-  return [...new Set(found.map((item) => item.replace(/\/+$/, '')))];
+function messageText(msg) {
+  const chunks = [];
+  const seen = new WeakSet();
+  const walk = (node, depth) => {
+    if (!node || depth > 8) return;
+    if (typeof node === 'string') {
+      if (node.includes('trycloudflare.com')) chunks.push(node);
+      return;
+    }
+    if (typeof node !== 'object' || Buffer.isBuffer(node) || seen.has(node)) return;
+    seen.add(node);
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item, depth + 1);
+      return;
+    }
+    for (const value of Object.values(node)) walk(value, depth + 1);
+  };
+  walk(msg?.message || {}, 0);
+  return chunks.join('\n');
 }
 
-function messageText(msg) {
-  const content = msg?.message || {};
-  return (
-    content.conversation ||
-    content.extendedTextMessage?.text ||
-    content.ephemeralMessage?.message?.conversation ||
-    content.ephemeralMessage?.message?.extendedTextMessage?.text ||
-    ''
-  );
+function messageStampMs(msg) {
+  const raw = msg?.messageTimestamp;
+  const n = typeof raw === 'object' && raw && typeof raw.toNumber === 'function' ? raw.toNumber() : Number(raw || 0);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n > 1e12 ? n : n * 1000;
 }
 
 function activeTunnelUrl() {
@@ -327,35 +357,51 @@ async function scanTunnelMessages(sock) {
     const id = msg?.key?.id;
     const jid = msg?.key?.remoteJid;
     if (!id || !jid || msg.key.fromMe === false) return;
+    const stamp = messageStampMs(msg);
     for (const url of trycloudflareUrls(messageText(msg))) {
-      found.set(id + '\n' + jid, { id, jid, url });
+      const key = id + '\n' + jid;
+      const prev = found.get(key);
+      found.set(key, { id, jid, url, stamp: stamp || prev?.stamp || 0 });
     }
   };
-  const onHistory = (payload) => {
-    for (const msg of payload?.messages || []) absorb(msg);
+  const drain = () => {
+    while (historyMessages.length) absorb(historyMessages.shift());
   };
-  const onUpsert = (payload) => {
-    for (const msg of payload?.messages || []) absorb(msg);
-  };
-  sock.ev.on('messaging-history.set', onHistory);
-  sock.ev.on('messages.upsert', onUpsert);
   for (const row of loadSent()) {
     for (const url of trycloudflareUrls(row.url)) {
-      if (row.id && row.jid) found.set(row.id + '\n' + row.jid, { id: row.id, jid: row.jid, url });
+      if (row.id && row.jid) {
+        found.set(row.id + '\n' + row.jid, {
+          id: row.id,
+          jid: row.jid,
+          url,
+          stamp: Date.parse(row.at || '') || 0
+        });
+      }
     }
   }
-  const anchor = loadSent().find((row) => row.id && row.jid);
-  if (anchor && typeof sock.fetchMessageHistory === 'function') {
-    const stamp = Date.parse(anchor.at || '') || 0;
+  drain();
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  drain();
+  const used = new Set();
+  for (let page = 0; page < 20 && typeof sock.fetchMessageHistory === 'function'; page += 1) {
+    const dated = [...found.values()].filter((row) => row.stamp > 0).sort((a, b) => a.stamp - b.stamp);
+    const anchor = dated[0] || [...found.values()][0];
+    if (!anchor) break;
+    const mark = anchor.id + '\n' + anchor.jid + '\n' + anchor.stamp;
+    if (used.has(mark)) break;
+    used.add(mark);
+    const before = found.size;
+    const stampSec = anchor.stamp > 1e12 ? Math.floor(anchor.stamp / 1000) : Math.floor((anchor.stamp || Date.now()) / 1000);
     try {
-      await sock.fetchMessageHistory(50, { remoteJid: anchor.jid, fromMe: true, id: anchor.id }, stamp);
+      await sock.fetchMessageHistory(50, { remoteJid: anchor.jid, fromMe: true, id: anchor.id }, stampSec);
     } catch (err) {
       console.log('  Sohbet gecmisi alinamadi: ' + (err?.message || err));
+      break;
     }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    drain();
+    if (found.size === before) break;
   }
-  await new Promise((resolve) => setTimeout(resolve, 2500));
-  sock.ev.off('messaging-history.set', onHistory);
-  sock.ev.off('messages.upsert', onUpsert);
   return [...found.values()];
 }
 
@@ -363,24 +409,16 @@ async function purgeInactiveTunnelLinks(sock) {
   const keepUrl = activeTunnelUrl();
   const rows = await scanTunnelMessages(sock);
   const drop = rows.filter((row) => !sameUrl(row.url, keepUrl));
-  await Promise.all(
-    drop.map(async (row) => {
-      try {
-        await sock.sendMessage(row.jid, {
-          delete: { remoteJid: row.jid, fromMe: true, id: row.id },
-        });
-        row.removed = true;
-      } catch (err) {
-        console.error('  Mesaj kaldirilamadi (' + row.jid + '): ' + (err?.message || err));
-      }
-    })
-  );
-  const removedIds = new Set(drop.filter((row) => row.removed).map((row) => row.id));
+  const targets = await revokeTargets(sock);
+  const removedIds = new Set();
+  for (const row of drop) {
+    if (await revokeMessage(sock, row, targets)) removedIds.add(row.id);
+  }
   saveSent(loadSent().filter((row) => !removedIds.has(row.id)));
   const removed = removedIds.size;
   if (keepUrl) console.log('  Aktif tunel linki birakildi.');
   console.log('  Pasif tunel linkleri kaldirildi: ' + removed);
-  return { removed, failed: drop.length - removed };
+  return { removed, failed: drop.length - removed, kept: keepUrl ? 1 : 0 };
 }
 
 function rememberSent(id, jid, messageUrl) {
@@ -448,28 +486,38 @@ process.on('unhandledRejection', (err) => {
   if (!qrSeen) process.exit(1);
 });
 
+const historyMessages = [];
+
+function rememberHistory(msg) {
+  if (msg) historyMessages.push(msg);
+}
+
 const retractLock = path.join(toolRoot, '.tunnelstate', 'wa-retract.lock');
 
-function claimRetractLock() {
+async function claimRetractLock() {
   fs.mkdirSync(path.dirname(retractLock), { recursive: true });
-  try {
-    const fd = fs.openSync(retractLock, 'wx');
-    fs.writeFileSync(fd, String(process.pid));
-    fs.closeSync(fd);
-    return true;
-  } catch (err) {
-    if (err.code !== 'EEXIST') throw err;
+  const deadline = Date.now() + 90000;
+  while (Date.now() < deadline) {
     try {
-      const age = Date.now() - fs.statSync(retractLock).mtimeMs;
-      if (age > 90000) {
-        fs.rmSync(retractLock, { force: true });
-        return claimRetractLock();
+      const fd = fs.openSync(retractLock, 'wx');
+      fs.writeFileSync(fd, String(process.pid));
+      fs.closeSync(fd);
+      return true;
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      try {
+        const age = Date.now() - fs.statSync(retractLock).mtimeMs;
+        if (age > 90000) {
+          fs.rmSync(retractLock, { force: true });
+          continue;
+        }
+      } catch {
+        /* lock disappeared; try again */
       }
-    } catch {
-      /* another retract owns the lock */
+      await new Promise((resolve) => setTimeout(resolve, 500));
     }
-    return false;
   }
+  return false;
 }
 
 function releaseRetractLock() {
@@ -481,9 +529,8 @@ function releaseRetractLock() {
 }
 
 async function main() {
-  if (action === 'retract' && !claimRetractLock()) {
-    console.log('  Link mesaji kaldirma zaten calisiyor.');
-    return;
+  if (action === 'retract' && !(await claimRetractLock())) {
+    fail('Link mesaji kaldirma zaman asimi.');
   }
 
   const linkedNow = readLinkedId();
@@ -655,10 +702,16 @@ async function main() {
       version,
       logger: pino({ level: 'silent' }),
       browser: process.platform === 'win32' ? Browsers.windows('Duendee Tunnel Tool') : Browsers.ubuntu('Duendee Tunnel Tool'),
-      syncFullHistory: false,
+      syncFullHistory: action === 'retract',
       markOnlineOnConnect: false
     });
     sock = current;
+    current.ev.on('messaging-history.set', (payload) => {
+      for (const msg of payload?.messages || []) rememberHistory(msg);
+    });
+    current.ev.on('messages.upsert', (payload) => {
+      for (const msg of payload?.messages || []) rememberHistory(msg);
+    });
 
     let socketOpen = false;
     let notificationsReady = false;
@@ -752,8 +805,13 @@ async function main() {
   await connect();
 }
 
-main().catch((err) => {
-  if (action === 'retract') releaseRetractLock();
-  console.error('WhatsApp baslatilamadi / failed to start:', err?.message || err);
-  process.exit(1);
-});
+const runningDirectly = process.argv[1]
+  && path.resolve(process.argv[1]).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase();
+
+if (runningDirectly) {
+  main().catch((err) => {
+    if (action === 'retract') releaseRetractLock();
+    console.error('WhatsApp baslatilamadi / failed to start:', err?.message || err);
+    process.exit(1);
+  });
+}

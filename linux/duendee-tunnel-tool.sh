@@ -538,32 +538,26 @@ wa_session_dir() {
 
 spawn_retract_detached() {
   local wa_js="${WHATSAPP_JS:-${ROOT}/scripts/send-whatsapp.js}"
-  local sent_file="$(wa_session_dir)/sent-links.json"
   local creds="$(wa_session_dir)/creds.json"
   local log="${STATE}/wa-retract.log"
-  [[ -f "$wa_js" && -f "$sent_file" && -f "$creds" && -s "$sent_file" ]] || return 0
-  grep -q '^\[\][[:space:]]*$' "$sent_file" && return 0
+  [[ -f "$wa_js" && -f "$creds" ]] || return 0
   command -v node >/dev/null 2>&1 || return 0
   if command -v setsid >/dev/null 2>&1; then
-    setsid nohup env DT_WA_ACTION=retract DT_WA_TIMEOUT_MS=45000 node "$wa_js" --retract >>"$log" 2>&1 </dev/null &
+    setsid nohup env DT_WA_ACTION=retract DT_WA_TIMEOUT_MS=90000 node "$wa_js" --retract >>"$log" 2>&1 </dev/null &
   else
-    nohup env DT_WA_ACTION=retract DT_WA_TIMEOUT_MS=45000 node "$wa_js" --retract >>"$log" 2>&1 </dev/null &
+    nohup env DT_WA_ACTION=retract DT_WA_TIMEOUT_MS=90000 node "$wa_js" --retract >>"$log" 2>&1 </dev/null &
   fi
 }
 
 retract_tunnel_whatsapp() {
   local wa_js="${WHATSAPP_JS:-${ROOT}/scripts/send-whatsapp.js}"
-  local sent_file="$(wa_session_dir)/sent-links.json"
   local creds="$(wa_session_dir)/creds.json"
-  [[ -f "$wa_js" && -f "$sent_file" && -f "$creds" ]] || return 0
-  if [[ ! -s "$sent_file" ]] || grep -q '^\[\][[:space:]]*$' "$sent_file"; then
-    return 0
-  fi
+  [[ -f "$wa_js" && -f "$creds" ]] || return 0
   command -v node >/dev/null 2>&1 || return 0
   ensure_whatsapp_deps || return 0
   echo "  Eski tunnel linki mesajlari kaldiriliyor..."
   local ec=0
-  DT_WA_ACTION=retract DT_WA_TIMEOUT_MS="${DT_WA_TIMEOUT_MS:-45000}" node "$wa_js" || ec=$?
+  DT_WA_ACTION=retract DT_WA_TIMEOUT_MS="${DT_WA_TIMEOUT_MS:-90000}" node "$wa_js" || ec=$?
   if (( ec != 0 )); then
     echo -e "  ${YEL}   Eski WhatsApp link mesaji kaldirilamadi (çıkış ${ec}).${RST}"
   else
