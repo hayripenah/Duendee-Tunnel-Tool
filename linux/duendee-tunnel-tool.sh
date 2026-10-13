@@ -844,6 +844,7 @@ autostate() {
 }
 
 browser_opens() {
+  [[ "${DT_RECOVER:-}" == "1" ]] && return 1
   local f="${STATE}/open-browser"
   [[ -f "$f" ]] || return 0
   [[ "$(tr -d '[:space:]' <"$f" 2>/dev/null || true)" != "0" ]]
@@ -1120,8 +1121,6 @@ show_menu() {
   esac
   echo -e "  ${YEL}${BOLD}[6]${RST}  ${SKY}Aracı Cihazdan Kaldır${RST}"
   echo
-  echo -e "${DIM}      Kapatmak için [4].${RST}"
-  echo
   printf "%b" "${CYN}   Seçim: ${RST}"
 }
 
@@ -1322,6 +1321,9 @@ sync_tool_copy() {
 }
 
 do_start() {
+  if [[ "${DT_RECOVER:-}" != "1" ]]; then
+    rm -f "${STATE}/manual-stop"
+  fi
   clear
   echo
   echo -e "${CYN}   --- Tünel servisi başlatılıyor ---${RST}"
@@ -1671,6 +1673,8 @@ do_cancel() {
   echo
   echo -e "${CYN}   --- Tünel servisini iptal et ---${RST}"
   echo
+  mkdir -p "$STATE"
+  printf '1\n' >"${STATE}/manual-stop"
   kill_tunnel
   kill_dev_server
   local fleet_role="none"
@@ -2181,6 +2185,15 @@ register_stable_launch || true
 
 if [[ "${1:-}" == "boot-tunnel" ]]; then
   do_start
+elif [[ "${1:-}" == "recover-tunnel" ]]; then
+  if [[ -f "${STATE}/manual-stop" ]]; then
+    exit 0
+  fi
+  export DT_WA_TEMPLATE='Tünel zaman aşımına uğradı, yeni tünel linki: {url}'
+  export DT_RECOVER=1
+  AUTO=1
+  do_start
+  exit 0
 elif [[ "${1:-}" != "" ]]; then
   AUTO=1
   case "$1" in

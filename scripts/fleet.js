@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from 'child_process'
+import { execFileSync, spawn, spawnSync } from 'child_process'
 import crypto from 'crypto'
 import fs from 'fs'
 import os from 'os'
@@ -428,19 +428,45 @@ async function role(root) {
   else process.stdout.write('none')
 }
 
+function spawnRecover(root) {
+  const dir = stateDir(root)
+  const manual = path.join(dir, 'manual-stop')
+  if (fs.existsSync(manual)) return
+  const lock = path.join(dir, 'recover.lock')
+  if (fs.existsSync(lock)) {
+    const ageMs = Date.now() - fs.statSync(lock).mtimeMs
+    if (ageMs < 60000) return
+  }
+  fs.writeFileSync(lock, String(Date.now()))
+  if (process.platform === 'win32') {
+    const ps1 = path.join(root, 'windows', 'duendee-tunnel-tool.ps1')
+    const child = spawn('powershell.exe', [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+      '-File', ps1, 'recover-tunnel',
+    ], { detached: true, stdio: 'ignore', windowsHide: true })
+    child.unref()
+    return
+  }
+  const sh = path.join(root, 'linux', 'duendee-tunnel-tool.sh')
+  const child = spawn('bash', [sh, 'recover-tunnel'], { detached: true, stdio: 'ignore' })
+  child.unref()
+}
+
 async function heartbeat(root) {
   const token = ghToken(false)
   if (!token) return
   const me = ownerId(root)
   const dir = stateDir(root)
   const flag = path.join(dir, 'fleet-heartbeat.on')
+  const manual = path.join(dir, 'manual-stop')
   fs.writeFileSync(path.join(dir, 'fleet-heartbeat.pid'), String(process.pid))
   if (!fs.existsSync(flag)) fs.writeFileSync(flag, '1')
+  let urlMisses = 0
   while (fs.existsSync(flag)) {
     try {
       const cur = await readRec(token)
       if (!cur || cur.owner !== me) break
-      if (cur.state === 'stop') {
+      if (fs.existsSync(manual) || cur.state === 'stop') {
         stopLocalTunnel(root)
         await writeRec(token, { url: '', owner: '', host: '', state: 'idle', updatedAt: Date.now() }, cur.sha)
         break
@@ -468,8 +494,19 @@ async function heartbeat(root) {
       }
       const urlOk = cur.url ? await httpOk(cur.url) : false
       const cfAlive = cloudflaredAlive()
-      if (cur.state === 'live' && !procAlive && !cfAlive && !urlOk) {
-        await writeRec(token, { url: '', owner: '', host: '', state: 'idle', updatedAt: Date.now() }, cur.sha)
+      if (urlOk) urlMisses = 0
+      else urlMisses += 1
+      const crashed = cur.state === 'live' && !procAlive && !cfAlive
+      const timedOut = cur.state === 'live' && !urlOk && urlMisses >= 3
+      if (crashed || timedOut) {
+        stopLocalTunnel(root)
+        if (fs.existsSync(manual)) {
+          await writeRec(token, { url: '', owner: '', host: '', state: 'idle', updatedAt: Date.now() }, cur.sha)
+          break
+        }
+        await writeRec(token, { url: '', owner: me, host: os.hostname(), state: 'starting', updatedAt: Date.now() }, cur.sha)
+        fs.rmSync(path.join(dir, 'fleet-heartbeat.pid'), { force: true })
+        spawnRecover(root)
         break
       }
       await writeRec(token, {

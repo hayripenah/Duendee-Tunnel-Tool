@@ -481,7 +481,12 @@ if (-not $script:UninstallCli -and -not (Test-Path -LiteralPath $StateDir)) {
 }
 
 $script:BootTunnel = ($Action -eq 'boot-tunnel')
+$script:RecoverTunnel = ($Action -eq 'recover-tunnel')
 $script:AutoMode = -not [string]::IsNullOrWhiteSpace($Action) -and -not $script:BootTunnel
+if ($script:RecoverTunnel) {
+  $env:DT_WA_TEMPLATE = 'Tünel zaman aşımına uğradı, yeni tünel linki: {url}'
+  $env:DT_RECOVER = '1'
+}
 $env:PROJECT = $Project
 $env:SERVER_PID = $ServerPidFile
 $env:PID_FILE = $PidFile
@@ -1218,8 +1223,6 @@ function Show-Menu {
   Write-UiLine "  $YEL$BOLD[5]$RST  ${SKY}Cihaz Açılışında Otomatik Başlat$RST  $autoLabel  $browserLabel"
   Write-UiLine "  $YEL$BOLD[6]$RST  ${SKY}Aracı Cihazdan Kaldır$RST"
   Write-UiLine ''
-  Write-UiLine "$DIM      Kapatmak için [4].$RST"
-  Write-UiLine ''
   Write-Ui "$CYN   Seçim: $RST"
 }
 
@@ -1472,6 +1475,9 @@ function Update-ToolCopy {
 }
 
 function Invoke-Start {
+  if ($env:DT_RECOVER -ne '1') {
+    Remove-Item -LiteralPath (Join-Path $StateDir 'manual-stop') -Force -ErrorAction SilentlyContinue
+  }
   Clear-Host
   Initialize-Utf8Console
   Write-UiLine ''
@@ -1722,6 +1728,8 @@ function Invoke-Cancel {
   Write-UiLine ''
   Write-UiLine "$CYN   --- Tünel servisini iptal et ---$RST"
   Write-UiLine ''
+  if (-not (Test-Path -LiteralPath $StateDir)) { New-Item -ItemType Directory -Force -Path $StateDir | Out-Null }
+  Set-Content -LiteralPath (Join-Path $StateDir 'manual-stop') -Value '1' -Encoding Ascii
   Stop-TunnelOnly
   Stop-DevServer
   $fleetRole = "$(Invoke-Fleet role)".Trim()
@@ -1740,6 +1748,7 @@ function Get-BrowserFlagPath {
 }
 
 function Test-BrowserOpens {
+  if ($env:DT_RECOVER -eq '1') { return $false }
   $path = Get-BrowserFlagPath
   if (-not (Test-Path -LiteralPath $path)) { return $true }
   $raw = Get-Content -LiteralPath $path -TotalCount 1 -ErrorAction SilentlyContinue
@@ -2221,6 +2230,11 @@ try {
     '3' { Invoke-CopyLink; exit 0 }
     '4' { Invoke-Cancel; exit 0 }
     '5' { Invoke-Autostart; exit 0 }
+    'recover-tunnel' {
+      if (Test-Path -LiteralPath (Join-Path $StateDir 'manual-stop')) { exit 0 }
+      Invoke-Start
+      exit 0
+    }
   }
 
   while ($true) {

@@ -413,8 +413,11 @@ async function scanTunnelMessages(sock) {
     const id = msg?.key?.id;
     const jid = msg?.key?.remoteJid;
     if (!id || !jid || msg.key.fromMe === false) return;
+    const text = messageText(msg);
+    let urls = trycloudflareUrls(text);
+    if (text.includes('Tünel zaman aşımına uğradı') && urls.length === 0) urls = ['notice'];
     const stamp = messageStampMs(msg);
-    for (const url of trycloudflareUrls(messageText(msg))) {
+    for (const url of urls) {
       const key = id + '\n' + jid;
       const prev = found.get(key);
       found.set(key, {
@@ -534,7 +537,7 @@ async function deliver(sock) {
   const lid = await resolveSendJid(sock, phone);
   const pn = toDigits(phone) + '@s.whatsapp.net';
   const targets = [...new Set([lid, pn].filter(Boolean))];
-  const message = String(config.messageTemplate || 'Duendee tunnel linki: {url}').replace('{url}', url);
+  const message = String(process.env.DT_WA_TEMPLATE || config.messageTemplate || 'Duendee tunnel linki: {url}').replace('{url}', url);
   let last = null;
   for (const target of targets) {
     console.log('  Link gonderiliyor -> ' + phone + ' (' + target + ')');
