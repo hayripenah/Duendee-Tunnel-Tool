@@ -212,9 +212,19 @@ fetch_public_github() {
   fetch_private_github "$repo" "$target"
 }
 
+restore_kept_duendee() {
+  local path="$1" tmp="$2" item
+  for item in .env .env.local node_modules; do
+    if [[ -e "${tmp}/keep/${item}" ]]; then
+      rm -rf "${path}/${item}"
+      mv "${tmp}/keep/${item}" "${path}/${item}"
+    fi
+  done
+}
+
 refresh_duendee_snapshot() {
   local path="$1"
-  local tmp stage item
+  local tmp stage item left
   tmp="$(mktemp -d)"
   stage="${tmp}/stage"
   if ! fetch_public_github "$DUENDEE_REPO_URL" "$stage"; then
@@ -228,34 +238,88 @@ refresh_duendee_snapshot() {
       mv "${path}/${item}" "${tmp}/keep/${item}"
     fi
   done
-  find "$path" -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+  local failed=0 name dest base
+  local -a stage_names=()
+  find "$path" -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} + || true
   shopt -s dotglob
-  mv "${stage}/"* "${path}/"
-  shopt -u dotglob
-  for item in .env .env.local node_modules; do
-    if [[ -e "${tmp}/keep/${item}" ]]; then
-      rm -rf "${path}/${item}"
-      mv "${tmp}/keep/${item}" "${path}/${item}"
+  for name in "${stage}/"*; do
+    [[ -e "$name" ]] || continue
+    base="$(basename "$name")"
+    stage_names+=("$base")
+    dest="${path}/${base}"
+    if [[ -e "$dest" ]]; then
+      rm -rf "$dest" || true
     fi
+    if [[ -e "$dest" ]]; then
+      failed=1
+      continue
+    fi
+    mv "$name" "$dest" || failed=1
   done
+  shopt -u dotglob
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    base="$(basename "$name")"
+    local known=0 staged
+    for staged in "${stage_names[@]+"${stage_names[@]}"}"; do
+      [[ "$staged" == "$base" ]] && known=1
+    done
+    [[ "$known" -eq 1 ]] || failed=1
+  done < <(find "$path" -mindepth 1 -maxdepth 1 ! -name '.git' -print 2>/dev/null || true)
+  restore_kept_duendee "$path" "$tmp"
   rm -rf "$tmp"
+  if [[ "$failed" -eq 1 || ! -f "${path}/package.json" ]]; then
+    echo -e "  ${YEL}   Duendee güncellenemedi.${RST}" >&2
+    return 1
+  fi
   echo -e "  ${GRN}   Repo güncel.${RST}" >&2
+}
+
+duendee_git_matches() {
+  local path="$1" tip_rev="$2" head tip
+  head="$(git_with_gh -C "$path" rev-parse HEAD 2>/dev/null || true)"
+  tip="$(git_with_gh -C "$path" rev-parse "$tip_rev" 2>/dev/null || true)"
+  [[ -n "$head" && "$head" == "$tip" ]]
+}
+
+fetch_duendee_ref() {
+  local path="$1" remote="$2" branch="$3"
+  git_with_gh -C "$path" fetch --depth 1 "$remote" "$branch" >/dev/null 2>&1 \
+    || git_with_gh -C "$path" fetch "$remote" "$branch" >/dev/null 2>&1
+}
+
+reset_duendee_to() {
+  local path="$1" rev="$2"
+  git_with_gh -C "$path" reset --hard "$rev" >/dev/null 2>&1 \
+    && duendee_git_matches "$path" "$rev"
+}
+
+update_duendee_from_git() {
+  local path="$1" remote="$2" branch tip_rev
+  for branch in main master; do
+    fetch_duendee_ref "$path" "$remote" "$branch" || continue
+    if [[ "$remote" == origin ]]; then
+      tip_rev="origin/${branch}"
+    else
+      tip_rev="FETCH_HEAD"
+    fi
+    reset_duendee_to "$path" "$tip_rev" && return 0
+  done
+  return 1
 }
 
 update_duendee_safe() {
   local path="$1"
-  [[ -d "$path" ]] || return 0
+  [[ -d "$path" ]] || return 1
   echo -e "  ${DIM}   Duendee güncelleniyor...${RST}" >&2
   if [[ -d "$path/.git" ]] && command -v git >/dev/null 2>&1; then
-    if git_with_gh -C "$path" fetch --depth 1 origin main >/dev/null 2>&1 \
-      || git_with_gh -C "$path" fetch origin main >/dev/null 2>&1; then
-      if git_with_gh -C "$path" reset --hard origin/main >/dev/null 2>&1; then
-        echo -e "  ${GRN}   Repo güncel.${RST}" >&2
-        return 0
-      fi
+    if update_duendee_from_git "$path" "$DUENDEE_REPO_URL" \
+      || update_duendee_from_git "$path" origin; then
+      echo -e "  ${GRN}   Repo güncel.${RST}" >&2
+      return 0
     fi
   fi
-  refresh_duendee_snapshot "$path" || true
+  refresh_duendee_snapshot "$path"
 }
 
 find_local_duendee() {
@@ -1258,6 +1322,64 @@ start_app_origin() {
   return 1
 }
 
+file_digest() {
+  local f="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$f" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$f" | awk '{print $1}'
+  else
+    wc -c < "$f" | tr -d '[:space:]'
+  fi
+}
+
+dep_stamp() {
+  local path="$1" name sum=""
+  for name in package.json package-lock.json pnpm-lock.yaml yarn.lock; do
+    if [[ -f "${path}/${name}" ]]; then
+      sum+="$(file_digest "${path}/${name}")"
+    else
+      sum+="-"
+    fi
+    sum+="|"
+  done
+  printf '%s' "$sum"
+}
+
+prepare_latest_duendee() {
+  if ! looks_like_duendee "$PROJECT"; then
+    echo -e "  ${RED}${BOLD}[HATA]${RST} projectPath Duendee deposu değil. Güncel sürüm yayına alınamadı."
+    return 1
+  fi
+  kill_dev_server
+  free_listen_port
+  sleep 0.3
+  if port_listening "$PORT"; then
+    echo -e "  ${RED}${BOLD}[HATA]${RST} ${PORT} portu boşaltılamadı. Eski yayın durdurulamadı."
+    return 1
+  fi
+  local before after
+  before="$(dep_stamp "$PROJECT")"
+  if ! update_duendee_safe "$PROJECT"; then
+    echo -e "  ${RED}${BOLD}[HATA]${RST} Duendee güncellenemedi. Eski sürüm yayına alınmadı."
+    return 1
+  fi
+  after="$(dep_stamp "$PROJECT")"
+  if [[ ! -d "${PROJECT}/node_modules" || "$before" != "$after" ]]; then
+    echo -e "  ${DIM}   Bağımlılıklar kuruluyor (npm install)...${RST}"
+    if ! (cd "$PROJECT" && npm install); then
+      echo -e "  ${RED}${BOLD}   [HATA]${RST} npm install başarısız."
+      return 1
+    fi
+  fi
+  rm -rf "${PROJECT}/dist"
+  if [[ -f "${PROJECT}/dist/index.html" ]]; then
+    echo -e "  ${RED}${BOLD}[HATA]${RST} Eski derleme silinemedi."
+    return 1
+  fi
+  return 0
+}
+
 fleet_node() {
   local n=""
   if command -v node >/dev/null 2>&1; then
@@ -1318,6 +1440,138 @@ sync_tool_copy() {
   if [[ "$ec" -eq 20 ]]; then
     exec bash "$0" "$@"
   fi
+}
+
+public_dns() {
+  local host="$1" out addrs
+  [[ -n "$host" ]] || return 1
+  if command -v nslookup >/dev/null 2>&1; then
+    out="$(nslookup -type=A "$host" 1.1.1.1 2>/dev/null || true)"
+    if printf '%s\n' "$out" | grep -Eqi 'NXDOMAIN|Non-existent|can.t find'; then
+      return 1
+    fi
+    addrs="$(printf '%s\n' "$out" | grep -E '^Address: *[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | grep -v '1\.1\.1\.1' || true)"
+    [[ -n "$addrs" ]] && return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import socket,sys; socket.getaddrinfo(sys.argv[1], 443)' "$host" >/dev/null 2>&1 && return 0
+  fi
+  getent hosts "$host" >/dev/null 2>&1
+}
+
+wait_public_ready() {
+  local url="$1" seconds="${2:-20}" host deadline now pub
+  [[ -n "$url" ]] || return 1
+  host="$(printf '%s' "$url" | sed -E 's#^https://([^/]+).*#\1#')"
+  deadline=$(( $(date +%s) + seconds ))
+  while true; do
+    now="$(date +%s)"
+    (( now >= deadline )) && return 1
+    if public_dns "$host"; then
+      pub="$(http_code "$url" 4)"
+      pub="${pub:-000}"
+      if (( pub >= 200 && pub <= 399 )); then
+        return 0
+      fi
+    fi
+    if ! tunnel_running; then
+      return 1
+    fi
+    sleep 0.7
+  done
+}
+
+launch_cloudflared() {
+  local target="http://127.0.0.1:${PORT}"
+  pkill -f "cloudflared tunnel --url" 2>/dev/null || true
+  killall cloudflared 2>/dev/null || true
+  rm -f "$URL_FILE" "$LOG" "$OUT_LOG" "$PID_FILE"
+  URL=""
+  TUNNEL_URL=""
+  PREV=""
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import os, sys
+pidfile, cmd = sys.argv[1], sys.argv[2:]
+if os.fork() > 0:
+    os._exit(0)
+os.setsid()
+if os.fork() > 0:
+    os._exit(0)
+fd = os.open(pidfile, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+os.write(fd, str(os.getpid()).encode())
+os.close(fd)
+os.execvp(cmd[0], cmd)
+' "$PID_FILE" "$CF" tunnel --url "$target" --http-host-header "127.0.0.1:${PORT}" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 3 >"$OUT_LOG" 2>"$LOG" </dev/null &
+    local helper=$! pid_wait
+    for pid_wait in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      [[ -s "$PID_FILE" ]] && break
+      sleep 0.1
+    done
+    wait "$helper" 2>/dev/null || true
+  else
+    if command -v setsid >/dev/null 2>&1; then
+      setsid nohup "$CF" tunnel --url "$target" --http-host-header "127.0.0.1:${PORT}" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 3 >"$OUT_LOG" 2>"$LOG" </dev/null &
+    else
+      nohup "$CF" tunnel --url "$target" --http-host-header "127.0.0.1:${PORT}" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 3 >"$OUT_LOG" 2>"$LOG" </dev/null &
+    fi
+    echo $! >"$PID_FILE"
+    disown "$!" 2>/dev/null || true
+  fi
+  read_pid
+  [[ -n "${TPID:-}" ]] || return 1
+  sleep 0.3
+  pid_alive "$TPID"
+}
+
+await_tunnel_url() {
+  local tries=0
+  URL=""
+  while true; do
+    refresh_url
+    [[ -n "${URL:-}" ]] && return 0
+    tries=$((tries + 1))
+    if (( tries % 20 == 0 )); then
+      echo -e "  ${DIM}   ... $((tries / 4)) saniye beklendi${RST}"
+    fi
+    if ! pid_alive "${TPID:-0}"; then
+      return 1
+    fi
+    if (( tries >= 180 )); then
+      return 1
+    fi
+    sleep 0.25
+  done
+}
+
+open_resolving_tunnel() {
+  local attempt
+  for attempt in 1 2 3; do
+    if (( attempt == 1 )); then
+      echo -e "  ${CYN}[3/4]${RST} Cloudflare tünel başlatılıyor..."
+    else
+      echo -e "  ${YEL}   Adres DNS'te yok, yeni tünel deneniyor (${attempt}/3)...${RST}"
+    fi
+    if ! launch_cloudflared; then
+      logtail
+      kill_tunnel
+      continue
+    fi
+    echo -e "  ${CYN}[4/4]${RST} DNS kaydı bekleniyor..."
+    if ! await_tunnel_url; then
+      logtail
+      kill_tunnel
+      continue
+    fi
+    if wait_public_ready "$URL" 20; then
+      echo -e "  ${GRN}   Yayın adresi erişilebilir - yayın hazır.${RST}"
+      return 0
+    fi
+    kill_tunnel
+  done
+  echo -e "  ${RED}${BOLD}[HATA]${RST} Yayın adresi DNS'te oluşmadı."
+  logtail
+  return 1
 }
 
 do_start() {
@@ -1386,173 +1640,62 @@ do_start() {
       return
       ;;
   esac
+  local fresh=0
   if [[ "$decision" == keep || "$decision" == keep$'\t'* ]]; then
-    if ! port_listening "$PORT"; then
-      echo -e "  ${CYN}   Yerel uygulama kapalı. Mevcut tünel aynı adreste kalsın diye açılıyor...${RST}"
-      start_app_origin || echo -e "  ${YEL}   Uygulama açılamadı. Tünel duruyor ama sayfa erişilemeyebilir.${RST}"
-    fi
-    if [[ -z "${URL:-}" ]]; then
-      echo -e "  ${YEL}   Tünel çalışıyor ama yayın linki okunamadı. Kapatmak için [4].${RST}"
+    echo -e "  ${CYN}   Güncel Duendee yayına alınıyor...${RST}"
+    if ! prepare_latest_duendee; then
       wait_key
       return
     fi
-    echo -e "${BLUE}${BOLD}     ${URL}${RST}"
-    copy_clipboard "$URL" >/dev/null 2>&1 || true
-    echo
-    wait_key
-    return
+    start_app_origin || echo -e "  ${YEL}   Uygulama açılamadı. Tünel duruyor ama sayfa erişilemeyebilir.${RST}"
+    if [[ -n "${URL:-}" ]] && wait_public_ready "$URL" 12; then
+      echo -e "${BLUE}${BOLD}     ${URL}${RST}"
+      copy_clipboard "$URL" >/dev/null 2>&1 || true
+      echo
+      wait_key
+      return
+    fi
+    echo -e "  ${YEL}   Yayın adresi DNS'te yok. Yeni tünel açılıyor.${RST}"
+    kill_tunnel
+    fresh=1
   fi
   read_pid
   if [[ -n "${TPID:-}" ]]; then
     rm -f "$PID_FILE" "$URL_FILE"
   fi
 
-  if [[ -f "$SERVER_PID" ]]; then
-    local spid
-    spid="$(tr -d '[:space:]' < "$SERVER_PID" || true)"
-    if [[ -n "$spid" ]] && ! pid_alive "$spid"; then
-      rm -f "$SERVER_PID"
+  if [[ "$fresh" -eq 0 ]]; then
+    echo -e "  ${CYN}[2/4]${RST} Güncel Duendee yayına alınıyor..."
+    if ! prepare_latest_duendee; then
+      wait_key
+      return
     fi
-  fi
-
-  if port_listening "$PORT"; then
-    # A leftover server keeps phones on the previous bundle. Always replace it.
-    kill_dev_server
-    free_listen_port
-    sleep 0.3
-  fi
-  if port_listening "$PORT"; then
-    echo -e "  ${RED}${BOLD}[HATA]${RST} ${PORT} portu boşaltılamadı. Eski yayın durdurulamadı."
-    wait_key
-    return
-  fi
-  echo -e "  ${CYN}[2/4]${RST} Uygulama başlatılıyor..."
-    if [[ ! -d "${PROJECT}/node_modules" ]]; then
-      echo -e "  ${DIM}   node_modules yok, npm install çalıştırılıyor...${RST}"
-      (cd "$PROJECT" && npm install) || {
-        echo -e "  ${RED}${BOLD}   [HATA]${RST} npm install başarısız."
-        wait_key
-        return
-      }
-    fi
+    echo -e "  ${CYN}[2/4]${RST} Uygulama başlatılıyor..."
     if ! start_app_origin; then
       echo -e "  ${RED}${BOLD}[HATA]${RST} Uygulama ${PORT} portunda açılamadı."
       echo -e "  ${DIM}   Ayrıntı: ${STATE}/server.out.log${RST}"
       wait_key
       return
     fi
-    echo -e "  ${CYN}[2/4]${RST} Uygulama http://127.0.0.1:${PORT} hazır."
-
-  echo -e "  ${CYN}[3/4]${RST} Cloudflare tünel başlatılıyor..."
-  pkill -f "cloudflared tunnel --url" 2>/dev/null || true
-  killall cloudflared 2>/dev/null || true
-  rm -f "$URL_FILE" "$LOG" "$OUT_LOG"
-  URL=""
-  TUNNEL_URL=""
-  PREV=""
-  # 127.0.0.1 + IPv4 edge avoids localhost/IPv6 happy-eyeballs delay.
-  # Detach from this shell so closing the tool terminal does not kill the tunnel.
-  local target="http://127.0.0.1:${PORT}"
-  rm -f "$PID_FILE"
-  if command -v python3 >/dev/null 2>&1; then
-    python3 -c '
-import os, sys
-pidfile, cmd = sys.argv[1], sys.argv[2:]
-if os.fork() > 0:
-    os._exit(0)
-os.setsid()
-if os.fork() > 0:
-    os._exit(0)
-fd = os.open(pidfile, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-os.write(fd, str(os.getpid()).encode())
-os.close(fd)
-os.execvp(cmd[0], cmd)
-' "$PID_FILE" "$CF" tunnel --url "$target" --http-host-header "127.0.0.1:${PORT}" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 3 >"$OUT_LOG" 2>"$LOG" </dev/null &
-    local helper=$!
-    local pid_wait
-    for pid_wait in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-      [[ -s "$PID_FILE" ]] && break
-      sleep 0.1
-    done
-    wait "$helper" 2>/dev/null || true
-  else
-    if command -v setsid >/dev/null 2>&1; then
-      setsid nohup "$CF" tunnel --url "$target" --http-host-header "127.0.0.1:${PORT}" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 3 >"$OUT_LOG" 2>"$LOG" </dev/null &
-    else
-      nohup "$CF" tunnel --url "$target" --http-host-header "127.0.0.1:${PORT}" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 3 >"$OUT_LOG" 2>"$LOG" </dev/null &
-    fi
-    echo $! >"$PID_FILE"
-    disown "$!" 2>/dev/null || true
-  fi
-  read_pid
-  if [[ -z "${TPID:-}" ]]; then
-    echo -e "  ${RED}${BOLD}[HATA]${RST} Tünel başlatılamadı. Log: $LOG"
+  elif ! port_listening "$PORT"; then
+    echo -e "  ${RED}${BOLD}[HATA]${RST} Uygulama ${PORT} portunda açılamadı."
     wait_key
     return
   fi
-  sleep 0.3
-  if ! pid_alive "$TPID"; then
-    echo -e "  ${RED}${BOLD}[HATA]${RST} Tünel açılır açılmaz çıktı. Son log:"
-    logtail
-    rm -f "$PID_FILE"
+  echo -e "  ${CYN}[2/4]${RST} Uygulama http://127.0.0.1:${PORT} hazır."
+
+  if ! open_resolving_tunnel; then
+    kill_tunnel
     wait_key
     return
   fi
-
-  echo -e "  ${CYN}[4/4]${RST} Yayın linki bekleniyor..."
-  URL=""
-  local tries=0
-  while true; do
-    refresh_url
-    [[ -n "${URL:-}" ]] && break
-    tries=$((tries + 1))
-    if (( tries % 20 == 0 )); then
-      echo -e "  ${DIM}   ... $((tries / 4)) saniye beklendi${RST}"
-    fi
-    if ! pid_alive "$TPID"; then
-      echo -e "  ${RED}${BOLD}[HATA]${RST} Tünel çıktı, link alınamadı. Son log:"
-      logtail
-      rm -f "$PID_FILE" "$URL_FILE"
-      wait_key
-      return
-    fi
-    if (( tries >= 180 )); then
-      echo -e "  ${RED}${BOLD}[HATA]${RST} Yayın linki alınamadı - süre doldu. Son log:"
-      logtail
-      rm -f "$PID_FILE"
-      wait_key
-      return
-    fi
-    sleep 0.25
-  done
-
   if ! port_listening "$PORT"; then
     echo -e "  ${RED}${BOLD}[HATA]${RST} Dev server origin ${PORT} portunda yanıt vermiyor."
     logtail
-    rm -f "$PID_FILE" "$URL_FILE"
+    kill_tunnel
     wait_key
     return
   fi
-
-  refresh_url
-  tries=0
-  while true; do
-    local pub
-    pub="$(http_code "${URL}" 3)"
-    pub="${pub:-000}"
-    if (( pub >= 200 && pub <= 399 )); then
-      echo -e "  ${GRN}   Yayın adresi erişilebilir, kod: ${pub} - yayın hazır.${RST}"
-      break
-    fi
-    tries=$((tries + 1))
-    if (( tries >= 2 )); then
-      echo -e "  ${YEL}   Uyarı: halka açık adres henüz doğrulanamadı, son kod: ${pub}.${RST}"
-      echo -e "  ${DIM}   Cloudflare yönlendirmesi birkaç saniye içinde hazır olur.${RST}"
-      break
-    fi
-    sleep 0.4
-  done
-
   refresh_url
   echo
   echo -e "${GRN}${BOLD}"
@@ -1580,15 +1723,18 @@ os.execvp(cmd[0], cmd)
     fi
     send_tunnel_whatsapp "$URL"
   fi
-  if [[ -f "${STATE}/fleet-claimed" ]]; then
+  if [[ -f "${STATE}/fleet-claimed" || "$fresh" -eq 1 ]]; then
     if ! fleet_node publish --root "$ROOT" --url "$URL"; then
-      echo -e "  ${RED}${BOLD}[HATA]${RST} Tünel kaydı yazılamadı. Yerel tünel kapatıldı."
-      kill_tunnel
-      rm -f "${STATE}/fleet-claimed"
-      trap - RETURN
-      fleet_release
-      wait_key
-      return
+      if [[ -f "${STATE}/fleet-claimed" ]]; then
+        echo -e "  ${RED}${BOLD}[HATA]${RST} Tünel kaydı yazılamadı. Yerel tünel kapatıldı."
+        kill_tunnel
+        rm -f "${STATE}/fleet-claimed"
+        trap - RETURN
+        fleet_release
+        wait_key
+        return
+      fi
+      echo -e "  ${YEL}   Yeni adres kayda yazılamadı. Yerel yayın duruyor.${RST}"
     fi
     rm -f "${STATE}/fleet-claimed"
     trap - RETURN

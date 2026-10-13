@@ -166,6 +166,16 @@ function Save-PublicGitHubTree([string]$RepoUrl, [string]$Target) {
   return $ok
 }
 
+function Restore-DuendeeKept([string]$Path, [string]$KeepRoot) {
+  foreach ($item in @('.env', '.env.local', 'node_modules')) {
+    $saved = Join-Path $KeepRoot $item
+    if (-not (Test-Path -LiteralPath $saved)) { continue }
+    $dest = Join-Path $Path $item
+    if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue }
+    Move-Item -LiteralPath $saved -Destination $dest -Force -ErrorAction SilentlyContinue
+  }
+}
+
 function Update-DuendeeSnapshot([string]$Path) {
   $stageParent = Join-Path $env:TEMP ("duendee-upd-" + [guid]::NewGuid().ToString('n'))
   New-Item -ItemType Directory -Force -Path $stageParent | Out-Null
@@ -173,7 +183,7 @@ function Update-DuendeeSnapshot([string]$Path) {
   if (-not (Save-PublicGitHubTree -RepoUrl $script:DuendeeRepoUrl -Target $stage)) {
     Remove-Item -LiteralPath $stageParent -Recurse -Force -ErrorAction SilentlyContinue
     Write-UiLine "  $YEL   Duendee güncellenemedi.$RST"
-    return
+    return $false
   }
   $keepRoot = Join-Path $stageParent 'keep'
   New-Item -ItemType Directory -Force -Path $keepRoot | Out-Null
@@ -186,23 +196,74 @@ function Update-DuendeeSnapshot([string]$Path) {
   Get-ChildItem -LiteralPath $Path -Force | Where-Object { $_.Name -ne '.git' } | ForEach-Object {
     Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
   }
+  $stageNames = @(Get-ChildItem -LiteralPath $stage -Force | ForEach-Object { $_.Name })
+  $landed = $true
   Get-ChildItem -LiteralPath $stage -Force | ForEach-Object {
-    Move-Item -LiteralPath $_.FullName -Destination (Join-Path $Path $_.Name) -Force
-  }
-  foreach ($item in @('.env', '.env.local', 'node_modules')) {
-    $saved = Join-Path $keepRoot $item
-    if (Test-Path -LiteralPath $saved) {
-      $dest = Join-Path $Path $item
-      if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Recurse -Force }
-      Move-Item -LiteralPath $saved -Destination $dest -Force
+    $dest = Join-Path $Path $_.Name
+    if (Test-Path -LiteralPath $dest) {
+      Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $dest) { $landed = $false; return }
+    try {
+      Move-Item -LiteralPath $_.FullName -Destination $dest -Force -ErrorAction Stop
+    } catch {
+      $landed = $false
     }
   }
+  $stale = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue | Where-Object {
+    $_.Name -ne '.git' -and $stageNames -notcontains $_.Name
+  })
+  Restore-DuendeeKept -Path $Path -KeepRoot $keepRoot
   Remove-Item -LiteralPath $stageParent -Recurse -Force -ErrorAction SilentlyContinue
+  if (-not $landed -or $stale.Count -gt 0 -or -not (Test-Path -LiteralPath (Join-Path $Path 'package.json'))) {
+    Write-UiLine "  $YEL   Duendee güncellenemedi.$RST"
+    return $false
+  }
   Write-UiLine "  $GRN   Repo güncel.$RST"
+  return $true
+}
+
+function Invoke-DuendeeGit([string]$RepoPath, [string[]]$Cred, [string[]]$GitArgs) {
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $null = & git @Cred -C $RepoPath @GitArgs 2>&1
+    return [int]$LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $prev
+  }
+}
+
+function Get-DuendeeGitRev([string]$RepoPath, [string[]]$Cred, [string]$Rev) {
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $text = & git @Cred -C $RepoPath rev-parse $Rev 2>$null
+    if ($LASTEXITCODE -ne 0) { return '' }
+    return ("$text").Trim()
+  } finally {
+    $ErrorActionPreference = $prev
+  }
+}
+
+function Update-DuendeeFromGit([string]$Path, [string[]]$Cred, [string]$Remote) {
+  foreach ($branch in @('main', 'master')) {
+    $fetched = (Invoke-DuendeeGit $Path $Cred @('fetch', '--depth', '1', $Remote, $branch)) -eq 0
+    if (-not $fetched) {
+      $fetched = (Invoke-DuendeeGit $Path $Cred @('fetch', $Remote, $branch)) -eq 0
+    }
+    if (-not $fetched) { continue }
+    $tipRev = if ($Remote -eq 'origin') { "origin/$branch" } else { 'FETCH_HEAD' }
+    if ((Invoke-DuendeeGit $Path $Cred @('reset', '--hard', $tipRev)) -ne 0) { continue }
+    $head = Get-DuendeeGitRev $Path $Cred 'HEAD'
+    $tip = Get-DuendeeGitRev $Path $Cred $tipRev
+    if ($head -and $head -eq $tip) { return $true }
+  }
+  return $false
 }
 
 function Update-DuendeeRepoSafe([string]$Path) {
-  if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return }
+  if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return $false }
   Write-UiLine "  $DIM   Duendee güncelleniyor...$RST"
   $gitOk = $false
   if ((Test-Path -LiteralPath (Join-Path $Path '.git')) -and (Get-Command git -ErrorAction SilentlyContinue)) {
@@ -214,19 +275,17 @@ function Update-DuendeeRepoSafe([string]$Path) {
         & $gh.Source auth status 1>$null 2>$null
         if ($LASTEXITCODE -eq 0) { $cred = @('-c', 'credential.helper=!gh auth git-credential') }
       }
-      & git @cred -C $Path fetch --depth 1 origin main 2>$null | Out-Null
-      if ($LASTEXITCODE -ne 0) { & git @cred -C $Path fetch origin main 2>$null | Out-Null }
-      if ($LASTEXITCODE -eq 0) {
-        & git @cred -C $Path reset --hard origin/main 2>$null | Out-Null
-        if ($LASTEXITCODE -eq 0) { $gitOk = $true }
+      $gitOk = [bool](Update-DuendeeFromGit -Path $Path -Cred $cred -Remote $script:DuendeeRepoUrl)
+      if (-not $gitOk) {
+        $gitOk = [bool](Update-DuendeeFromGit -Path $Path -Cred $cred -Remote 'origin')
       }
     } catch {}
   }
   if ($gitOk) {
     Write-UiLine "  $GRN   Repo güncel.$RST"
-    return
+    return $true
   }
-  Update-DuendeeSnapshot -Path $Path
+  return [bool](Update-DuendeeSnapshot -Path $Path)
 }
 
 function Find-LocalDuendeeRepos {
@@ -1124,6 +1183,60 @@ function Test-PublicUrlLive([string]$Url) {
   return ([int]::TryParse("$pub", [ref]$n) -and $n -ge 200 -and $n -le 399)
 }
 
+function Test-PublicDns([string]$HostName) {
+  if ([string]::IsNullOrWhiteSpace($HostName)) { return $false }
+  $ns = ''
+  try { $ns = (& nslookup.exe -type=A $HostName 1.1.1.1 2>&1 | Out-String) } catch { $ns = '' }
+  if ($ns -match 'NXDOMAIN|Non-existent domain|can.t find') { return $false }
+  $addrs = [regex]::Matches($ns, '(?m)^\s*(?:Address|Adres):\s+(\d{1,3}(?:\.\d{1,3}){3})')
+  if ($addrs.Count -ge 2) { return $true }
+  try {
+    $found = @(Resolve-DnsName -Name $HostName -Type A -DnsOnly -ErrorAction Stop | Where-Object { $_.IPAddress })
+    if ($found.Count -gt 0) { return $true }
+  } catch {}
+  return $false
+}
+
+function Wait-PublicTunnelReady([string]$Url, [int]$Seconds = 20) {
+  if ([string]::IsNullOrWhiteSpace($Url)) { return $false }
+  $hostName = ''
+  try { $hostName = ([Uri]$Url).Host } catch { return $false }
+  $deadline = [datetime]::UtcNow.AddSeconds($Seconds)
+  while ([datetime]::UtcNow -lt $deadline) {
+    if ((Test-PublicDns $hostName) -and (Test-PublicUrlLive $Url)) { return $true }
+    if (-not (Test-CloudflaredAlive)) { return $false }
+    Start-Sleep -Milliseconds 700
+  }
+  return $false
+}
+
+function Start-QuickTunnelOnce([string]$Cloudflared) {
+  Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $UrlFile, $LogFile, $OutLogFile -Force -ErrorAction SilentlyContinue
+  $target = "http://127.0.0.1:$Port"
+  $cfCmd = "`"$Cloudflared`" tunnel --url `"$target`" --http-host-header `"127.0.0.1:$Port`" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 3 > `"$OutLogFile`" 2> `"$LogFile`""
+  $proc = Start-HiddenCmd $cfCmd
+  if (-not $proc) { return $null }
+  Set-Content -LiteralPath $PidFile -Value $proc.Id -Encoding Ascii
+  Sync-CloudflaredPid
+  Start-Sleep -Milliseconds 300
+  $waitStart = [datetime]::UtcNow
+  $deadline = $waitStart.AddSeconds(45)
+  $tick = 0
+  while ([datetime]::UtcNow -lt $deadline) {
+    $tick++
+    $found = Get-TunnelUrl
+    if ($found) { return $found }
+    if (-not (Test-PidAlive $proc.Id) -and -not (Test-CloudflaredAlive)) { return $null }
+    if (($tick % 20) -eq 0) {
+      $sec = [int]([datetime]::UtcNow - $waitStart).TotalSeconds
+      Write-UiLine "  $DIM   ... $sec saniye beklendi$RST"
+    }
+    Start-Sleep -Milliseconds 250
+  }
+  return $null
+}
+
 function Test-LinkAlreadySent([string]$Url) {
   if ([string]::IsNullOrWhiteSpace($Url)) { return $false }
   $file = Join-Path (Get-WaSessionDir) 'sent-links.json'
@@ -1474,6 +1587,60 @@ function Update-ToolCopy {
   }
 }
 
+function Get-DuendeeDepStamp([string]$Path) {
+  $parts = New-Object System.Collections.Generic.List[string]
+  foreach ($name in @('package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock')) {
+    $file = Join-Path $Path $name
+    if (Test-Path -LiteralPath $file -PathType Leaf) {
+      [void]$parts.Add((Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash)
+    } else {
+      [void]$parts.Add('-')
+    }
+  }
+  return ($parts -join '|')
+}
+
+function Sync-DuendeeForPublish {
+  if (-not (Test-LooksLikeDuendeeRepo $Project)) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST projectPath Duendee deposu değil. Güncel sürüm yayına alınamadı."
+    return $false
+  }
+  Stop-DevServer
+  Stop-ListenersOnPort $Port
+  Start-Sleep -Milliseconds 300
+  if (Test-PortListening $Port) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST $Port portu boşaltılamadı. Eski yayın durdurulamadı."
+    return $false
+  }
+  $before = Get-DuendeeDepStamp $Project
+  if (-not (Update-DuendeeRepoSafe $Project)) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST Duendee güncellenemedi. Eski sürüm yayına alınmadı."
+    return $false
+  }
+  $after = Get-DuendeeDepStamp $Project
+  if (-not (Test-Path -LiteralPath (Join-Path $Project 'node_modules')) -or $before -ne $after) {
+    Write-UiLine "  $DIM   Bağımlılıklar kuruluyor (npm install)...$RST"
+    Push-Location $Project
+    try {
+      & npm install *>&1 | Out-Host
+      $npmCode = $LASTEXITCODE
+    } finally { Pop-Location }
+    if ($npmCode -ne 0) {
+      Write-UiLine "  $RED$BOLD   [HATA]$RST npm install başarısız."
+      return $false
+    }
+  }
+  $dist = Join-Path $Project 'dist'
+  if (Test-Path -LiteralPath $dist) {
+    Remove-Item -LiteralPath $dist -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  if (Test-Path -LiteralPath (Join-Path $dist 'index.html')) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST Eski derleme silinemedi."
+    return $false
+  }
+  return $true
+}
+
 function Invoke-Start {
   if ($env:DT_RECOVER -ne '1') {
     Remove-Item -LiteralPath (Join-Path $StateDir 'manual-stop') -Force -ErrorAction SilentlyContinue
@@ -1494,6 +1661,7 @@ function Invoke-Start {
   $env:CF = $cf
 
   $script:FleetClaimed = $false
+  $script:NeedFreshTunnel = $false
   try {
   $localAlive = Test-TunnelRunning
   $localUrl = if ($localAlive) { Recover-TunnelUrl } else { '' }
@@ -1532,148 +1700,92 @@ function Invoke-Start {
   if ($tunnelAlive) {
     Write-UiLine "  $GRN   Aktif tünel var.$RST"
     $existing = Recover-TunnelUrl
-    if (-not (Test-PortListening $Port)) {
-      Write-UiLine "  ${CYN}   Yerel uygulama kapalı. Mevcut tünel aynı adreste kalsın diye açılıyor...$RST"
-      if (-not (Start-AppOrigin)) {
-        Write-UiLine "  $YEL   Uygulama açılamadı. Tünel duruyor ama sayfa erişilemeyebilir.$RST"
-      }
-    }
-    if (-not $existing) {
-      Write-UiLine "  $YEL   Tünel çalışıyor ama yayın linki okunamadı. Kapatmak için [4].$RST"
+    Write-UiLine "  ${CYN}   Güncel Duendee yayına alınıyor...$RST"
+    if (-not (Sync-DuendeeForPublish)) {
       Complete-Action
       return
     }
-    $cfProc = @(Get-CloudflaredProcesses) | Select-Object -First 1
-    if ($cfProc -and $cfProc.ProcessId) {
-      Set-Content -LiteralPath $PidFile -Value $cfProc.ProcessId -Encoding Ascii
+    if (-not (Start-AppOrigin)) {
+      Write-UiLine "  $YEL   Uygulama açılamadı. Tünel duruyor ama sayfa erişilemeyebilir.$RST"
     }
-    Set-Clipboard -Value $existing
-    Write-UiLine "  $BLUE$BOLD     $existing$RST"
-    Complete-Action
-    return
+    if ($existing -and (Wait-PublicTunnelReady -Url $existing -Seconds 12)) {
+      $cfProc = @(Get-CloudflaredProcesses) | Select-Object -First 1
+      if ($cfProc -and $cfProc.ProcessId) {
+        Set-Content -LiteralPath $PidFile -Value $cfProc.ProcessId -Encoding Ascii
+      }
+      Set-Clipboard -Value $existing
+      Write-UiLine "  $BLUE$BOLD     $existing$RST"
+      Complete-Action
+      return
+    }
+    Write-UiLine "  $YEL   Yayın adresi DNS'te yok. Yeni tünel açılıyor.$RST"
+    Stop-TunnelOnly
+    $script:NeedFreshTunnel = $true
   }
   }
-  if ($decision -ne 'own') {
+  if ($decision -ne 'own' -and -not $script:NeedFreshTunnel) {
     Write-UiLine "  $RED$BOLD[HATA]$RST Tünel kaydı okunamadı. Yeni tünel açılmadı."
     Complete-Action
     return
   }
-  $script:FleetClaimed = $true
+  if (-not $script:NeedFreshTunnel) { $script:FleetClaimed = $true }
   if (Read-TunnelPid) { Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue }
 
-  if (Test-PortListening $Port) {
-    Stop-DevServer
-    Stop-ListenersOnPort $Port
-    Start-Sleep -Milliseconds 300
-  }
-  if (Test-PortListening $Port) {
-    Write-UiLine "  $RED$BOLD[HATA]$RST $Port portu boşaltılamadı. Eski yayın durdurulamadı."
-    Complete-Action
-    return
-  }
-  Write-UiLine "  ${CYN}[2/4]$RST Uygulama başlatılıyor..."
-  if (-not (Test-Path -LiteralPath (Join-Path $Project 'node_modules'))) {
-    Write-UiLine "  $DIM   node_modules yok, npm install çalıştırılıyor...$RST"
-    Push-Location $Project
-    try {
-      & npm install
-      if ($LASTEXITCODE -ne 0) {
-        Write-UiLine "  $RED$BOLD   [HATA]$RST npm install başarısız."
-        Complete-Action
-        return
-      }
-    } finally { Pop-Location }
-  }
-  if (-not (Start-AppOrigin)) {
+  if (-not $script:NeedFreshTunnel) {
+    Write-UiLine "  ${CYN}[2/4]$RST Güncel Duendee yayına alınıyor..."
+    if (-not (Sync-DuendeeForPublish)) {
+      Complete-Action
+      return
+    }
+    Write-UiLine "  ${CYN}[2/4]$RST Uygulama başlatılıyor..."
+    if (-not (Start-AppOrigin)) {
+      Write-UiLine "  $RED$BOLD[HATA]$RST Uygulama $Port portunda açılamadı."
+      Write-UiLine "  $DIM   Ayrıntı: $(Join-Path $StateDir 'server.out.log')$RST"
+      Complete-Action
+      return
+    }
+  } elseif (-not (Test-PortListening $Port)) {
     Write-UiLine "  $RED$BOLD[HATA]$RST Uygulama $Port portunda açılamadı."
-    Write-UiLine "  $DIM   Ayrıntı: $(Join-Path $StateDir 'server.out.log')$RST"
     Complete-Action
     return
   }
   Write-UiLine "  ${CYN}[2/4]$RST Uygulama http://127.0.0.1:$Port hazır."
 
-  Write-UiLine "  ${CYN}[3/4]$RST Cloudflare tünel başlatılıyor..."
-  Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $UrlFile, $LogFile, $OutLogFile -Force -ErrorAction SilentlyContinue
-  # 127.0.0.1 + IPv4 edge avoids localhost/IPv6 happy-eyeballs delay on Windows
-  $target = "http://127.0.0.1:$Port"
-  $cfCmd = "`"$cf`" tunnel --url `"$target`" --http-host-header `"127.0.0.1:$Port`" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 3 > `"$OutLogFile`" 2> `"$LogFile`""
-  $tp = Start-HiddenCmd $cfCmd
-  if (-not $tp) {
-    Write-UiLine "  $RED$BOLD[HATA]$RST Tünel başlatılamadı. Log: $LogFile"
-    Complete-Action
-    return
-  }
-  Set-Content -LiteralPath $PidFile -Value $tp.Id -Encoding Ascii
-  Sync-CloudflaredPid
-  Start-Sleep -Milliseconds 300
-  if (-not (Test-PidAlive $tp.Id)) {
-    Write-UiLine "  $RED$BOLD[HATA]$RST Tünel açılır açılmaz çıktı. Son log:"
-    Show-LogTail
-    Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
-    Complete-Action
-    return
-  }
-
-  Write-UiLine "  ${CYN}[4/4]$RST Yayın linki bekleniyor..."
   $url = $null
-  $waitStart = [datetime]::UtcNow
-  $deadline = $waitStart.AddSeconds(45)
-  $tick = 0
-  while ([datetime]::UtcNow -lt $deadline) {
-    $tick++
-    $url = Get-TunnelUrl
-    if ($url) { break }
-    if (-not (Test-PidAlive $tp.Id)) {
-      Write-UiLine "  $RED$BOLD[HATA]$RST Tünel çıktı, link alınamadı. Son log:"
+  for ($attempt = 1; $attempt -le 3; $attempt++) {
+    if ($attempt -eq 1) {
+      Write-UiLine "  ${CYN}[3/4]$RST Cloudflare tünel başlatılıyor..."
+    } else {
+      Write-UiLine "  $YEL   Adres DNS'te yok, yeni tünel deneniyor ($attempt/3)...$RST"
+    }
+    $url = Start-QuickTunnelOnce -Cloudflared $cf
+    if (-not $url) {
       Show-LogTail
-      Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue
-      Complete-Action
-      return
+      Stop-TunnelOnly
+      continue
     }
-    if (($tick % 20) -eq 0) {
-      $sec = [int]([datetime]::UtcNow - $waitStart).TotalSeconds
-      Write-UiLine "  $DIM   ... $sec saniye beklendi$RST"
+    Write-UiLine "  ${CYN}[4/4]$RST DNS kaydı bekleniyor..."
+    if (Wait-PublicTunnelReady -Url $url -Seconds 20) {
+      Write-UiLine "  $GRN   Yayın adresi erişilebilir - yayın hazır.$RST"
+      break
     }
-    Start-Sleep -Milliseconds 250
+    $url = $null
+    Stop-TunnelOnly
   }
   if (-not $url) {
-    Write-UiLine "  $RED$BOLD[HATA]$RST Yayın linki alınamadı - süre doldu. Son log:"
+    Write-UiLine "  $RED$BOLD[HATA]$RST Yayın adresi DNS'te oluşmadı. Son log:"
     Show-LogTail
-    Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
+    Stop-TunnelOnly
     Complete-Action
     return
   }
-
-  # Origin port was already verified; one quick HTTP check is enough
   if (-not (Test-PortListening $Port)) {
     Write-UiLine "  $RED$BOLD[HATA]$RST Dev server origin $Port portunda yanıt vermiyor."
     Show-LogTail
-    Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue
+    Stop-TunnelOnly
     Complete-Action
     return
   }
-
-  $pub = '000'
-  $pubOk = $false
-  for ($tries = 1; $tries -le 2; $tries++) {
-    $url = Get-TunnelUrl
-    try { $pub = & curl.exe -s -o nul -w '%{http_code}' --max-time 3 $url } catch { $pub = '000' }
-    if (-not $pub) { $pub = '000' }
-    $n = 0
-    if ([int]::TryParse("$pub", [ref]$n) -and $n -ge 200 -and $n -le 399) {
-      Write-UiLine "  $GRN   Yayın adresi erişilebilir, kod: $pub - yayın hazır.$RST"
-      $pubOk = $true
-      break
-    }
-    Start-Sleep -Milliseconds 400
-  }
-  if (-not $pubOk) {
-    Write-UiLine "  $YEL   Uyarı: halka açık adres henüz doğrulanamadı, son kod: $pub.$RST"
-    Write-UiLine "  $DIM   Cloudflare yönlendirmesi birkaç saniye içinde hazır olur.$RST"
-  }
-
-  $url = Get-TunnelUrl
   Write-UiLine ''
   Write-UiLine "$GRN$BOLD"
   Write-UiLine '  +======================================================+'
@@ -1696,7 +1808,7 @@ function Invoke-Start {
     }
     Send-TunnelWhatsApp -PublicUrl $url
   }
-  if ($script:FleetClaimed) {
+  if ($script:FleetClaimed -or $script:NeedFreshTunnel) {
     if (-not $url) {
       Write-UiLine "  $RED$BOLD[HATA]$RST Tünel kaydı yazılamadı. Yerel tünel kapatıldı."
       Stop-TunnelOnly
@@ -1705,8 +1817,12 @@ function Invoke-Start {
     }
     [void](Invoke-Fleet publish --url "$url")
     if ($script:FleetExit -ne 0) {
-      Write-UiLine "  $RED$BOLD[HATA]$RST Tünel kaydı yazılamadı. Yerel tünel kapatıldı."
-      Stop-TunnelOnly
+      if ($script:FleetClaimed) {
+        Write-UiLine "  $RED$BOLD[HATA]$RST Tünel kaydı yazılamadı. Yerel tünel kapatıldı."
+        Stop-TunnelOnly
+      } else {
+        Write-UiLine "  $YEL   Yeni adres kayda yazılamadı. Yerel yayın duruyor.$RST"
+      }
       Complete-Action
       return
     }
