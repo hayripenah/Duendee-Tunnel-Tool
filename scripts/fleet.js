@@ -461,7 +461,6 @@ async function heartbeat(root) {
   const manual = path.join(dir, 'manual-stop')
   fs.writeFileSync(path.join(dir, 'fleet-heartbeat.pid'), String(process.pid))
   if (!fs.existsSync(flag)) fs.writeFileSync(flag, '1')
-  let urlMisses = 0
   while (fs.existsSync(flag)) {
     try {
       const cur = await readRec(token)
@@ -492,13 +491,9 @@ async function heartbeat(root) {
         await new Promise((r) => setTimeout(r, HEARTBEAT_MS))
         continue
       }
-      const urlOk = cur.url ? await httpOk(cur.url) : false
       const cfAlive = cloudflaredAlive()
-      if (urlOk) urlMisses = 0
-      else urlMisses += 1
       const crashed = cur.state === 'live' && !procAlive && !cfAlive
-      const timedOut = cur.state === 'live' && !urlOk && urlMisses >= 3
-      if (crashed || timedOut) {
+      if (crashed) {
         stopLocalTunnel(root)
         if (fs.existsSync(manual)) {
           await writeRec(token, { url: '', owner: '', host: '', state: 'idle', updatedAt: Date.now() }, cur.sha)

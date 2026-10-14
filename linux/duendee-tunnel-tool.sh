@@ -298,12 +298,12 @@ update_duendee_from_git() {
   local path="$1" remote="$2" branch tip_rev
   for branch in main master; do
     fetch_duendee_ref "$path" "$remote" "$branch" || continue
-    if [[ "$remote" == origin ]]; then
-      tip_rev="origin/${branch}"
-    else
-      tip_rev="FETCH_HEAD"
+    # `git fetch <remote> <branch>` updates FETCH_HEAD, not refs/remotes/origin/<branch>.
+    tip_rev="FETCH_HEAD"
+    if reset_duendee_to "$path" "$tip_rev"; then
+      git_with_gh -C "$path" update-ref "refs/remotes/origin/${branch}" "$(git_with_gh -C "$path" rev-parse FETCH_HEAD)" >/dev/null 2>&1 || true
+      return 0
     fi
-    reset_duendee_to "$path" "$tip_rev" && return 0
   done
   return 1
 }
@@ -1446,7 +1446,11 @@ public_dns() {
   local host="$1" out addrs
   [[ -n "$host" ]] || return 1
   if command -v nslookup >/dev/null 2>&1; then
-    out="$(nslookup -type=A "$host" 1.1.1.1 2>/dev/null || true)"
+    if command -v timeout >/dev/null 2>&1; then
+      out="$(timeout 3 nslookup -type=A "$host" 1.1.1.1 2>/dev/null || true)"
+    else
+      out="$(nslookup -type=A "$host" 1.1.1.1 2>/dev/null || true)"
+    fi
     if printf '%s\n' "$out" | grep -Eqi 'NXDOMAIN|Non-existent|can.t find'; then
       return 1
     fi
@@ -1642,22 +1646,22 @@ do_start() {
   esac
   local fresh=0
   if [[ "$decision" == keep || "$decision" == keep$'\t'* ]]; then
-    echo -e "  ${CYN}   Güncel Duendee yayına alınıyor...${RST}"
-    if ! prepare_latest_duendee; then
+    echo -e "  ${GRN}   Aktif tünel var.${RST}"
+    if ! port_listening "$PORT"; then
+      echo -e "  ${CYN}   Yerel uygulama kapalı, aynı tünel için açılıyor...${RST}"
+      start_app_origin || echo -e "  ${YEL}   Uygulama açılamadı. Tünel duruyor ama sayfa erişilemeyebilir.${RST}"
+    fi
+    recover_tunnel_url || true
+    if [[ -z "${URL:-}" ]]; then
+      echo -e "  ${YEL}   Tünel çalışıyor ama yayın linki okunamadı. Kapatmak için [4].${RST}"
       wait_key
       return
     fi
-    start_app_origin || echo -e "  ${YEL}   Uygulama açılamadı. Tünel duruyor ama sayfa erişilemeyebilir.${RST}"
-    if [[ -n "${URL:-}" ]] && wait_public_ready "$URL" 12; then
-      echo -e "${BLUE}${BOLD}     ${URL}${RST}"
-      copy_clipboard "$URL" >/dev/null 2>&1 || true
-      echo
-      wait_key
-      return
-    fi
-    echo -e "  ${YEL}   Yayın adresi DNS'te yok. Yeni tünel açılıyor.${RST}"
-    kill_tunnel
-    fresh=1
+    echo -e "${BLUE}${BOLD}     ${URL}${RST}"
+    copy_clipboard "$URL" >/dev/null 2>&1 || true
+    echo
+    wait_key
+    return
   fi
   read_pid
   if [[ -n "${TPID:-}" ]]; then
@@ -1763,8 +1767,10 @@ do_status() {
       DT_FLEET_QUIET=1 fleet_node publish --root "$ROOT" --url "$local_url" >/dev/null 2>&1 || true
     fi
   fi
-  fleet_url="$(fleet_node show --root "$ROOT" 2>/dev/null || true)"
-  URL="${fleet_url:-$local_url}"
+  if [[ -z "$local_url" ]]; then
+    fleet_url="$(fleet_node show --root "$ROOT" 2>/dev/null || true)"
+  fi
+  URL="${local_url:-$fleet_url}"
   if [[ -n "$URL" ]]; then
     echo -e "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR${RST}"
     echo -e "  Yayın Linki ......... ${BLUE}${BOLD}${URL}${RST}"

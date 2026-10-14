@@ -253,11 +253,14 @@ function Update-DuendeeFromGit([string]$Path, [string[]]$Cred, [string]$Remote) 
       $fetched = (Invoke-DuendeeGit $Path $Cred @('fetch', $Remote, $branch)) -eq 0
     }
     if (-not $fetched) { continue }
-    $tipRev = if ($Remote -eq 'origin') { "origin/$branch" } else { 'FETCH_HEAD' }
-    if ((Invoke-DuendeeGit $Path $Cred @('reset', '--hard', $tipRev)) -ne 0) { continue }
+    # `git fetch <remote> <branch>` updates FETCH_HEAD. It does not move refs/remotes/origin/<branch>.
+    if ((Invoke-DuendeeGit $Path $Cred @('reset', '--hard', 'FETCH_HEAD')) -ne 0) { continue }
     $head = Get-DuendeeGitRev $Path $Cred 'HEAD'
-    $tip = Get-DuendeeGitRev $Path $Cred $tipRev
-    if ($head -and $head -eq $tip) { return $true }
+    $tip = Get-DuendeeGitRev $Path $Cred 'FETCH_HEAD'
+    if ($head -and $head -eq $tip) {
+      [void](Invoke-DuendeeGit $Path $Cred @('update-ref', "refs/remotes/origin/$branch", $tip))
+      return $true
+    }
   }
   return $false
 }
@@ -352,7 +355,7 @@ function Clone-DuendeeTo([string]$ParentDir) {
   $target = Join-Path $ParentDir $script:DuendeeCloneName
   if (Test-Path -LiteralPath $target) {
     if (Test-LooksLikeDuendeeRepo $target) {
-      Update-DuendeeRepoSafe $target
+      $null = Update-DuendeeRepoSafe $target
       return (Resolve-Path -LiteralPath $target).Path
     }
     Write-UiLine "  $YEL   Klasör zaten var ama Duendee görünmüyor: $target$RST"
@@ -387,13 +390,13 @@ function Resolve-ProjectPathInteractive([string]$CurrentProj) {
     $choice = (Read-Host).Trim()
     if ([string]::IsNullOrWhiteSpace($choice) -or $choice -eq '1') {
       $path = $found[0]
-      Update-DuendeeRepoSafe $path
+      $null = Update-DuendeeRepoSafe $path
       return $path
     }
     if ($choice -match '^\d+$') {
       $idx = [int]$choice - 1
       if ($idx -ge 0 -and $idx -lt $found.Count) {
-        Update-DuendeeRepoSafe $found[$idx]
+        $null = Update-DuendeeRepoSafe $found[$idx]
         return $found[$idx]
       }
     }
@@ -404,7 +407,7 @@ function Resolve-ProjectPathInteractive([string]$CurrentProj) {
     if ($choice -match '^(?i)b$') {
       $picked = Select-FolderBrowser 'Duendee proje klasörünü seçin'
       if ($picked -and (Test-Path -LiteralPath $picked -PathType Container)) {
-        if (Test-LooksLikeDuendeeRepo $picked) { Update-DuendeeRepoSafe $picked }
+        if (Test-LooksLikeDuendeeRepo $picked) { $null = Update-DuendeeRepoSafe $picked }
         return (Resolve-Path -LiteralPath $picked).Path
       }
     }
@@ -422,7 +425,7 @@ function Resolve-ProjectPathInteractive([string]$CurrentProj) {
       $picked = Select-FolderBrowser 'Duendee proje klasörünü seçin (veya klon ana klasörü)'
       if ($picked) {
         if (Test-LooksLikeDuendeeRepo $picked) {
-          Update-DuendeeRepoSafe $picked
+          $null = Update-DuendeeRepoSafe $picked
           return (Resolve-Path -LiteralPath $picked).Path
         }
         $cloned = Clone-DuendeeTo $picked
@@ -431,7 +434,7 @@ function Resolve-ProjectPathInteractive([string]$CurrentProj) {
     } elseif ($choice -notmatch '^(?i)c$') {
       if (Test-Path -LiteralPath $choice -PathType Container) {
         if (Test-LooksLikeDuendeeRepo $choice) {
-          Update-DuendeeRepoSafe $choice
+          $null = Update-DuendeeRepoSafe $choice
           return (Resolve-Path -LiteralPath $choice).Path
         }
         $cloned = Clone-DuendeeTo $choice
@@ -452,13 +455,13 @@ function Resolve-ProjectPathInteractive([string]$CurrentProj) {
     }
     if (Test-Path -LiteralPath $entered -PathType Container) {
       if (Test-LooksLikeDuendeeRepo $entered) {
-        Update-DuendeeRepoSafe $entered
+        $null = Update-DuendeeRepoSafe $entered
         return (Resolve-Path -LiteralPath $entered).Path
       }
       # Parent dir: clone into it
       $maybeChild = Join-Path $entered $script:DuendeeCloneName
       if (Test-LooksLikeDuendeeRepo $maybeChild) {
-        Update-DuendeeRepoSafe $maybeChild
+        $null = Update-DuendeeRepoSafe $maybeChild
         return (Resolve-Path -LiteralPath $maybeChild).Path
       }
       $cloned = Clone-DuendeeTo $entered
@@ -509,7 +512,7 @@ function Ensure-ToolConfig {
     Write-UiLine "  $GRN   projectPath = $proj$RST"
     Write-UiLine ''
   } elseif (Test-LooksLikeDuendeeRepo $proj) {
-    Update-DuendeeRepoSafe $proj
+    $null = Update-DuendeeRepoSafe $proj
   }
 
   return @{ Project = $proj; Port = $portNum }
@@ -981,15 +984,28 @@ function Add-ProcessToToolJob([System.Diagnostics.Process]$Process) {
 }
 
 function Start-HiddenCmd([string]$Command) {
+  # WMI starts the process outside this console's job, so closing the tool
+  # does not tear down the tunnel or the app. [4] is what stops them.
+  $cmdExe = Join-Path $env:SystemRoot 'System32\cmd.exe'
+  $commandLine = '"' + $cmdExe + '" /D /S /C "' + $Command + '"'
+  try {
+    $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $commandLine }
+    if ($created -and [int]$created.ReturnValue -eq 0 -and [int]$created.ProcessId -gt 0) {
+      $proc = Get-Process -Id ([int]$created.ProcessId) -ErrorAction SilentlyContinue
+      if (-not $proc) {
+        Start-Sleep -Milliseconds 200
+        $proc = Get-Process -Id ([int]$created.ProcessId) -ErrorAction SilentlyContinue
+      }
+      if ($proc) { return $proc }
+    }
+  } catch {}
   $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = Join-Path $env:SystemRoot 'System32\cmd.exe'
-  # /S keeps a quoted exe path intact. Without it cmd strips the first and last quote and exits at once.
+  $psi.FileName = $cmdExe
   $psi.Arguments = '/D /S /C "' + $Command + '"'
   $psi.UseShellExecute = $false
   $psi.CreateNoWindow = $true
   $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-  $proc = [System.Diagnostics.Process]::Start($psi)
-  return $proc
+  return [System.Diagnostics.Process]::Start($psi)
 }
 
 function Start-DetachedRetract {
@@ -1185,15 +1201,14 @@ function Test-PublicUrlLive([string]$Url) {
 
 function Test-PublicDns([string]$HostName) {
   if ([string]::IsNullOrWhiteSpace($HostName)) { return $false }
-  $ns = ''
-  try { $ns = (& nslookup.exe -type=A $HostName 1.1.1.1 2>&1 | Out-String) } catch { $ns = '' }
-  if ($ns -match 'NXDOMAIN|Non-existent domain|can.t find') { return $false }
-  $addrs = [regex]::Matches($ns, '(?m)^\s*(?:Address|Adres):\s+(\d{1,3}(?:\.\d{1,3}){3})')
-  if ($addrs.Count -ge 2) { return $true }
-  try {
-    $found = @(Resolve-DnsName -Name $HostName -Type A -DnsOnly -ErrorAction Stop | Where-Object { $_.IPAddress })
-    if ($found.Count -gt 0) { return $true }
-  } catch {}
+  foreach ($server in @('1.1.1.1', '8.8.8.8', $null)) {
+    try {
+      $params = @{ Name = $HostName; Type = 'A'; QuickTimeout = $true; DnsOnly = $true; ErrorAction = 'Stop' }
+      if ($server) { $params.Server = $server }
+      $found = @(Resolve-DnsName @params | Where-Object { $_.IPAddress })
+      if ($found.Count -gt 0) { return $true }
+    } catch {}
+  }
   return $false
 }
 
@@ -1358,14 +1373,18 @@ function Invoke-Status {
   }
   if (Test-TunnelRunning) { Sync-CloudflaredPid }
   $localUrl = if (Test-TunnelRunning) { Recover-TunnelUrl } else { '' }
+  if (-not $localUrl -and (Test-TunnelRunning)) { $localUrl = Get-TunnelUrl }
   if ($localUrl) {
     $env:DT_FLEET_QUIET = '1'
     [void](Invoke-Fleet publish --url "$localUrl")
     Remove-Item Env:DT_FLEET_QUIET -ErrorAction SilentlyContinue
   }
-  $fleetUrl = "$(Invoke-Fleet show)".Trim()
-  if ($script:FleetExit -ne 0) { $fleetUrl = '' }
-  $url = if ($fleetUrl) { $fleetUrl } else { $localUrl }
+  $fleetUrl = ''
+  if (-not $localUrl) {
+    $fleetUrl = "$(Invoke-Fleet show)".Trim()
+    if ($script:FleetExit -ne 0) { $fleetUrl = '' }
+  }
+  $url = if ($localUrl) { $localUrl } else { $fleetUrl }
   if ($url) {
     Write-UiLine "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR$RST"
     Write-UiLine "  Yayın Linki ......... $BLUE$BOLD$url$RST"
@@ -1700,27 +1719,26 @@ function Invoke-Start {
   if ($tunnelAlive) {
     Write-UiLine "  $GRN   Aktif tünel var.$RST"
     $existing = Recover-TunnelUrl
-    Write-UiLine "  ${CYN}   Güncel Duendee yayına alınıyor...$RST"
-    if (-not (Sync-DuendeeForPublish)) {
-      Complete-Action
-      return
-    }
-    if (-not (Start-AppOrigin)) {
-      Write-UiLine "  $YEL   Uygulama açılamadı. Tünel duruyor ama sayfa erişilemeyebilir.$RST"
-    }
-    if ($existing -and (Wait-PublicTunnelReady -Url $existing -Seconds 12)) {
-      $cfProc = @(Get-CloudflaredProcesses) | Select-Object -First 1
-      if ($cfProc -and $cfProc.ProcessId) {
-        Set-Content -LiteralPath $PidFile -Value $cfProc.ProcessId -Encoding Ascii
+    if (-not $existing) { $existing = Get-TunnelUrl }
+    if (-not (Test-PortListening $Port)) {
+      Write-UiLine "  ${CYN}   Yerel uygulama kapalı, aynı tünel için açılıyor...$RST"
+      if (-not (Start-AppOrigin)) {
+        Write-UiLine "  $YEL   Uygulama açılamadı. Tünel duruyor ama sayfa erişilemeyebilir.$RST"
       }
-      Set-Clipboard -Value $existing
-      Write-UiLine "  $BLUE$BOLD     $existing$RST"
+    }
+    $cfProc = @(Get-CloudflaredProcesses) | Select-Object -First 1
+    if ($cfProc -and $cfProc.ProcessId) {
+      Set-Content -LiteralPath $PidFile -Value $cfProc.ProcessId -Encoding Ascii
+    }
+    if (-not $existing) {
+      Write-UiLine "  $YEL   Tünel çalışıyor ama yayın linki okunamadı. Kapatmak için [4].$RST"
       Complete-Action
       return
     }
-    Write-UiLine "  $YEL   Yayın adresi DNS'te yok. Yeni tünel açılıyor.$RST"
-    Stop-TunnelOnly
-    $script:NeedFreshTunnel = $true
+    Set-Clipboard -Value $existing
+    Write-UiLine "  $BLUE$BOLD     $existing$RST"
+    Complete-Action
+    return
   }
   }
   if ($decision -ne 'own' -and -not $script:NeedFreshTunnel) {
