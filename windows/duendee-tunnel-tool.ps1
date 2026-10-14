@@ -984,17 +984,60 @@ function Add-ProcessToToolJob([System.Diagnostics.Process]$Process) {
 }
 
 function Start-HiddenCmd([string]$Command) {
-  # WMI starts the process outside this console's job, so closing the tool
+  # No console window. Break away from this terminal's job so closing the tool
   # does not tear down the tunnel or the app. [4] is what stops them.
+  if (-not ('DuendeeHiddenProcess' -as [type])) {
+    Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class DuendeeHiddenProcess {
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  struct STARTUPINFO {
+    public int cb;
+    public string lpReserved;
+    public string lpDesktop;
+    public string lpTitle;
+    public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+    public short wShowWindow, cbReserved2;
+    public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  struct PROCESS_INFORMATION {
+    public IntPtr hProcess, hThread;
+    public int dwProcessId, dwThreadId;
+  }
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern bool CreateProcess(string app, string cmd, IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string dir, ref STARTUPINFO si, out PROCESS_INFORMATION pi);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool CloseHandle(IntPtr h);
+  public static int Start(string commandLine) {
+    var si = new STARTUPINFO();
+    si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+    PROCESS_INFORMATION pi;
+    const uint CREATE_NO_WINDOW = 0x08000000;
+    const uint CREATE_NEW_PROCESS_GROUP = 0x00000200;
+    const uint CREATE_BREAKAWAY_FROM_JOB = 0x01000000;
+    bool ok = CreateProcess(null, commandLine, IntPtr.Zero, IntPtr.Zero, false, CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB, IntPtr.Zero, null, ref si, out pi);
+    if (!ok) {
+      ok = CreateProcess(null, commandLine, IntPtr.Zero, IntPtr.Zero, false, CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP, IntPtr.Zero, null, ref si, out pi);
+    }
+    if (!ok) return 0;
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return pi.dwProcessId;
+  }
+}
+'@
+  }
   $cmdExe = Join-Path $env:SystemRoot 'System32\cmd.exe'
   $commandLine = '"' + $cmdExe + '" /D /S /C "' + $Command + '"'
   try {
-    $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $commandLine }
-    if ($created -and [int]$created.ReturnValue -eq 0 -and [int]$created.ProcessId -gt 0) {
-      $proc = Get-Process -Id ([int]$created.ProcessId) -ErrorAction SilentlyContinue
+    $procId = [DuendeeHiddenProcess]::Start($commandLine)
+    if ($procId -gt 0) {
+      $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
       if (-not $proc) {
         Start-Sleep -Milliseconds 200
-        $proc = Get-Process -Id ([int]$created.ProcessId) -ErrorAction SilentlyContinue
+        $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
       }
       if ($proc) { return $proc }
     }
