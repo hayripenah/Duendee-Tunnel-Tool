@@ -1619,6 +1619,19 @@ function Get-DuendeeDepStamp([string]$Path) {
   return ($parts -join '|')
 }
 
+function Test-DuendeeWorktreeDirty([string]$Path) {
+  if (-not (Test-Path -LiteralPath (Join-Path $Path '.git'))) { return $true }
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $out = & git -C $Path status --porcelain 2>$null
+    if ($LASTEXITCODE -ne 0) { return $true }
+    return -not [string]::IsNullOrWhiteSpace("$out")
+  } finally {
+    $ErrorActionPreference = $prev
+  }
+}
+
 function Sync-DuendeeForPublish {
   if (-not (Test-LooksLikeDuendeeRepo $Project)) {
     Write-UiLine "  $RED$BOLD[HATA]$RST projectPath Duendee deposu değil. Güncel sürüm yayına alınamadı."
@@ -1632,9 +1645,11 @@ function Sync-DuendeeForPublish {
     return $false
   }
   $before = Get-DuendeeDepStamp $Project
-  if (-not (Update-DuendeeRepoSafe $Project)) {
-    Write-UiLine "  $RED$BOLD[HATA]$RST Duendee güncellenemedi. Eski sürüm yayına alınmadı."
-    return $false
+  # projectPath is the app to publish. A hard reset would drop uncommitted Duendee-main edits.
+  if (Test-DuendeeWorktreeDirty $Project) {
+    Write-UiLine "  $GRN   Duendee-main klasöründeki güncel dosyalar yayına alınıyor.$RST"
+  } elseif (-not (Update-DuendeeRepoSafe $Project)) {
+    Write-UiLine "  $YEL   Uzak depo alınamadı. Klasördeki mevcut Duendee yayına alınıyor.$RST"
   }
   $after = Get-DuendeeDepStamp $Project
   if (-not (Test-Path -LiteralPath (Join-Path $Project 'node_modules')) -or $before -ne $after) {
@@ -1720,11 +1735,13 @@ function Invoke-Start {
     Write-UiLine "  $GRN   Aktif tünel var.$RST"
     $existing = Recover-TunnelUrl
     if (-not $existing) { $existing = Get-TunnelUrl }
-    if (-not (Test-PortListening $Port)) {
-      Write-UiLine "  ${CYN}   Yerel uygulama kapalı, aynı tünel için açılıyor...$RST"
-      if (-not (Start-AppOrigin)) {
-        Write-UiLine "  $YEL   Uygulama açılamadı. Tünel duruyor ama sayfa erişilemeyebilir.$RST"
-      }
+    Write-UiLine "  ${CYN}   Güncel Duendee yayına alınıyor...$RST"
+    if (-not (Sync-DuendeeForPublish)) {
+      Complete-Action
+      return
+    }
+    if (-not (Start-AppOrigin)) {
+      Write-UiLine "  $YEL   Uygulama açılamadı. Tünel duruyor ama sayfa erişilemeyebilir.$RST"
     }
     $cfProc = @(Get-CloudflaredProcesses) | Select-Object -First 1
     if ($cfProc -and $cfProc.ProcessId) {
