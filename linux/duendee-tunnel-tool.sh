@@ -1470,8 +1470,15 @@ public_dns() {
   getent hosts "$host" >/dev/null 2>&1
 }
 
+agent_log() {
+  local ts
+  ts="$(date +%s)000"
+  printf '%s\n' "{\"sessionId\":\"7204a1\",\"runId\":\"pre\",\"hypothesisId\":\"$1\",\"location\":\"$2\",\"message\":\"$3\",\"data\":$4,\"timestamp\":${ts}}" >> "${ROOT}/debug-7204a1.log" 2>/dev/null || true
+}
+
 resolver_has_a() {
-  local host="$1" server="${2:-}" out addrs
+  local host="$1" server="${2:-}" out addrs t0 t1
+  t0="$(date +%s)"
   [[ -n "$host" ]] || return 1
   if ! command -v nslookup >/dev/null 2>&1; then
     return 1
@@ -1492,14 +1499,16 @@ resolver_has_a() {
   if printf '%s\n' "$out" | grep -Eqi 'NXDOMAIN|Non-existent|can.t find'; then
     return 1
   fi
-  addrs="$(printf '%s\n' "$out" | grep -E '^Address: *[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' || true)"
+  addrs="$(printf '%s\n' "$out" | grep -Eio '(address|adres)[^:]*:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' || true)"
   if [[ -n "$server" ]]; then
-    addrs="$(printf '%s\n' "$addrs" | grep -v "$server" || true)"
+    addrs="$(printf '%s\n' "$addrs" | grep -vx "$server" || true)"
   elif [[ "$(printf '%s\n' "$addrs" | grep -c .)" -gt 1 ]]; then
     addrs="$(printf '%s\n' "$addrs" | tail -n +2)"
-  else
-    addrs=""
   fi
+  t1="$(date +%s)"
+  # #region agent log
+  agent_log "H1" "linux/duendee-tunnel-tool.sh:resolver_has_a" "lookup" "{\"server\":\"${server:-system}\",\"seconds\":$((t1 - t0)),\"accepted\":$([[ -n "$addrs" ]] && echo 1 || echo 0),\"addressMentions\":$(printf '%s\n' "$out" | grep -c 'Address' || true),\"tabSeparated\":$([[ "$out" == *$'\t'* ]] && echo 1 || echo 0)}"
+  # #endregion
   [[ -n "$addrs" ]]
 }
 
@@ -1512,6 +1521,9 @@ wait_name_visible() {
     now="$(date +%s)"
     (( now >= deadline )) && return 1
     tunnel_running || return 1
+    # #region agent log
+    agent_log "H2" "linux/duendee-tunnel-tool.sh:wait_name_visible" "round" "{\"host\":\"$host\",\"left\":$((deadline - now))}"
+    # #endregion
     if resolver_has_a "$host" 1.1.1.1 && resolver_has_a "$host" 8.8.8.8 && resolver_has_a "$host"; then
       if command -v resolvectl >/dev/null 2>&1; then
         resolvectl flush-caches >/dev/null 2>&1 || true
@@ -1826,7 +1838,13 @@ do_status() {
     recover_tunnel_url || true
     local_url="${URL:-}"
     if [[ -n "$local_url" ]]; then
+      local http_t0 http_t1
+      http_t0="$(date +%s)"
       pub="$(http_code "$local_url" 8)"
+      http_t1="$(date +%s)"
+      # #region agent log
+      agent_log "H3" "linux/duendee-tunnel-tool.sh:do_status" "public-http" "{\"seconds\":$((http_t1 - http_t0)),\"code\":\"${pub:-000}\"}"
+      # #endregion
       pub="${pub:-000}"
       if (( pub >= 200 && pub <= 399 )); then
         public_ok=1
@@ -2414,6 +2432,29 @@ do_shutdown() {
 }
 
 # ---- entry ----
+if [[ "${1:-}" == "selftest-dns" ]]; then
+  sample=$'Server:\t\t1.1.1.1\nAddress:\t1.1.1.1#53\n\nNon-authoritative answer:\nName:\texample.com\nAddress:\t93.184.216.34\n'
+  matched="$(printf '%s\n' "$sample" | grep -E '^Address: *[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' || true)"
+  # #region agent log
+  agent_log "H1" "linux/duendee-tunnel-tool.sh:selftest" "bind-sample" "{\"matched\":$([[ -n "$matched" ]] && echo 1 || echo 0)}"
+  # #endregion
+  t0="$(date +%s)"
+  resolver_has_a example.com 1.1.1.1 || true
+  resolver_has_a example.com 8.8.8.8 || true
+  resolver_has_a example.com || true
+  t1="$(date +%s)"
+  # #region agent log
+  agent_log "H2" "linux/duendee-tunnel-tool.sh:selftest" "three-lookups" "{\"seconds\":$((t1 - t0))}"
+  # #endregion
+  t0="$(date +%s)"
+  code="$(http_code "https://no-such-duendee-tunnel.invalid" 8)"
+  t1="$(date +%s)"
+  # #region agent log
+  agent_log "H3" "linux/duendee-tunnel-tool.sh:selftest" "dead-http" "{\"seconds\":$((t1 - t0)),\"code\":\"${code:-000}\"}"
+  # #endregion
+  exit 0
+fi
+
 if is_uninstall_arg "${1:-}"; then
   UNINSTALL_CLI=1
   do_uninstall "${2:-}"
