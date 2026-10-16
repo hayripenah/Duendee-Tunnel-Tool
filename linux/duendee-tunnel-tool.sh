@@ -1464,24 +1464,31 @@ public_dns() {
 }
 
 wait_public_ready() {
-  local url="$1" seconds="${2:-20}" host deadline now pub
+  local url="$1" seconds="${2:-60}" host deadline now pub flushed=0
   [[ -n "$url" ]] || return 1
   host="$(printf '%s' "$url" | sed -E 's#^https://([^/]+).*#\1#')"
   deadline=$(( $(date +%s) + seconds ))
   while true; do
     now="$(date +%s)"
     (( now >= deadline )) && return 1
+    if ! tunnel_running; then
+      return 1
+    fi
     if public_dns "$host"; then
-      pub="$(http_code "$url" 4)"
+      if [[ "$flushed" -eq 0 ]]; then
+        resolvectl flush-caches >/dev/null 2>&1 || systemd-resolve --flush-caches >/dev/null 2>&1 || true
+        flushed=1
+      fi
+      pub="$(http_code "$url" 8)"
       pub="${pub:-000}"
       if (( pub >= 200 && pub <= 399 )); then
         return 0
       fi
+      if [[ -f "$LOG" ]] && grep -q 'Registered tunnel connection' "$LOG" 2>/dev/null; then
+        return 0
+      fi
     fi
-    if ! tunnel_running; then
-      return 1
-    fi
-    sleep 0.7
+    sleep 2
   done
 }
 
@@ -1567,7 +1574,7 @@ open_resolving_tunnel() {
       kill_tunnel
       continue
     fi
-    if wait_public_ready "$URL" 20; then
+    if wait_public_ready "$URL" 60; then
       echo -e "  ${GRN}   Yayın adresi erişilebilir - yayın hazır.${RST}"
       return 0
     fi

@@ -1236,34 +1236,92 @@ function Recover-TunnelUrl {
 
 function Test-PublicUrlLive([string]$Url) {
   if ([string]::IsNullOrWhiteSpace($Url) -or $Url -notmatch '^https://') { return $false }
-  $pub = '000'
-  try { $pub = & curl.exe -s -o nul -w '%{http_code}' --max-time 4 $Url } catch { return $false }
-  $n = 0
-  return ([int]::TryParse("$pub", [ref]$n) -and $n -ge 200 -and $n -le 399)
+  if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+    try {
+      $pub = & curl.exe -s -o NUL -w '%{http_code}' --max-time 8 $Url
+      $n = 0
+      if ([int]::TryParse("$pub", [ref]$n) -and $n -ge 200 -and $n -le 399) { return $true }
+    } catch {}
+  }
+  try {
+    $resp = Invoke-WebRequest -Uri $Url -UseBasicParsing -MaximumRedirection 5 -TimeoutSec 8
+    return ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 400)
+  } catch {
+    $code = 0
+    try { $code = [int]$_.Exception.Response.StatusCode } catch { return $false }
+    return ($code -ge 200 -and $code -lt 400)
+  }
+}
+
+function Invoke-NslookupText([string[]]$LookupArgs) {
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = 'nslookup.exe'
+  $quoted = foreach ($part in $LookupArgs) {
+    if ($part -match '\s') { '"' + $part + '"' } else { $part }
+  }
+  $psi.Arguments = ($quoted -join ' ')
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $proc = New-Object System.Diagnostics.Process
+  $proc.StartInfo = $psi
+  try { [void]$proc.Start() } catch { return '' }
+  if (-not $proc.WaitForExit(4000)) {
+    try { $proc.Kill() } catch {}
+    return ''
+  }
+  return ($proc.StandardOutput.ReadToEnd() + $proc.StandardError.ReadToEnd())
 }
 
 function Test-PublicDns([string]$HostName) {
   if ([string]::IsNullOrWhiteSpace($HostName)) { return $false }
-  foreach ($server in @('1.1.1.1', '8.8.8.8', $null)) {
-    try {
-      $params = @{ Name = $HostName; Type = 'A'; QuickTimeout = $true; DnsOnly = $true; ErrorAction = 'Stop' }
-      if ($server) { $params.Server = $server }
-      $found = @(Resolve-DnsName @params | Where-Object { $_.IPAddress })
-      if ($found.Count -gt 0) { return $true }
-    } catch {}
+  foreach ($server in @('1.1.1.1', '8.8.8.8', '')) {
+    $lookupArgs = @('-type=A', $HostName)
+    if ($server) { $lookupArgs += $server }
+    $out = Invoke-NslookupText $lookupArgs
+    if ($out -match '(?i)NXDOMAIN|Non-existent|can.t find|bulunamad') { continue }
+    $ips = New-Object System.Collections.Generic.List[string]
+    foreach ($m in [regex]::Matches($out, '(?m)^[ \t]*(?:Address|Addresses|Adres|Adresler)[ \t]*:[ \t]*([0-9a-fA-F:.]+)')) {
+      $ip = $m.Groups[1].Value.Trim()
+      if ($ip) { [void]$ips.Add($ip) }
+    }
+    if ($server) {
+      $ips = @($ips | Where-Object { $_ -ne $server -and $_ -ne '127.0.0.1' })
+    } elseif ($ips.Count -gt 1) {
+      $ips = @($ips | Select-Object -Skip 1)
+    } else {
+      $ips = @()
+    }
+    if ($ips.Count -gt 0) { return $true }
   }
+  try {
+    $found = @(Resolve-DnsName -Name $HostName -DnsOnly -ErrorAction Stop | Where-Object { $_.IPAddress })
+    if ($found.Count -gt 0) { return $true }
+  } catch {}
   return $false
 }
 
-function Wait-PublicTunnelReady([string]$Url, [int]$Seconds = 20) {
+function Test-TunnelRegistered {
+  if (-not (Test-Path -LiteralPath $LogFile)) { return $false }
+  return [bool](Select-String -LiteralPath $LogFile -Pattern 'Registered tunnel connection' -SimpleMatch -Quiet)
+}
+
+function Wait-PublicTunnelReady([string]$Url, [int]$Seconds = 60) {
   if ([string]::IsNullOrWhiteSpace($Url)) { return $false }
   $hostName = ''
   try { $hostName = ([Uri]$Url).Host } catch { return $false }
   $deadline = [datetime]::UtcNow.AddSeconds($Seconds)
+  $flushed = $false
   while ([datetime]::UtcNow -lt $deadline) {
-    if ((Test-PublicDns $hostName) -and (Test-PublicUrlLive $Url)) { return $true }
-    if (-not (Test-CloudflaredAlive)) { return $false }
-    Start-Sleep -Milliseconds 700
+    if (-not (Get-Process -Name cloudflared -ErrorAction SilentlyContinue)) { return $false }
+    $dns = Test-PublicDns $hostName
+    if ($dns -and -not $flushed) {
+      try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
+      $flushed = $true
+    }
+    if ($dns -and ((Test-PublicUrlLive $Url) -or (Test-TunnelRegistered))) { return $true }
+    Start-Sleep -Seconds 2
   }
   return $false
 }
@@ -1849,7 +1907,7 @@ function Invoke-Start {
       continue
     }
     Write-UiLine "  ${CYN}[4/4]$RST DNS kaydı bekleniyor..."
-    if (Wait-PublicTunnelReady -Url $url -Seconds 20) {
+    if (Wait-PublicTunnelReady -Url $url -Seconds 60) {
       Write-UiLine "  $GRN   Yayın adresi erişilebilir - yayın hazır.$RST"
       break
     }
