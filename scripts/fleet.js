@@ -8,8 +8,12 @@ const REPO = process.env.DT_TOOL_REPO || 'hayripenah/Duendee-Tunnel-Tool'
 const BRANCH = 'fleet'
 const FILE = 'active.json'
 const STARTING_MS = 180000
-const FRESH_MS = 600000
-const HEARTBEAT_MS = 4000
+const FRESH_MS = 720000
+const POLL_MS = 10000
+const KEEPALIVE_MS = 240000
+const URL_CHECK_MS = 60000
+const URL_MISS_LIMIT = 2
+const FOREIGN_WAIT_MS = 90000
 
 function arg(name) {
   const i = process.argv.indexOf(name)
@@ -126,7 +130,7 @@ async function ensureBranch(token) {
 }
 
 async function readRec(token) {
-  const data = await api(token, 'GET', `/repos/${REPO}/contents/${FILE}?ref=${BRANCH}`)
+  const data = await api(token, 'GET', `/repos/${REPO}/contents/${FILE}?ref=${BRANCH}&t=${Date.now()}`)
   if (!data || !data.content) return null
   const rec = JSON.parse(Buffer.from(data.content, 'base64').toString('utf8'))
   rec.sha = data.sha
@@ -164,13 +168,47 @@ function age(rec) {
   return Date.now() - Number(rec && rec.updatedAt || 0)
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function tasklistText(args) {
+  const out = spawnSync('tasklist', args, { encoding: 'buffer' })
+  const buf = Buffer.isBuffer(out.stdout) ? out.stdout : Buffer.alloc(0)
+  if (buf.length >= 2 && buf[1] === 0) return buf.toString('utf16le')
+  return buf.toString('utf8')
+}
+
+function pidIsCloudflared(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  if (process.platform === 'win32') {
+    const text = tasklistText(['/FI', `PID eq ${pid}`, '/NH'])
+    return /cloudflared\.exe/i.test(text)
+  }
+  try {
+    const comm = fs.readFileSync(`/proc/${pid}/comm`, 'utf8').replace(/\0/g, '').trim()
+    return comm === 'cloudflared'
+  } catch {
+    return false
+  }
+}
+
 function cloudflaredAlive() {
   if (process.platform === 'win32') {
-    const out = spawnSync('tasklist', ['/FI', 'IMAGENAME eq cloudflared.exe', '/NH'], { encoding: 'utf8' })
-    return /cloudflared\.exe/i.test(String(out.stdout || ''))
+    const text = tasklistText(['/FI', 'IMAGENAME eq cloudflared.exe', '/NH'])
+    return /cloudflared\.exe/i.test(text)
   }
   const out = spawnSync('pgrep', ['-x', 'cloudflared'], { encoding: 'utf8' })
   return out.status === 0 && String(out.stdout || '').trim() !== ''
+}
+
+function tunnelProcAlive(dir) {
+  const pidFile = path.join(dir, 'tunnel.pid')
+  if (fs.existsSync(pidFile)) {
+    const pid = Number(fs.readFileSync(pidFile, 'utf8').trim())
+    if (pidIsCloudflared(pid)) return true
+  }
+  return cloudflaredAlive()
 }
 
 function killPid(pid) {
@@ -265,12 +303,44 @@ async function begin(root) {
     kind = 'free'
   }
   if (kind === 'foreign') {
-    process.stdout.write(`adopt\t${rec.url}`)
-    return
+    if (rec && rec.url && await httpOk(rec.url)) {
+      process.stdout.write(`adopt\t${rec.url}`)
+      return
+    }
+    const foreignUntil = Date.now() + FOREIGN_WAIT_MS
+    while (Date.now() < foreignUntil) {
+      await sleep(POLL_MS)
+      rec = await readRec(token)
+      kind = await classify(rec, me)
+      if (kind !== 'foreign') break
+      if (rec && rec.url && await httpOk(rec.url)) {
+        process.stdout.write(`adopt\t${rec.url}`)
+        return
+      }
+    }
+    if (kind === 'wait') {
+      const againUntil = Date.now() + STARTING_MS
+      while (kind === 'wait' && Date.now() < againUntil) {
+        waited = true
+        await sleep(2000)
+        rec = await readRec(token)
+        kind = await classify(rec, me)
+      }
+      if (kind === 'wait') {
+        waited = true
+        kind = 'free'
+      }
+    }
+    if (kind === 'foreign') {
+      throw new Error('Aktif tünel toparlanıyor, kısa süre sonra yeniden deneyin')
+    }
   }
   if (kind === 'self' && !localAlive) {
-    process.stdout.write(`adopt\t${rec.url}`)
-    return
+    if (rec && rec.url && await httpOk(rec.url)) {
+      process.stdout.write(`adopt\t${rec.url}`)
+      return
+    }
+    kind = 'free'
   }
   if (localAlive || kind === 'self') {
     const url = localUrl || (rec && rec.url) || ''
@@ -291,13 +361,21 @@ async function begin(root) {
   const claimed = await withRecord(token, async (cur) => {
     const curKind = await classify(cur, me)
     const abandoned = waited && cur && cur.state === 'starting' && !cur.url
-    if (!abandoned && (curKind === 'foreign' || curKind === 'wait' || curKind === 'self')) return null
+    const deadSelf = curKind === 'self' && !localAlive && !(cur && cur.url && await httpOk(cur.url))
+    if (!abandoned && !deadSelf && (curKind === 'foreign' || curKind === 'wait' || curKind === 'self')) return null
     return { url: '', owner: me, host: os.hostname(), state: 'starting', updatedAt: Date.now() }
   })
   if (!claimed || claimed.owner !== me || claimed.state !== 'starting') {
     const again = await readRec(token)
     const againKind = await classify(again, me)
-    if ((againKind === 'foreign' || againKind === 'self') && again.url) {
+    const againUrl = again && again.url
+    if (againKind === 'self' && !localAlive && againUrl && !(await httpOk(againUrl))) {
+      throw new Error('Aktif tünel kaydı alınamadı')
+    }
+    if (againKind === 'foreign' && againUrl && !(await httpOk(againUrl))) {
+      throw new Error('Aktif tünel toparlanıyor, kısa süre sonra yeniden deneyin')
+    }
+    if ((againKind === 'foreign' || againKind === 'self') && againUrl) {
       process.stdout.write(`adopt\t${again.url}`)
       return
     }
@@ -452,6 +530,45 @@ function spawnRecover(root) {
   child.unref()
 }
 
+async function writeStarting(token, me) {
+  for (let i = 0; i < 4; i++) {
+    const cur = await readRec(token).catch(() => null)
+    if (cur && cur.owner && cur.owner !== me) {
+      await sleep(1000 * (i + 1))
+      continue
+    }
+    try {
+      await writeRec(token, {
+        url: '',
+        owner: me,
+        host: os.hostname(),
+        state: 'starting',
+        updatedAt: Date.now(),
+      }, cur && cur.sha)
+      return true
+    } catch {
+      await sleep(1000 * (i + 1))
+    }
+  }
+  return false
+}
+
+async function recoverFromCrash(token, me, root, dir) {
+  const manual = path.join(dir, 'manual-stop')
+  if (fs.existsSync(manual)) {
+    stopLocalTunnel(root)
+    const cur = await readRec(token).catch(() => null)
+    if (cur && cur.owner === me && cur.sha) {
+      await writeRec(token, { url: '', owner: '', host: '', state: 'idle', updatedAt: Date.now() }, cur.sha).catch(() => {})
+    }
+    return
+  }
+  await writeStarting(token, me)
+  stopLocalTunnel(root)
+  fs.rmSync(path.join(dir, 'fleet-heartbeat.pid'), { force: true })
+  spawnRecover(root)
+}
+
 async function heartbeat(root) {
   const token = ghToken(false)
   if (!token) return
@@ -461,60 +578,76 @@ async function heartbeat(root) {
   const manual = path.join(dir, 'manual-stop')
   fs.writeFileSync(path.join(dir, 'fleet-heartbeat.pid'), String(process.pid))
   if (!fs.existsSync(flag)) fs.writeFileSync(flag, '1')
+  let lastKeep = 0
+  let primed = false
+  let urlMisses = 0
+  let lastUrlCheck = 0
+  let seenUrl = null
+  let otherOwnerStreak = 0
   while (fs.existsSync(flag)) {
     try {
-      const cur = await readRec(token)
-      if (!cur || cur.owner !== me) break
-      if (fs.existsSync(manual) || cur.state === 'stop') {
+      if (fs.existsSync(manual)) {
         stopLocalTunnel(root)
-        await writeRec(token, { url: '', owner: '', host: '', state: 'idle', updatedAt: Date.now() }, cur.sha)
+        const cur = await readRec(token).catch(() => null)
+        if (cur && cur.owner === me && cur.sha) {
+          await writeRec(token, { url: '', owner: '', host: '', state: 'idle', updatedAt: Date.now() }, cur.sha).catch(() => {})
+        }
         break
       }
-      const pidFile = path.join(dir, 'tunnel.pid')
-      let procAlive = false
-      if (fs.existsSync(pidFile)) {
-        const pid = Number(fs.readFileSync(pidFile, 'utf8').trim())
-        if (pid > 0) {
-          try {
-            process.kill(pid, 0)
-            procAlive = true
-          } catch (err) {
-            procAlive = err && err.code === 'EPERM'
+      const cur = await readRec(token)
+      if (!cur || !cur.owner) {
+        otherOwnerStreak = 0
+      } else if (cur.owner !== me) {
+        otherOwnerStreak++
+        if (otherOwnerStreak >= 2) break
+      } else {
+        otherOwnerStreak = 0
+        if (cur.state === 'stop') {
+          stopLocalTunnel(root)
+          await writeRec(token, { url: '', owner: '', host: '', state: 'idle', updatedAt: Date.now() }, cur.sha).catch(() => {})
+          break
+        }
+        if (cur.state === 'starting') {
+          if (!cur.url && age(cur) > STARTING_MS) {
+            await writeRec(token, { url: '', owner: '', host: '', state: 'idle', updatedAt: Date.now() }, cur.sha).catch(() => {})
+            break
+          }
+        } else if (cur.state === 'live') {
+          if (!primed) {
+            lastKeep = Number(cur.updatedAt) || 0
+            primed = true
+          }
+          if (cur.url !== seenUrl) {
+            seenUrl = cur.url || ''
+            urlMisses = 0
+            lastUrlCheck = 0
+          }
+          const procUp = tunnelProcAlive(dir)
+          if (cur.url && Date.now() - lastUrlCheck >= URL_CHECK_MS) {
+            lastUrlCheck = Date.now()
+            if (await httpOk(cur.url)) urlMisses = 0
+            else urlMisses++
+          }
+          if (!procUp || urlMisses >= URL_MISS_LIMIT) {
+            await recoverFromCrash(token, me, root, dir)
+            break
+          }
+          if (Date.now() - lastKeep >= KEEPALIVE_MS) {
+            await writeRec(token, {
+              url: cur.url || '',
+              owner: me,
+              host: cur.host || os.hostname(),
+              state: 'live',
+              updatedAt: Date.now(),
+            }, cur.sha)
+            lastKeep = Date.now()
           }
         }
       }
-      if (cur.state === 'starting') {
-        if (!cur.url && age(cur) > STARTING_MS) {
-          await writeRec(token, { url: '', owner: '', host: '', state: 'idle', updatedAt: Date.now() }, cur.sha)
-          break
-        }
-        await new Promise((r) => setTimeout(r, HEARTBEAT_MS))
-        continue
-      }
-      const cfAlive = cloudflaredAlive()
-      const crashed = cur.state === 'live' && !procAlive && !cfAlive
-      if (crashed) {
-        stopLocalTunnel(root)
-        if (fs.existsSync(manual)) {
-          await writeRec(token, { url: '', owner: '', host: '', state: 'idle', updatedAt: Date.now() }, cur.sha)
-          break
-        }
-        await writeRec(token, { url: '', owner: me, host: os.hostname(), state: 'starting', updatedAt: Date.now() }, cur.sha)
-        fs.rmSync(path.join(dir, 'fleet-heartbeat.pid'), { force: true })
-        spawnRecover(root)
-        break
-      }
-      await writeRec(token, {
-        url: cur.url || '',
-        owner: me,
-        host: cur.host || os.hostname(),
-        state: cur.state === 'starting' ? 'starting' : 'live',
-        updatedAt: Date.now(),
-      }, cur.sha)
     } catch {
       /* next tick */
     }
-    await new Promise((r) => setTimeout(r, HEARTBEAT_MS))
+    await sleep(POLL_MS)
   }
 }
 

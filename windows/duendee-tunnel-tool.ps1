@@ -1414,23 +1414,29 @@ function Invoke-Status {
   } else {
     Write-UiLine "  Dev Server ........ ${RED}KAPALI$RST"
   }
-  if (Test-TunnelRunning) { Sync-CloudflaredPid }
-  $localUrl = if (Test-TunnelRunning) { Recover-TunnelUrl } else { '' }
-  if (-not $localUrl -and (Test-TunnelRunning)) { $localUrl = Get-TunnelUrl }
+  $running = Test-TunnelRunning
+  if ($running) { Sync-CloudflaredPid }
+  $localUrl = if ($running) { Recover-TunnelUrl } else { '' }
+  if (-not $localUrl -and $running) { $localUrl = Get-TunnelUrl }
   if ($localUrl) {
     $env:DT_FLEET_QUIET = '1'
     [void](Invoke-Fleet publish --url "$localUrl")
     Remove-Item Env:DT_FLEET_QUIET -ErrorAction SilentlyContinue
   }
+  if ($running) { Start-FleetHeartbeat }
   $fleetUrl = ''
   if (-not $localUrl) {
     $fleetUrl = "$(Invoke-Fleet show)".Trim()
     if ($script:FleetExit -ne 0) { $fleetUrl = '' }
   }
   $url = if ($localUrl) { $localUrl } else { $fleetUrl }
-  if ($url) {
+  if ($running -or $url) {
     Write-UiLine "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR$RST"
-    Write-UiLine "  Yayın Linki ......... $BLUE$BOLD$url$RST"
+    if ($url) {
+      Write-UiLine "  Yayın Linki ......... $BLUE$BOLD$url$RST"
+    } else {
+      Write-UiLine "  $YEL   Yayın linki okunamadı.$RST"
+    }
   } else {
     Write-UiLine "  Tünel Servisi ..... ${RED}KAPALI$RST"
   }

@@ -1758,22 +1758,28 @@ do_status() {
   else
     echo -e "  Dev Server ........ ${RED}KAPALI${RST}"
   fi
-  local fleet_url="" local_url=""
+  local fleet_url="" local_url="" running=0
   if tunnel_running; then
+    running=1
     remember_cloudflared_pid
     recover_tunnel_url || true
     local_url="${URL:-}"
     if [[ -n "$local_url" ]]; then
       DT_FLEET_QUIET=1 fleet_node publish --root "$ROOT" --url "$local_url" >/dev/null 2>&1 || true
     fi
+    start_fleet_heartbeat
   fi
   if [[ -z "$local_url" ]]; then
     fleet_url="$(fleet_node show --root "$ROOT" 2>/dev/null || true)"
   fi
   URL="${local_url:-$fleet_url}"
-  if [[ -n "$URL" ]]; then
+  if [[ "$running" -eq 1 || -n "$URL" ]]; then
     echo -e "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR${RST}"
-    echo -e "  Yayın Linki ......... ${BLUE}${BOLD}${URL}${RST}"
+    if [[ -n "$URL" ]]; then
+      echo -e "  Yayın Linki ......... ${BLUE}${BOLD}${URL}${RST}"
+    else
+      echo -e "  ${YEL}   Yayın linki okunamadı.${RST}"
+    fi
   else
     echo -e "  Tünel Servisi ..... ${RED}KAPALI${RST}"
   fi
