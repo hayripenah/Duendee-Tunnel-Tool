@@ -1314,19 +1314,10 @@ function Test-TunnelRegistered {
   return [bool](Select-String -LiteralPath $LogFile -Pattern 'Registered tunnel connection' -SimpleMatch -Quiet)
 }
 
-function Write-AgentLog([string]$Hypothesis, [string]$Location, [string]$Message, [hashtable]$Data) {
-  # #region agent log
-  $payload = @{ sessionId = '7204a1'; runId = 'pre'; hypothesisId = $Hypothesis; location = $Location; message = $Message; data = $Data; timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
-  $line = $payload | ConvertTo-Json -Compress
-  Add-Content -LiteralPath (Join-Path $Root 'debug-7204a1.log') -Value $line -Encoding utf8
-  # #endregion
-}
-
 function Test-NslookupHasA([string]$HostName, [string]$Server) {
   if ([string]::IsNullOrWhiteSpace($HostName)) { return $false }
   $lookupArgs = @('-type=A', $HostName)
   if ($Server) { $lookupArgs += $Server }
-  $started = [datetime]::UtcNow
   $out = Invoke-NslookupText $lookupArgs
   if (-not $out) { return $false }
   if ($out -match '(?i)NXDOMAIN|Non-existent|can.t find|bulunamad') { return $false }
@@ -1342,15 +1333,7 @@ function Test-NslookupHasA([string]$HostName, [string]$Server) {
   } else {
     $ips = @()
   }
-  $ok = ($ips.Count -gt 0)
-  # #region agent log
-  Write-AgentLog 'H4' 'windows/duendee-tunnel-tool.ps1:Test-NslookupHasA' 'lookup' @{
-    server = $(if ($Server) { $Server } else { 'system' })
-    seconds = [math]::Round(([datetime]::UtcNow - $started).TotalSeconds, 2)
-    accepted = [int]$ok
-  }
-  # #endregion
-  return $ok
+  return ($ips.Count -gt 0)
 }
 
 function Wait-TunnelNameVisible([string]$Url, [int]$Seconds = 90) {
@@ -2527,21 +2510,6 @@ if (-not $script:UninstallCli) {
 }
 
 try {
-  if ($Action -eq 'selftest-dns') {
-    $sample = "Server:`t`t1.1.1.1`nAddress:`t1.1.1.1#53`n`nName:`texample.com`nAddress:`t93.184.216.34`n"
-    $matched = @([regex]::Matches($sample, '(?m)^[ \t]*(?:Address|Addresses|Adres|Adresler)[ \t]*:[ \t]*([0-9a-fA-F:.]+)'))
-    # #region agent log
-    Write-AgentLog 'H4' 'windows/duendee-tunnel-tool.ps1:selftest' 'bind-sample' @{ matched = $matched.Count }
-    # #endregion
-    $sw = [Diagnostics.Stopwatch]::StartNew()
-    [void](Test-NslookupHasA 'example.com' '1.1.1.1')
-    [void](Test-NslookupHasA 'example.com' '8.8.8.8')
-    [void](Test-NslookupHasA 'example.com' '')
-    # #region agent log
-    Write-AgentLog 'H2' 'windows/duendee-tunnel-tool.ps1:selftest' 'three-lookups' @{ seconds = [math]::Round($sw.Elapsed.TotalSeconds, 2) }
-    # #endregion
-    exit 0
-  }
   if ($script:UninstallCli) {
     $script:CleanupDone = $true
     Invoke-Uninstall -Mode $UninstallChoice

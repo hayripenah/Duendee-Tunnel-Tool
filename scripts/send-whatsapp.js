@@ -767,7 +767,10 @@ async function main() {
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
     let version;
     try {
-      ({ version } = await fetchLatestBaileysVersion());
+      version = await Promise.race([
+        fetchLatestBaileysVersion().then((out) => out.version),
+        new Promise((resolve) => setTimeout(() => resolve(undefined), 8000))
+      ]);
     } catch {
       version = undefined;
     }
@@ -805,6 +808,12 @@ async function main() {
       }, SEND_DELAY_MS);
     };
 
+    const sessionProbe = setTimeout(() => {
+      if (finished || delivered || socketOpen || qrSeen || gen !== generation) return;
+      if (allowQr) return;
+      replaceWithQr('Kayitli oturum yanit vermiyor.');
+    }, 20000);
+
     current.ev.on('creds.update', saveCreds);
 
     current.ev.on('connection.update', (update) => {
@@ -821,6 +830,7 @@ async function main() {
 
       if (connection === 'open') {
         const linked = current.user?.id || '';
+        clearTimeout(sessionProbe);
         if (!keepLinked && action === 'send' && linked && isPhoneAccount(linked) && !phonesMatch(linked, phone)) {
           replaceWithQr('Acilan oturum ' + linked + ' hattina ait.');
           return;
