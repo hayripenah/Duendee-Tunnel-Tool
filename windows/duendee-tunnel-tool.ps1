@@ -1314,6 +1314,49 @@ function Test-TunnelRegistered {
   return [bool](Select-String -LiteralPath $LogFile -Pattern 'Registered tunnel connection' -SimpleMatch -Quiet)
 }
 
+function Test-NslookupHasA([string]$HostName, [string]$Server) {
+  if ([string]::IsNullOrWhiteSpace($HostName)) { return $false }
+  $lookupArgs = @('-type=A', $HostName)
+  if ($Server) { $lookupArgs += $Server }
+  $out = Invoke-NslookupText $lookupArgs
+  if (-not $out) { return $false }
+  if ($out -match '(?i)NXDOMAIN|Non-existent|can.t find|bulunamad') { return $false }
+  $ips = New-Object System.Collections.Generic.List[string]
+  foreach ($m in [regex]::Matches($out, '(?m)^[ \t]*(?:Address|Addresses|Adres|Adresler)[ \t]*:[ \t]*([0-9a-fA-F:.]+)')) {
+    $ip = $m.Groups[1].Value.Trim()
+    if ($ip) { [void]$ips.Add($ip) }
+  }
+  if ($Server) {
+    $ips = @($ips | Where-Object { $_ -ne $Server -and $_ -ne '127.0.0.1' })
+  } elseif ($ips.Count -gt 1) {
+    $ips = @($ips | Select-Object -Skip 1)
+  } else {
+    $ips = @()
+  }
+  return ($ips.Count -gt 0)
+}
+
+function Wait-TunnelNameVisible([string]$Url, [int]$Seconds = 90) {
+  if ($Url -notmatch '^https://([^/:]+)') { return $false }
+  $hostName = $Matches[1]
+  $deadline = [datetime]::UtcNow.AddSeconds($Seconds)
+  $noted = $false
+  while ([datetime]::UtcNow -lt $deadline) {
+    if (-not (Test-CloudflaredAlive)) { return $false }
+    $public = (Test-NslookupHasA $hostName '1.1.1.1') -and (Test-NslookupHasA $hostName '8.8.8.8')
+    if ($public -and (Test-NslookupHasA $hostName '')) {
+      try { Clear-DnsClientCache | Out-Null } catch {}
+      return $true
+    }
+    if (-not $noted) {
+      Write-UiLine "  $DIM   Yayın adresi DNS'e düşüyor...$RST"
+      $noted = $true
+    }
+    Start-Sleep -Seconds 2
+  }
+  return $false
+}
+
 function Wait-PublicTunnelReady([string]$Url, [int]$Seconds = 60) {
   if ([string]::IsNullOrWhiteSpace($Url)) { return $false }
   $deadline = [datetime]::UtcNow.AddSeconds($Seconds)
@@ -1920,6 +1963,7 @@ function Invoke-Start {
     Complete-Action
     return
   }
+  $dnsReady = Wait-TunnelNameVisible $url
   Write-UiLine ''
   Write-UiLine "$C1$BOLD"
   Write-UiLine '  +======================================================+'
@@ -1934,9 +1978,11 @@ function Invoke-Start {
     Write-UiLine "  $C1$BOLD     $url$RST"
     Write-UiLine "  $DIM   Link panoya kopyalandı.$RST  Gerekirse [3] ile yeniden kopyalayın."
     Write-UiLine ''
-    if (Test-BrowserOpens) {
+    if (Test-BrowserOpens -and $dnsReady) {
       Write-UiLine '  Varsayılan tarayıcıda açılıyor...'
       Start-Process $url
+    } elseif (Test-BrowserOpens) {
+      Write-UiLine "  $DIM   Adres henüz DNS'te yok, tarayıcı açılmadı.$RST"
     } else {
       Write-UiLine "  $DIM   Tarayıcı kapalı. [5] > [B].$RST"
     }

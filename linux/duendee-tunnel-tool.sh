@@ -1470,6 +1470,64 @@ public_dns() {
   getent hosts "$host" >/dev/null 2>&1
 }
 
+resolver_has_a() {
+  local host="$1" server="${2:-}" out addrs
+  [[ -n "$host" ]] || return 1
+  if ! command -v nslookup >/dev/null 2>&1; then
+    return 1
+  fi
+  if [[ -n "$server" ]]; then
+    if command -v timeout >/dev/null 2>&1; then
+      out="$(timeout 3 nslookup -type=A "$host" "$server" 2>/dev/null || true)"
+    else
+      out="$(nslookup -type=A "$host" "$server" 2>/dev/null || true)"
+    fi
+  else
+    if command -v timeout >/dev/null 2>&1; then
+      out="$(timeout 3 nslookup -type=A "$host" 2>/dev/null || true)"
+    else
+      out="$(nslookup -type=A "$host" 2>/dev/null || true)"
+    fi
+  fi
+  if printf '%s\n' "$out" | grep -Eqi 'NXDOMAIN|Non-existent|can.t find'; then
+    return 1
+  fi
+  addrs="$(printf '%s\n' "$out" | grep -E '^Address: *[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' || true)"
+  if [[ -n "$server" ]]; then
+    addrs="$(printf '%s\n' "$addrs" | grep -v "$server" || true)"
+  elif [[ "$(printf '%s\n' "$addrs" | grep -c .)" -gt 1 ]]; then
+    addrs="$(printf '%s\n' "$addrs" | tail -n +2)"
+  else
+    addrs=""
+  fi
+  [[ -n "$addrs" ]]
+}
+
+wait_name_visible() {
+  local url="$1" host deadline now noted=0
+  host="$(printf '%s' "$url" | sed -E 's#^https://([^/:]+).*#\1#')"
+  [[ -n "$host" && "$host" != "$url" ]] || return 1
+  deadline=$(( $(date +%s) + 90 ))
+  while true; do
+    now="$(date +%s)"
+    (( now >= deadline )) && return 1
+    tunnel_running || return 1
+    if resolver_has_a "$host" 1.1.1.1 && resolver_has_a "$host" 8.8.8.8 && resolver_has_a "$host"; then
+      if command -v resolvectl >/dev/null 2>&1; then
+        resolvectl flush-caches >/dev/null 2>&1 || true
+      elif command -v systemd-resolve >/dev/null 2>&1; then
+        systemd-resolve --flush-caches >/dev/null 2>&1 || true
+      fi
+      return 0
+    fi
+    if [[ "$noted" -eq 0 ]]; then
+      echo -e "  ${DIM}   Yayın adresi DNS'e düşüyor...${RST}"
+      noted=1
+    fi
+    sleep 2
+  done
+}
+
 wait_public_ready() {
   local url="$1" seconds="${2:-60}" host deadline now pub flushed=0
   [[ -n "$url" ]] || return 1
@@ -1697,6 +1755,10 @@ do_start() {
     wait_key
     return
   fi
+  local dns_ready=0
+  if wait_name_visible "$URL"; then
+    dns_ready=1
+  fi
   refresh_url
   echo
   echo -e "${C1}${BOLD}"
@@ -1716,9 +1778,11 @@ do_start() {
     fi
     echo -e "${C1}${BOLD}     ${URL}${RST}"
     echo
-    if browser_opens; then
+    if browser_opens && [[ "$dns_ready" -eq 1 ]]; then
       echo "  Varsayılan tarayıcıda açılıyor..."
       open_url "$URL"
+    elif browser_opens; then
+      echo -e "  ${DIM}   Adres henüz DNS'te yok, tarayıcı açılmadı.${RST}"
     else
       echo -e "  ${DIM}   Tarayıcı kapalı. [5] > [B].${RST}"
     fi
