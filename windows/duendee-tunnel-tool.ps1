@@ -1442,7 +1442,7 @@ function Stop-AllToolProcesses {
   $tpid = Read-TunnelPid
   if ($tpid -and (Test-PidAlive $tpid)) {
     Stop-ProcessTree $tpid
-    Write-UiLine "  $C4   Tünel servisi durduruldu - PID $tpid.$RST"
+    Write-UiLine "  $RED   Tünel servisi durduruldu - PID $tpid.$RST"
   } elseif ($tpid) {
     Write-UiLine "  $DIM   PID $tpid zaten çalışmıyor.$RST"
   } else {
@@ -1486,11 +1486,11 @@ function Show-Menu {
   Write-UiLine "  $C3$BOLD[3]$RST  ${C3}Yayın Linkini Kopyala$RST"
   Write-UiLine "  $C4$BOLD[4]$RST  ${C4}Tünel Servisini İptal Et$RST"
   $autoLabel = switch ($autoMode) {
-    'tool' { "$C5[TOOL]$RST" }
-    'tunnel' { "$C5[TOOL+TÜNEL]$RST" }
-    default { "$DIM[KAPALI]$RST" }
+    'tool' { "$GRN[TOOL]$RST" }
+    'tunnel' { "$GRN[TOOL+TÜNEL]$RST" }
+    default { "$RED[KAPALI]$RST" }
   }
-  $browserLabel = if (Test-BrowserOpens) { "$C5[TARAYICI]$RST" } else { "$DIM[TARAYICI KAPALI]$RST" }
+  $browserLabel = if (Test-BrowserOpens) { "$GRN[TARAYICI]$RST" } else { "$RED[TARAYICI KAPALI]$RST" }
   Write-UiLine "  $C5$BOLD[5]$RST  ${C5}Cihaz Açılışında Otomatik Başlat$RST  $autoLabel  $browserLabel"
   Write-UiLine "  $C6$BOLD[6]$RST  ${C6}Aracı Cihazdan Kaldır$RST"
   Write-UiLine ''
@@ -1510,9 +1510,9 @@ function Invoke-Status {
   Write-UiLine "$C2   --- Servis Durumu ---$RST"
   Write-UiLine ''
   if (Test-PortListening $Port) {
-    Write-UiLine "  ${C2}Dev Server ........ ÇALIŞIYOR$RST  -  http://localhost:$Port"
+    Write-UiLine "  Dev Server ........ ${GRN}ÇALIŞIYOR$RST  -  http://localhost:$Port"
   } else {
-    Write-UiLine "  ${DIM}Dev Server ........ KAPALI$RST"
+    Write-UiLine "  Dev Server ........ ${RED}KAPALI$RST"
   }
   $running = Test-TunnelRunning
   if ($running) { Sync-CloudflaredPid }
@@ -1533,19 +1533,19 @@ function Invoke-Status {
   }
   $url = if ($publicOk) { $localUrl } else { $fleetUrl }
   if ($running -and $localUrl) {
-    Write-UiLine "  ${C2}Tünel Servisi ..... ÇALIŞIYOR$RST"
-    Write-UiLine "  ${C2}Yayın Linki ......... $BOLD$localUrl$RST"
+    Write-UiLine "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR$RST"
+    Write-UiLine "  Yayın Linki ......... $localUrl"
     if (-not $publicOk) {
-      Write-UiLine "  $DIM   Adres henüz dışarıdan yanıt vermiyor.$RST"
+      Write-UiLine "  $RED   Adres henüz dışarıdan yanıt vermiyor.$RST"
     }
   } elseif ($publicOk -or $fleetUrl) {
-    Write-UiLine "  ${C2}Tünel Servisi ..... ÇALIŞIYOR$RST"
-    Write-UiLine "  ${C2}Yayın Linki ......... $BOLD$url$RST"
+    Write-UiLine "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR$RST"
+    Write-UiLine "  Yayın Linki ......... $url"
   } elseif ($running) {
-    Write-UiLine "  ${C2}Tünel Servisi ..... ÇALIŞIYOR$RST"
-    Write-UiLine "  $DIM   Yayın linki okunamadı.$RST"
+    Write-UiLine "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR$RST"
+    Write-UiLine "  $RED   Yayın linki okunamadı.$RST"
   } else {
-    Write-UiLine "  ${DIM}Tünel Servisi ..... KAPALI$RST"
+    Write-UiLine "  Tünel Servisi ..... ${RED}KAPALI$RST"
   }
   if (Test-Path -LiteralPath $LogFile) { Show-LogTail -Brief }
   Complete-Action
@@ -1568,8 +1568,8 @@ function Invoke-CopyLink {
     return
   }
   Set-Clipboard -Value $url
-  Write-UiLine "  $C3   Yayın linki panoya kopyalandı:$RST"
-  Write-UiLine "  $C3$BOLD     $url$RST"
+  Write-UiLine "  $GRN   Yayın linki panoya kopyalandı:$RST"
+  Write-UiLine "       $url"
   Complete-Action
 }
 
@@ -1874,9 +1874,9 @@ function Invoke-Start {
       if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
       [IO.File]::WriteAllText($UrlFile, $adoptUrl)
     }
-    Write-UiLine "  $C1   Aktif tünel var.$RST"
+    Write-UiLine "  $GRN   Aktif tünel var.$RST"
     Set-Clipboard -Value $adoptUrl
-    Write-UiLine "  $C1$BOLD     $adoptUrl$RST"
+    Write-UiLine "       $adoptUrl"
     Complete-Action
     return
   }
@@ -1889,7 +1889,7 @@ function Invoke-Start {
   $tunnelAlive = $true
   $existing = Recover-TunnelUrl
   if ($tunnelAlive) {
-    Write-UiLine "  $C1   Aktif tünel var.$RST"
+    Write-UiLine "  $GRN   Aktif tünel var.$RST"
     $existing = Recover-TunnelUrl
     if (-not $existing) { $existing = Get-TunnelUrl }
     Write-UiLine "  ${C1}[2]$RST Güncel Duendee yayına alınıyor..."
@@ -1905,12 +1905,12 @@ function Invoke-Start {
       Set-Content -LiteralPath $PidFile -Value $cfProc.ProcessId -Encoding Ascii
     }
     if (-not $existing) {
-      Write-UiLine "  $DIM   Tünel çalışıyor ama yayın linki okunamadı. Kapatmak için [4].$RST"
+      Write-UiLine "  $RED   Tünel çalışıyor ama yayın linki okunamadı. Kapatmak için [4].$RST"
       Complete-Action
       return
     }
     Set-Clipboard -Value $existing
-    Write-UiLine "  $C1$BOLD     $existing$RST"
+    Write-UiLine "       $existing"
     Complete-Action
     return
   }
@@ -1965,7 +1965,7 @@ function Invoke-Start {
   }
   $dnsReady = Wait-TunnelNameVisible $url
   Write-UiLine ''
-  Write-UiLine "$C1$BOLD"
+  Write-UiLine "$GRN$BOLD"
   Write-UiLine '  +======================================================+'
   Write-UiLine '  |      YAYIN HAZIR - Diğer cihazlar bağlanabilir!      |'
   Write-UiLine '  +======================================================+'
@@ -1975,8 +1975,8 @@ function Invoke-Start {
   Write-UiLine ''
   if ($url) {
     Set-Clipboard -Value $url
-    Write-UiLine "  $C1$BOLD     $url$RST"
-    Write-UiLine "  $DIM   Link panoya kopyalandı.$RST  Gerekirse [3] ile yeniden kopyalayın."
+    Write-UiLine "       $url"
+    Write-UiLine "  $GRN   Link panoya kopyalandı.$RST  Gerekirse [3] ile yeniden kopyalayın."
     Write-UiLine ''
     if (Test-BrowserOpens -and $dnsReady) {
       Write-UiLine '  Varsayılan tarayıcıda açılıyor...'
@@ -2030,12 +2030,12 @@ function Invoke-Cancel {
   Stop-DevServer
   $fleetRole = "$(Invoke-Fleet role)".Trim()
   if ($fleetRole -eq 'other') {
-    Write-UiLine "  ${C4}   Aktif tünel kapatılıyor...$RST"
+    Write-UiLine "  ${RED}   Aktif tünel kapatılıyor...$RST"
     [void](Invoke-Fleet stop)
   }
   [void](Invoke-Fleet clear)
   Invoke-RetractWhatsApp
-  Write-UiLine "  $C4   Tünel kapatıldı.$RST"
+  Write-UiLine "  $RED   Tünel kapatıldı.$RST"
   Complete-Action
 }
 
@@ -2066,13 +2066,13 @@ function Invoke-Autostart {
   Write-UiLine ''
   $mode = Get-AutoMode
   switch ($mode) {
-    'tool' { Write-UiLine "  $DIM   Durum:$RST $C5$BOLD[TOOL]$RST" }
-    'tunnel' { Write-UiLine "  $DIM   Durum:$RST $C5$BOLD[TOOL+TÜNEL]$RST" }
+    'tool' { Write-UiLine "  $DIM   Durum:$RST $GRN$BOLD[TOOL]$RST" }
+    'tunnel' { Write-UiLine "  $DIM   Durum:$RST $GRN$BOLD[TOOL+TÜNEL]$RST" }
     default { Write-UiLine "  $DIM   Durum:$RST $RED$BOLD[KAPALI]$RST" }
   }
   Write-UiLine ''
   if (Test-BrowserOpens) {
-    Write-UiLine "  $DIM   Tarayıcı:$RST $C5$BOLD[AÇIK]$RST"
+    Write-UiLine "  $DIM   Tarayıcı:$RST $GRN$BOLD[AÇIK]$RST"
   } else {
     Write-UiLine "  $DIM   Tarayıcı:$RST $RED$BOLD[KAPALI]$RST"
   }
@@ -2093,8 +2093,8 @@ function Invoke-Autostart {
   if ($c -eq 'B') {
     $next = -not (Test-BrowserOpens)
     Set-BrowserOpens $next
-    if ($next) { Write-UiLine "  $C5   Tünel başladığında tarayıcı açılacak.$RST" }
-    else { Write-UiLine "  $C5   Tünel başladığında tarayıcı açılmayacak.$RST" }
+    if ($next) { Write-UiLine "  $GRN   Tünel başladığında tarayıcı açılacak.$RST" }
+    else { Write-UiLine "  $RED   Tünel başladığında tarayıcı açılmayacak.$RST" }
     Complete-Action
     return
   }
@@ -2111,9 +2111,9 @@ function Invoke-Autostart {
   $ok = Set-AutoMode $target
   if ($ok) {
     switch ($target) {
-      'tool' { Write-UiLine "  $C5   Yalnızca tool otomatik başlayacak.$RST" }
-      'tunnel' { Write-UiLine "  $C5   Tool ve tünel servisi otomatik başlayacak.$RST" }
-      default { Write-UiLine "  $C5   Otomatik başlatma kapatıldı.$RST" }
+      'tool' { Write-UiLine "  $GRN   Yalnızca tool otomatik başlayacak.$RST" }
+      'tunnel' { Write-UiLine "  $GRN   Tool ve tünel servisi otomatik başlayacak.$RST" }
+      default { Write-UiLine "  $RED   Otomatik başlatma kapatıldı.$RST" }
     }
     Write-UiLine "  $DIM   Kayıt: Başlangıç klasörü - Duendee Tunnel Tool$RST"
   } else {
@@ -2296,7 +2296,7 @@ function Invoke-RemoveDependencies {
     $name = [string]$entry.DisplayName
     Write-UiLine "  $DIM   Kaldırılıyor: $name$RST"
     if (Invoke-ProductUninstall $entry) {
-      Write-UiLine "  $C6   $name kaldırıldı.$RST"
+      Write-UiLine "  $GRN   $name kaldırıldı.$RST"
     } else {
       Write-UiLine "  $DIM   $name kaldırılamadı. Yönetici onayı gerekebilir.$RST"
     }
@@ -2316,12 +2316,12 @@ function Invoke-RemoveDependencies {
     Write-UiLine "  $DIM   Node.js hâlâ duruyor: $($nodeCmd.Source)$RST"
     Write-UiLine "  $DIM   Yönetici PowerShell ile tekrar deneyin veya Windows Ayarlar > Uygulamalar üzerinden kaldırın.$RST"
   } else {
-    Write-UiLine "  $C6   Node.js bu oturumda artık yok.$RST"
+    Write-UiLine "  $GRN   Node.js bu oturumda artık yok.$RST"
   }
   if (Find-Cloudflared) {
     Write-UiLine "  $DIM   cloudflared hâlâ duruyor: $(Find-Cloudflared)$RST"
   } else {
-    Write-UiLine "  $C6   cloudflared bu oturumda artık yok.$RST"
+    Write-UiLine "  $GRN   cloudflared bu oturumda artık yok.$RST"
   }
 }
 
@@ -2426,7 +2426,7 @@ function Invoke-Uninstall {
   foreach ($dir in $immediate) {
     try {
       Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction Stop
-      Write-UiLine "  $C6   Silindi: $dir$RST"
+      Write-UiLine "  $GRN   Silindi: $dir$RST"
     } catch {
       $deferred += $dir
     }
@@ -2434,11 +2434,11 @@ function Invoke-Uninstall {
   if ($deferred.Count -gt 0) {
     Start-DeferredDirectoryDelete -Paths $deferred
     foreach ($dir in $deferred) {
-      Write-UiLine "  $C6   Silinecek (bu pencere kapanınca): $dir$RST"
+      Write-UiLine "  $GRN   Silinecek (bu pencere kapanınca): $dir$RST"
     }
   }
   Write-UiLine ''
-  Write-UiLine "  $C6   Kaldırma tamam.$RST"
+  Write-UiLine "  $GRN   Kaldırma tamam.$RST"
   Write-UiLine ''
   exit 0
 }
@@ -2450,11 +2450,11 @@ function Invoke-Shutdown {
   Write-UiLine "$C4   --- Tüm terminaller kapatılıyor ---$RST"
   $fleetRole = "$(Invoke-Fleet role)".Trim()
   if ($fleetRole -eq 'other') {
-    Write-UiLine "  ${C4}   Aktif tünel kapatılıyor...$RST"
+    Write-UiLine "  ${RED}   Aktif tünel kapatılıyor...$RST"
     [void](Invoke-Fleet stop)
     if ($script:FleetExit -eq 0) {
       Invoke-RetractWhatsApp
-      Write-UiLine "  $C4   Tünel servisi kapatıldı. Çıkılıyor...$RST"
+      Write-UiLine "  $RED   Tünel servisi kapatıldı. Çıkılıyor...$RST"
     } else {
       Write-UiLine "  $RED$BOLD[HATA]$RST Tünel servisi kapatılamadı."
     }
@@ -2464,7 +2464,7 @@ function Invoke-Shutdown {
   Invoke-RetractWhatsApp
   Stop-AllToolProcesses
   Invoke-FleetRelease
-  Write-UiLine "  $C4   Tool'a bağlı terminaller kapatıldı. Çıkılıyor...$RST"
+  Write-UiLine "  $RED   Tool'a bağlı terminaller kapatıldı. Çıkılıyor...$RST"
   Write-UiLine ''
   exit 0
 }

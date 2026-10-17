@@ -928,9 +928,9 @@ set_browser_opens() {
 
 browser_mark() {
   if browser_opens; then
-    printf '%b' "${C5}[TARAYICI]${RST}"
+    printf '%b' "${GRN}[TARAYICI]${RST}"
   else
-    printf '%b' "${DIM}[TARAYICI KAPALI]${RST}"
+    printf '%b' "${RED}[TARAYICI KAPALI]${RST}"
   fi
 }
 
@@ -1137,7 +1137,7 @@ kill_all() {
       kill -TERM "-$TPID" 2>/dev/null || kill -TERM "$TPID" 2>/dev/null || true
       sleep 0.3
       kill -KILL "-$TPID" 2>/dev/null || kill -KILL "$TPID" 2>/dev/null || true
-      echo -e "  ${C4}   Tünel servisi durduruldu - PID ${TPID}.${RST}"
+      echo -e "  ${RED}   Tünel servisi durduruldu - PID ${TPID}.${RST}"
     else
       echo -e "  ${DIM}   PID ${TPID} zaten çalışmıyor.${RST}"
     fi
@@ -1186,9 +1186,9 @@ show_menu() {
   echo -e "  ${C3}${BOLD}[3]${RST}  ${C3}Yayın Linkini Kopyala${RST}"
   echo -e "  ${C4}${BOLD}[4]${RST}  ${C4}Tünel Servisini İptal Et${RST}"
   case "${AUTOMODE}" in
-    tool) echo -e "  ${C5}${BOLD}[5]${RST}  ${C5}Cihaz Açılışında Otomatik Başlat${RST}  ${C5}[TOOL]${RST}  $(browser_mark)" ;;
-    tunnel) echo -e "  ${C5}${BOLD}[5]${RST}  ${C5}Cihaz Açılışında Otomatik Başlat${RST}  ${C5}[TOOL+TÜNEL]${RST}  $(browser_mark)" ;;
-    *) echo -e "  ${C5}${BOLD}[5]${RST}  ${C5}Cihaz Açılışında Otomatik Başlat${RST}  ${DIM}[KAPALI]${RST}  $(browser_mark)" ;;
+    tool) echo -e "  ${C5}${BOLD}[5]${RST}  ${C5}Cihaz Açılışında Otomatik Başlat${RST}  ${GRN}[TOOL]${RST}  $(browser_mark)" ;;
+    tunnel) echo -e "  ${C5}${BOLD}[5]${RST}  ${C5}Cihaz Açılışında Otomatik Başlat${RST}  ${GRN}[TOOL+TÜNEL]${RST}  $(browser_mark)" ;;
+    *) echo -e "  ${C5}${BOLD}[5]${RST}  ${C5}Cihaz Açılışında Otomatik Başlat${RST}  ${RED}[KAPALI]${RST}  $(browser_mark)" ;;
   esac
   echo -e "  ${C6}${BOLD}[6]${RST}  ${C6}Aracı Cihazdan Kaldır${RST}"
   echo
@@ -1673,8 +1673,8 @@ do_start() {
       fi
       mkdir -p "$STATE"
       printf '%s' "$URL" >"$URL_FILE"
-      echo -e "  ${C1}   Aktif tünel var.${RST}"
-      echo -e "${C1}${BOLD}     ${URL}${RST}"
+      echo -e "  ${GRN}   Aktif tünel var.${RST}"
+      echo -e "     ${URL}"
       copy_clipboard "$URL" >/dev/null 2>&1 || true
       echo
       wait_key
@@ -1687,7 +1687,7 @@ do_start() {
       fi
       remember_cloudflared_pid
       start_fleet_heartbeat
-      echo -e "  ${C1}   Aktif tünel var.${RST}"
+      echo -e "  ${GRN}   Aktif tünel var.${RST}"
       recover_tunnel_url || true
       ;;
     own)
@@ -1708,11 +1708,11 @@ do_start() {
     fi
     recover_tunnel_url || true
     if [[ -z "${URL:-}" ]]; then
-      echo -e "  ${DIM}   Tünel çalışıyor ama yayın linki okunamadı. Kapatmak için [4].${RST}"
+      echo -e "  ${RED}   Tünel çalışıyor ama yayın linki okunamadı. Kapatmak için [4].${RST}"
       wait_key
       return
     fi
-    echo -e "${C1}${BOLD}     ${URL}${RST}"
+    echo -e "     ${URL}"
     copy_clipboard "$URL" >/dev/null 2>&1 || true
     echo
     wait_key
@@ -1761,7 +1761,7 @@ do_start() {
   fi
   refresh_url
   echo
-  echo -e "${C1}${BOLD}"
+  echo -e "${GRN}${BOLD}"
   echo "  ╔══════════════════════════════════════════════════════╗"
   echo "  ║      YAYIN HAZIR - Diğer cihazlar bağlanabilir!      ║"
   echo "  ╚══════════════════════════════════════════════════════╝"
@@ -1772,11 +1772,11 @@ do_start() {
   refresh_url
   if [[ -n "${URL:-}" ]]; then
     if copy_clipboard "$URL"; then
-      echo -e "${DIM}   Link panoya kopyalandı.${RST}  Gerekirse [3] ile yeniden kopyalayın."
+      echo -e "${GRN}   Link panoya kopyalandı.${RST}  Gerekirse [3] ile yeniden kopyalayın."
     else
-      echo -e "${DIM}   Panoya kopyalanamadı (xclip/wl-copy yok). Link:${RST}"
+      echo -e "${RED}   Panoya kopyalanamadı (xclip/wl-copy yok). Link:${RST}"
     fi
-    echo -e "${C1}${BOLD}     ${URL}${RST}"
+    echo -e "     ${URL}"
     echo
     if browser_opens && [[ "$dns_ready" -eq 1 ]]; then
       echo "  Varsayılan tarayıcıda açılıyor..."
@@ -1815,9 +1815,9 @@ do_status() {
   echo -e "${C2}   --- Servis Durumu ---${RST}"
   echo
   if port_listening "$PORT"; then
-    echo -e "  ${C2}Dev Server ........ ÇALIŞIYOR${RST}  -  http://localhost:${PORT}"
+    echo -e "  Dev Server ........ ${GRN}ÇALIŞIYOR${RST}  -  http://localhost:${PORT}"
   else
-    echo -e "  ${DIM}Dev Server ........ KAPALI${RST}"
+    echo -e "  Dev Server ........ ${RED}KAPALI${RST}"
   fi
   local fleet_url="" local_url="" running=0 public_ok=0 pub="000"
   if tunnel_running; then
@@ -1844,18 +1844,18 @@ do_status() {
     if [[ "$public_ok" -ne 1 ]]; then
       URL="$fleet_url"
     fi
-    echo -e "  ${C2}Tünel Servisi ..... ÇALIŞIYOR${RST}"
-    echo -e "  ${C2}Yayın Linki ......... ${BOLD}${URL}${RST}"
+    echo -e "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR${RST}"
+    echo -e "  Yayın Linki ......... ${URL}"
   elif [[ "$running" -eq 1 ]]; then
-    echo -e "  ${C2}Tünel Servisi ..... ÇALIŞIYOR${RST}"
+    echo -e "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR${RST}"
     if [[ -n "$local_url" ]]; then
-      echo -e "  ${C2}Yayın Linki ......... ${BOLD}${local_url}${RST}"
-      echo -e "  ${DIM}   Adres henüz dışarıdan yanıt vermiyor.${RST}"
+      echo -e "  Yayın Linki ......... ${local_url}"
+      echo -e "  ${RED}   Adres henüz dışarıdan yanıt vermiyor.${RST}"
     else
-      echo -e "  ${DIM}   Yayın linki okunamadı.${RST}"
+      echo -e "  ${RED}   Yayın linki okunamadı.${RST}"
     fi
   else
-    echo -e "  ${DIM}Tünel Servisi ..... KAPALI${RST}"
+    echo -e "  Tünel Servisi ..... ${RED}KAPALI${RST}"
   fi
   if [[ -f "$LOG" ]]; then
     logtail brief
@@ -1902,11 +1902,11 @@ do_copylink() {
     return
   fi
   if copy_clipboard "$URL"; then
-    echo -e "${C3}   Yayın linki panoya kopyalandı:${RST}"
+    echo -e "${GRN}   Yayın linki panoya kopyalandı:${RST}"
   else
-    echo -e "${C3}   Panoya kopyalanamadı (xclip/wl-copy yok):${RST}"
+    echo -e "${RED}   Panoya kopyalanamadı (xclip/wl-copy yok):${RST}"
   fi
-  echo -e "${C3}${BOLD}     ${URL}${RST}"
+  echo -e "     ${URL}"
   echo
   wait_key
 }
@@ -1923,7 +1923,7 @@ do_cancel() {
   local fleet_role="none"
   fleet_role="$(fleet_node role --root "$ROOT" 2>/dev/null || echo none)"
   if [[ "$fleet_role" == "other" ]]; then
-    echo -e "  ${C4}   Aktif tünel kapatılıyor...${RST}"
+    echo -e "  ${RED}   Aktif tünel kapatılıyor...${RST}"
     fleet_node stop --root "$ROOT" >/dev/null 2>&1 || true
   fi
   fleet_node clear --root "$ROOT" >/dev/null 2>&1 || true
@@ -1931,7 +1931,7 @@ do_cancel() {
   TUNNEL_URL=""
   PREV=""
   retract_tunnel_whatsapp
-  echo -e "  ${C4}   Tünel kapatıldı.${RST}"
+  echo -e "  ${RED}   Tünel kapatıldı.${RST}"
   echo
   wait_key
 }
@@ -2066,15 +2066,15 @@ do_autostart() {
   echo
   autostate
   case "$AUTOMODE" in
-    tool) echo -e "  ${DIM}   Durum:${RST} ${C5}${BOLD}[TOOL]${RST}" ;;
-    tunnel) echo -e "  ${DIM}   Durum:${RST} ${C5}${BOLD}[TOOL+TÜNEL]${RST}" ;;
+    tool) echo -e "  ${DIM}   Durum:${RST} ${GRN}${BOLD}[TOOL]${RST}" ;;
+    tunnel) echo -e "  ${DIM}   Durum:${RST} ${GRN}${BOLD}[TOOL+TÜNEL]${RST}" ;;
     *) echo -e "  ${DIM}   Durum:${RST} ${RED}${BOLD}[KAPALI]${RST}" ;;
   esac
   echo
   if browser_opens; then
-    echo -e "  ${DIM}   Tarayıcı:${RST} ${C5}${BOLD}[AÇIK]${RST}"
+    echo -e "  ${DIM}   Tarayıcı:${RST} ${GRN}${BOLD}[AÇIK]${RST}"
   else
-    echo -e "  ${DIM}   Tarayıcı:${RST} ${DIM}${BOLD}[KAPALI]${RST}"
+    echo -e "  ${DIM}   Tarayıcı:${RST} ${RED}${BOLD}[KAPALI]${RST}"
   fi
   echo
   echo -e "  ${C5}${BOLD}[T]${RST}  ${C5}Yalnızca tool'u otomatik başlat${RST}"
@@ -2094,7 +2094,7 @@ do_autostart() {
       if [[ "$AUTOMODE" == "tool" ]]; then
         echo -e "  ${DIM}   Bu ayar zaten seçili.${RST}"
       elif write_autostart_unit ""; then
-        echo -e "  ${C5}   Yalnızca tool otomatik başlayacak.${RST}"
+        echo -e "  ${GRN}   Yalnızca tool otomatik başlayacak.${RST}"
         echo -e "  ${DIM}   Kayıt: ${AUTO_DESKTOP}${RST}"
       else
         echo -e "  ${RED}${BOLD}[HATA]${RST} Ayar kaydedilemedi."
@@ -2104,7 +2104,7 @@ do_autostart() {
       if [[ "$AUTOMODE" == "tunnel" ]]; then
         echo -e "  ${DIM}   Bu ayar zaten seçili.${RST}"
       elif write_autostart_unit "boot-tunnel"; then
-        echo -e "  ${C5}   Tool ve tünel servisi otomatik başlayacak.${RST}"
+        echo -e "  ${GRN}   Tool ve tünel servisi otomatik başlayacak.${RST}"
         echo -e "  ${DIM}   Kayıt: ${AUTO_DESKTOP}${RST}"
       else
         echo -e "  ${RED}${BOLD}[HATA]${RST} Ayar kaydedilemedi."
@@ -2113,10 +2113,10 @@ do_autostart() {
     B)
       if browser_opens; then
         set_browser_opens 0
-        echo -e "  ${C5}   Tünel başladığında tarayıcı açılmayacak.${RST}"
+        echo -e "  ${RED}   Tünel başladığında tarayıcı açılmayacak.${RST}"
       else
         set_browser_opens 1
-        echo -e "  ${C5}   Tünel başladığında tarayıcı açılacak.${RST}"
+        echo -e "  ${GRN}   Tünel başladığında tarayıcı açılacak.${RST}"
       fi
       ;;
     K)
@@ -2125,7 +2125,7 @@ do_autostart() {
       autostate
       echo
       if [[ "$AUTOMODE" == "off" ]]; then
-        echo -e "  ${C5}   Otomatik başlatma kapatıldı.${RST}"
+        echo -e "  ${RED}   Otomatik başlatma kapatıldı.${RST}"
       else
         echo -e "  ${RED}${BOLD}[HATA]${RST} Ayar kapatılamadı, kayıt duruyor."
       fi
@@ -2378,11 +2378,11 @@ do_uninstall() {
     if [[ -d "$dir" ]]; then
       echo -e "  ${RED}   Silinemedi: ${dir}${RST}"
     else
-      echo -e "  ${C6}   Silindi: ${dir}${RST}"
+      echo -e "  ${GRN}   Silindi: ${dir}${RST}"
     fi
   done
   echo
-  echo -e "  ${C6}   Kaldırma tamam.${RST}"
+  echo -e "  ${GRN}   Kaldırma tamam.${RST}"
   echo
   exit 0
 }
@@ -2394,10 +2394,10 @@ do_shutdown() {
   local fleet_role="none"
   fleet_role="$(fleet_node role --root "$ROOT" 2>/dev/null || echo none)"
   if [[ "$fleet_role" == "other" ]]; then
-    echo -e "  ${C4}   Aktif tünel kapatılıyor...${RST}"
+    echo -e "  ${RED}   Aktif tünel kapatılıyor...${RST}"
     if fleet_node stop --root "$ROOT"; then
       retract_tunnel_whatsapp
-      echo -e "  ${C4}   Tünel servisi kapatıldı. Çıkılıyor...${RST}"
+      echo -e "  ${RED}   Tünel servisi kapatıldı. Çıkılıyor...${RST}"
     else
       echo -e "  ${RED}${BOLD}[HATA]${RST} Tünel servisi kapatılamadı.${RST}"
     fi
@@ -2408,7 +2408,7 @@ do_shutdown() {
   kill_all
   fleet_release
   CLEANING_UP=1
-  echo -e "${C4}   Tool'a bağlı terminaller kapatıldı. Çıkılıyor...${RST}"
+  echo -e "${RED}   Tool'a bağlı terminaller kapatıldı. Çıkılıyor...${RST}"
   echo
   exit 0
 }
