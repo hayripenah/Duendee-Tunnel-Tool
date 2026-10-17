@@ -1181,16 +1181,16 @@ show_menu() {
   echo -e "${SALMON}${BOLD}          D U E N D E E   T U N N E L   T O O L${RST}"
   echo -e "${DIM}   ───────────────────────────────────────────────────────────${RST}"
   echo
-  echo -e "  ${C1}${BOLD}[1]${RST}  ${C1}Tünel Servisi Başlat${RST}"
-  echo -e "  ${C2}${BOLD}[2]${RST}  ${C2}Servis Durumunu Kontrol Et${RST}"
-  echo -e "  ${C3}${BOLD}[3]${RST}  ${C3}Yayın Linkini Kopyala${RST}"
-  echo -e "  ${C4}${BOLD}[4]${RST}  ${C4}Tünel Servisini İptal Et${RST}"
+  echo "  [1]  Tünel Servisi Başlat"
+  echo "  [2]  Servis Durumunu Kontrol Et"
+  echo "  [3]  Yayın Linkini Kopyala"
+  echo "  [4]  Tünel Servisini İptal Et"
   case "${AUTOMODE}" in
-    tool) echo -e "  ${C5}${BOLD}[5]${RST}  ${C5}Cihaz Açılışında Otomatik Başlat${RST}  ${GRN}[TOOL]${RST}  $(browser_mark)" ;;
-    tunnel) echo -e "  ${C5}${BOLD}[5]${RST}  ${C5}Cihaz Açılışında Otomatik Başlat${RST}  ${GRN}[TOOL+TÜNEL]${RST}  $(browser_mark)" ;;
-    *) echo -e "  ${C5}${BOLD}[5]${RST}  ${C5}Cihaz Açılışında Otomatik Başlat${RST}  ${RED}[KAPALI]${RST}  $(browser_mark)" ;;
+    tool) echo -e "  [5]  Cihaz Açılışında Otomatik Başlat  ${GRN}[TOOL]${RST}  $(browser_mark)" ;;
+    tunnel) echo -e "  [5]  Cihaz Açılışında Otomatik Başlat  ${GRN}[TOOL+TÜNEL]${RST}  $(browser_mark)" ;;
+    *) echo -e "  [5]  Cihaz Açılışında Otomatik Başlat  ${RED}[KAPALI]${RST}  $(browser_mark)" ;;
   esac
-  echo -e "  ${C6}${BOLD}[6]${RST}  ${C6}Aracı Cihazdan Kaldır${RST}"
+  echo "  [6]  Aracı Cihazdan Kaldır"
   echo
   printf "%b" "${DIM}   Seçim: ${RST}"
 }
@@ -2077,11 +2077,11 @@ do_autostart() {
     echo -e "  ${DIM}   Tarayıcı:${RST} ${RED}${BOLD}[KAPALI]${RST}"
   fi
   echo
-  echo -e "  ${C5}${BOLD}[T]${RST}  ${C5}Yalnızca tool'u otomatik başlat${RST}"
-  echo -e "  ${C5}${BOLD}[S]${RST}  ${C5}Tool'u ve tünel servisini otomatik başlat${RST}"
-  echo -e "  ${C5}${BOLD}[B]${RST}  ${C5}Tünel başladığında tarayıcıyı aç / kapat${RST}"
+  echo "  [T]  Yalnızca tool'u otomatik başlat"
+  echo "  [S]  Tool'u ve tünel servisini otomatik başlat"
+  echo "  [B]  Tünel başladığında tarayıcıyı aç / kapat"
   if [[ "$AUTOMODE" != "off" ]]; then
-    echo -e "  ${C5}${BOLD}[K]${RST}  ${C5}Otomatik başlatmayı kapat${RST}"
+    echo "  [K]  Otomatik başlatmayı kapat"
     choices="TSBKX"
   fi
   echo -e "  ${DIM}${BOLD}[X]${RST}  ${DIM}Geri dön${RST}"
@@ -2304,8 +2304,8 @@ do_uninstall() {
   echo -e "${C6}   --- Aracı Kaldır ---${RST}"
   echo
   if [[ "$mode" != "1" && "$mode" != "2" ]]; then
-    echo -e "  ${C6}${BOLD}[1]${RST}  ${C6}Yalnızca Duendee Tunnel Tool${RST}"
-    echo -e "  ${C6}${BOLD}[2]${RST}  ${C6}Tool, Node.js ve cloudflared${RST}"
+    echo "  [1]  Yalnızca Duendee Tunnel Tool"
+    echo "  [2]  Tool, Node.js ve cloudflared"
     echo -e "  ${DIM}${BOLD}[X]${RST}  ${DIM}Vazgeç${RST}"
     echo
     printf "%b" "${DIM}   Seçim [1/2/X]: ${RST}"

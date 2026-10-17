@@ -1481,18 +1481,18 @@ function Show-Menu {
   Clear-Host
   $autoMode = Get-AutoMode
   Show-Logo
-  Write-UiLine "  $C1$BOLD[1]$RST  ${C1}Tünel Servisi Başlat$RST"
-  Write-UiLine "  $C2$BOLD[2]$RST  ${C2}Servis Durumunu Kontrol Et$RST"
-  Write-UiLine "  $C3$BOLD[3]$RST  ${C3}Yayın Linkini Kopyala$RST"
-  Write-UiLine "  $C4$BOLD[4]$RST  ${C4}Tünel Servisini İptal Et$RST"
+  Write-UiLine "  [1]  Tünel Servisi Başlat"
+  Write-UiLine "  [2]  Servis Durumunu Kontrol Et"
+  Write-UiLine "  [3]  Yayın Linkini Kopyala"
+  Write-UiLine "  [4]  Tünel Servisini İptal Et"
   $autoLabel = switch ($autoMode) {
     'tool' { "$GRN[TOOL]$RST" }
     'tunnel' { "$GRN[TOOL+TÜNEL]$RST" }
     default { "$RED[KAPALI]$RST" }
   }
   $browserLabel = if (Test-BrowserOpens) { "$GRN[TARAYICI]$RST" } else { "$RED[TARAYICI KAPALI]$RST" }
-  Write-UiLine "  $C5$BOLD[5]$RST  ${C5}Cihaz Açılışında Otomatik Başlat$RST  $autoLabel  $browserLabel"
-  Write-UiLine "  $C6$BOLD[6]$RST  ${C6}Aracı Cihazdan Kaldır$RST"
+  Write-UiLine "  [5]  Cihaz Açılışında Otomatik Başlat  $autoLabel  $browserLabel"
+  Write-UiLine "  [6]  Aracı Cihazdan Kaldır"
   Write-UiLine ''
   Write-Ui "$DIM   Seçim: $RST"
 }
@@ -2077,11 +2077,11 @@ function Invoke-Autostart {
     Write-UiLine "  $DIM   Tarayıcı:$RST $RED$BOLD[KAPALI]$RST"
   }
   Write-UiLine ''
-  Write-UiLine "  $C5$BOLD[T]$RST  ${C5}Yalnızca tool'u otomatik başlat$RST"
-  Write-UiLine "  $C5$BOLD[S]$RST  ${C5}Tool'u ve tünel servisini otomatik başlat$RST"
-  Write-UiLine "  $C5$BOLD[B]$RST  ${C5}Tünel başladığında tarayıcıyı aç / kapat$RST"
+  Write-UiLine "  [T]  Yalnızca tool'u otomatik başlat"
+  Write-UiLine "  [S]  Tool'u ve tünel servisini otomatik başlat"
+  Write-UiLine "  [B]  Tünel başladığında tarayıcıyı aç / kapat"
   if ($mode -ne 'off') {
-    Write-UiLine "  $C5$BOLD[K]$RST  ${C5}Otomatik başlatmayı kapat$RST"
+    Write-UiLine "  [K]  Otomatik başlatmayı kapat"
   }
   Write-UiLine "  $DIM$BOLD[X]$RST  ${DIM}Geri dön$RST"
   Write-UiLine ''
@@ -2359,8 +2359,8 @@ function Invoke-Uninstall {
   Write-UiLine "$C6   --- Aracı Kaldır ---$RST"
   Write-UiLine ''
   if ($Mode -notin @('1', '2')) {
-    Write-UiLine "  $C6$BOLD[1]$RST  ${C6}Yalnızca Duendee Tunnel Tool$RST"
-    Write-UiLine "  $C6$BOLD[2]$RST  ${C6}Tool, Node.js ve cloudflared$RST"
+    Write-UiLine "  [1]  Yalnızca Duendee Tunnel Tool"
+    Write-UiLine "  [2]  Tool, Node.js ve cloudflared"
     Write-UiLine "  $DIM$BOLD[X]$RST  ${DIM}Vazgeç$RST"
     Write-UiLine ''
     Write-Ui "$DIM   Seçim [1/2/X]: $RST"
