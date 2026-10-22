@@ -608,12 +608,22 @@ send_tunnel_whatsapp() {
   local wa_cfg="${ROOT}/scripts/whatsapp-config.json"
   if [[ -f "$wa_cfg" ]]; then
     if command -v python3 >/dev/null 2>&1; then
-      phone="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get("targetPhone",""))' "$wa_cfg" 2>/dev/null || true)"
+      phone="$(python3 -c 'import json,sys
+cfg=json.load(open(sys.argv[1],encoding="utf-8"))
+rows=list(cfg.get("targetPhones") or [])
+if cfg.get("targetPhone"): rows.append(cfg["targetPhone"])
+out=[]
+for r in rows:
+    r=str(r).strip()
+    if r and r not in out: out.append(r)
+print(",".join(out))' "$wa_cfg" 2>/dev/null || true)"
     elif command -v node >/dev/null 2>&1; then
-      phone="$(node -e 'const c=require(process.argv[1]); process.stdout.write(String(c.targetPhone||""))' "$wa_cfg" 2>/dev/null || true)"
+      phone="$(node -e 'const p=require("path").resolve(process.argv[1]);const c=require(p);const rows=[].concat(c.targetPhones||[],c.targetPhone||[]).map(s=>String(s).trim()).filter(Boolean);process.stdout.write([...new Set(rows)].join(","))' "$wa_cfg" 2>/dev/null || true)"
     fi
   fi
-  echo "  WhatsApp baglantisi kontrol ediliyor (${phone:-5315162429})..."
+  local wa_label="${phone:-5315162429}"
+  if [[ "$phone" == *,* ]]; then wa_label="alici: ${phone}"; fi
+  echo "  WhatsApp baglantisi kontrol ediliyor (${wa_label})..."
   echo "  WhatsApp'a link gönderiliyor..."
   local ec=0
   export DT_WA_URL="$public_url"
@@ -946,6 +956,55 @@ start_watcher() {
   fi
 }
 
+watchdog_pid_file() {
+  printf '%s\n' "${STATE}/watchdog.pid"
+}
+
+watchdog_pid() {
+  local file pid
+  file="$(watchdog_pid_file)"
+  [[ -f "$file" ]] || return 1
+  pid="$(tr -d '[:space:]' < "$file" 2>/dev/null || true)"
+  [[ -n "$pid" ]] || return 1
+  printf '%s\n' "$pid"
+}
+
+watchdog_alive() {
+  local pid
+  pid="$(watchdog_pid 2>/dev/null || true)"
+  [[ -n "$pid" ]] && pid_alive "$pid"
+}
+
+stop_tunnel_watchdog() {
+  local pid
+  pid="$(watchdog_pid 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && pid_alive "$pid"; then
+    kill -TERM "$pid" 2>/dev/null || true
+    sleep 0.3
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  rm -f "$(watchdog_pid_file)"
+}
+
+# Keeps the quick tunnel alive: if the hostname leaves DNS (NXDOMAIN) or
+# cloudflared dies, a fresh tunnel is opened and the new link is shared.
+start_tunnel_watchdog() {
+  command -v node >/dev/null 2>&1 || return 0
+  local js="${ROOT}/scripts/tunnel-watchdog.js"
+  [[ -f "$js" ]] || return 0
+  watchdog_alive && return 0
+  find_cloudflared >/dev/null 2>&1 || return 0
+  [[ -n "${CF:-}" ]] || return 0
+  mkdir -p "$STATE"
+  local args=("$js" --root "$ROOT" --port "$PORT" --cloudflared "$CF" --project "${PROJECT:-}")
+  if command -v setsid >/dev/null 2>&1; then
+    setsid nohup node "${args[@]}" >>"${STATE}/watchdog.out.log" 2>&1 </dev/null &
+  else
+    nohup node "${args[@]}" >>"${STATE}/watchdog.out.log" 2>&1 </dev/null &
+  fi
+  disown $! 2>/dev/null || true
+}
+
 pid_is_cloudflared() {
   local pid="$1" comm=""
   [[ "$pid" =~ ^[0-9]+$ ]] || return 1
@@ -1040,6 +1099,7 @@ link_already_sent() {
 }
 
 kill_tunnel() {
+  stop_tunnel_watchdog
   read_pid
   if [[ -n "${TPID:-}" ]]; then
     if pid_alive "$TPID"; then
@@ -1131,6 +1191,7 @@ kill_tunnel_and_server() {
 }
 
 kill_all() {
+  stop_tunnel_watchdog
   read_pid
   if [[ -n "${TPID:-}" ]]; then
     if pid_alive "$TPID"; then
@@ -1650,14 +1711,23 @@ do_start() {
   fi
   echo -e "  ${C1}[1]${RST} cloudflared: $CF"
 
-  local local_url="" decision=""
+  local local_url="" decision="" local_alive=0
   mkdir -p "$STATE"
   rm -f "${STATE}/fleet-claimed"
   if tunnel_running; then
     recover_tunnel_url || true
     local_url="${URL:-}"
+    local_alive=1
+    if [[ -n "$local_url" ]] && ! public_url_live "$local_url"; then
+      # The quick tunnel hostname is gone from DNS or the edge dropped it.
+      # Reusing it would publish a link that fails with NXDOMAIN everywhere.
+      echo -e "  ${YEL}   Mevcut tünel dışarıdan yanıt vermiyor, yenisi açılıyor...${RST}"
+      kill_tunnel
+      local_alive=0
+      local_url=""
+    fi
   fi
-  if ! decision="$(fleet_node begin --root "$ROOT" --local-alive "$(if tunnel_running; then echo 1; else echo 0; fi)" --local-url "${local_url:--}" 2>"${STATE}/fleet-begin.err")"; then
+  if ! decision="$(fleet_node begin --root "$ROOT" --local-alive "$local_alive" --local-url "${local_url:--}" 2>"${STATE}/fleet-begin.err")"; then
     echo -e "  ${RED}${BOLD}[HATA]${RST} Tünel kaydı okunamadı. Yeni tünel açılmadı."
     if [[ -s "${STATE}/fleet-begin.err" ]]; then
       echo -e "  ${DIM}   $(tr '\n' ' ' < "${STATE}/fleet-begin.err")${RST}"
@@ -1687,6 +1757,7 @@ do_start() {
       fi
       remember_cloudflared_pid
       start_fleet_heartbeat
+      start_tunnel_watchdog
       echo -e "  ${GRN}   Aktif tünel var.${RST}"
       recover_tunnel_url || true
       ;;
@@ -1748,6 +1819,7 @@ do_start() {
     wait_key
     return
   fi
+  start_tunnel_watchdog
   if ! port_listening "$PORT"; then
     echo -e "  ${RED}${BOLD}[HATA]${RST} Dev server origin ${PORT} portunda yanıt vermiyor."
     logtail
@@ -1856,6 +1928,14 @@ do_status() {
     fi
   else
     echo -e "  Tünel Servisi ..... ${RED}KAPALI${RST}"
+  fi
+  if [[ "$running" -eq 1 ]]; then
+    watchdog_alive || start_tunnel_watchdog
+    if watchdog_alive; then
+      echo -e "  Tünel Gözcüsü ..... ${GRN}ÇALIŞIYOR${RST}"
+    else
+      echo -e "  Tünel Gözcüsü ..... ${RED}KAPALI${RST}"
+    fi
   fi
   if [[ -f "$LOG" ]]; then
     logtail brief
@@ -2437,6 +2517,11 @@ elif [[ "${1:-}" == "recover-tunnel" ]]; then
   AUTO=1
   do_start
   exit 0
+elif [[ "${1:-}" == "start-origin" ]]; then
+  if start_app_origin; then
+    exit 0
+  fi
+  exit 1
 elif [[ "${1:-}" != "" ]]; then
   AUTO=1
   case "$1" in

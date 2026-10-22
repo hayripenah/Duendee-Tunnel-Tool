@@ -155,12 +155,53 @@ async function writeRec(token, rec, sha) {
 }
 
 async function httpOk(url) {
-  if (!url || !/^https:\/\//i.test(url)) return false
+  const probe = await probeUrl(url)
+  return probe.ok
+}
+
+/**
+ * Probes a published tunnel link.
+ *
+ * kind:
+ *   'ok'       - the link answers with a 2xx/3xx status
+ *   'dns'      - the hostname does not exist any more (NXDOMAIN). This is what
+ *                other devices see after Cloudflare drops a quick tunnel.
+ *   'server'   - Cloudflare answered, but the tunnel itself is gone (530/1033)
+ *   'network'  - temporary network problem, the link may still be fine
+ */
+async function probeUrl(url) {
+  if (!url || !/^https:\/\//i.test(url)) return { ok: false, kind: 'invalid', status: 0 }
   try {
     const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(8000) })
-    return res.status >= 200 && res.status < 400
-  } catch {
-    return false
+    const status = res.status
+    if (status >= 200 && status < 400) return { ok: true, kind: 'ok', status }
+    if (status === 530 || status === 1033) return { ok: false, kind: 'server', status }
+    return { ok: false, kind: 'network', status }
+  } catch (err) {
+    const cause = String((err && err.cause && err.cause.code) || '')
+    const message = String(((err && err.cause && err.cause.message) || (err && err.message) || err))
+    if (cause === 'ENOTFOUND' || cause === 'ENODATA' || /ENOTFOUND|ENODATA/i.test(message)) {
+      return { ok: false, kind: 'dns', status: 0 }
+    }
+    return { ok: false, kind: 'network', status: 0 }
+  }
+}
+
+/** A link whose hostname vanished from DNS must never be handed to another device. */
+function isDeadLink(probe) {
+  return probe.kind === 'dns' || probe.kind === 'server'
+}
+
+function watchdogAlive(root) {
+  const file = path.join(stateDir(root), 'watchdog.pid')
+  if (!fs.existsSync(file)) return false
+  const pid = Number(fs.readFileSync(file, 'utf8').trim())
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    return err.code === 'EPERM'
   }
 }
 
@@ -241,13 +282,26 @@ function stopLocalTunnel(root) {
 async function classify(rec, me) {
   if (!rec || !rec.owner || rec.state === 'idle') return 'free'
   if (rec.state === 'stop' && age(rec) < 90000) return rec.owner === me ? 'self' : 'wait'
+  const probe = rec.url ? await probeUrl(rec.url) : { ok: false, kind: 'invalid', status: 0 }
+  const dead = isDeadLink(probe)
+  const fresh = age(rec) < FRESH_MS
   if (rec.owner === me) {
-    if (rec.url && (age(rec) < FRESH_MS || await httpOk(rec.url))) return 'self'
+    if (rec.url && (probe.ok || (fresh && !dead))) return 'self'
     return 'free'
   }
   if (rec.state === 'starting' && !rec.url && age(rec) < STARTING_MS) return 'wait'
-  if (rec.url && (age(rec) < FRESH_MS || await httpOk(rec.url))) return 'foreign'
+  if (rec.url && (probe.ok || (fresh && !dead))) return 'foreign'
   return 'free'
+}
+
+function stopWatchdog(root) {
+  const file = path.join(stateDir(root), 'watchdog.pid')
+  if (!fs.existsSync(file)) return
+  const pid = Number(fs.readFileSync(file, 'utf8').trim())
+  fs.rmSync(file, { force: true })
+  if (pid > 0) {
+    try { process.kill(pid, 'SIGTERM') } catch { /* already gone */ }
+  }
 }
 
 function stopHeartbeat(root) {
@@ -556,17 +610,24 @@ async function writeStarting(token, me) {
 async function recoverFromCrash(token, me, root, dir) {
   const manual = path.join(dir, 'manual-stop')
   if (fs.existsSync(manual)) {
+    stopWatchdog(root)
     stopLocalTunnel(root)
     const cur = await readRec(token).catch(() => null)
     if (cur && cur.owner === me && cur.sha) {
       await writeRec(token, { url: '', owner: '', host: '', state: 'idle', updatedAt: Date.now() }, cur.sha).catch(() => {})
     }
-    return
+    return false
+  }
+  if (watchdogAlive(root)) {
+    // The local watchdog owns the tunnel lifecycle: it restarts cloudflared,
+    // publishes the new link and notifies the users on its own.
+    return true
   }
   await writeStarting(token, me)
   stopLocalTunnel(root)
   fs.rmSync(path.join(dir, 'fleet-heartbeat.pid'), { force: true })
   spawnRecover(root)
+  return false
 }
 
 async function heartbeat(root) {
@@ -587,6 +648,7 @@ async function heartbeat(root) {
   while (fs.existsSync(flag)) {
     try {
       if (fs.existsSync(manual)) {
+        stopWatchdog(root)
         stopLocalTunnel(root)
         const cur = await readRec(token).catch(() => null)
         if (cur && cur.owner === me && cur.sha) {
@@ -629,8 +691,12 @@ async function heartbeat(root) {
             else urlMisses++
           }
           if (!procUp || urlMisses >= URL_MISS_LIMIT) {
-            await recoverFromCrash(token, me, root, dir)
-            break
+            const handled = await recoverFromCrash(token, me, root, dir)
+            if (!handled) break
+            // The watchdog is recovering on its own. Keep polling so the
+            // keepalive continues once the new link is published.
+            urlMisses = 0
+            lastUrlCheck = 0
           }
           if (Date.now() - lastKeep >= KEEPALIVE_MS) {
             await writeRec(token, {

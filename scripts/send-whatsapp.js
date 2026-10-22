@@ -62,19 +62,46 @@ function resolveUrl(raw) {
 }
 
 const url = action === 'retract' ? '' : resolveUrl(process.argv[2] || process.env.DT_WA_URL || '');
-const phone = String(process.argv[3] || process.env.DT_WA_PHONE || config.targetPhone || '').trim();
+
+// Everyone the tunnel link was shared with can be listed, so a rebuilt tunnel
+// reaches all of them instead of only one number.
+// Accepts a single number, a comma/semicolon separated list, or an array.
+function normalizeRecipients(value) {
+  const raw = Array.isArray(value) ? value.join(',') : String(value || '');
+  const seen = new Set();
+  const out = [];
+  for (const item of raw.split(/[,;]+/)) {
+    const entry = item.trim();
+    const digits = toDigits(entry);
+    if (!entry || !digits) continue;
+    if (seen.has(digits)) continue;
+    seen.add(digits);
+    out.push(entry);
+  }
+  return out;
+}
+
+const phoneArg = String(process.argv[3] || process.env.DT_WA_PHONE || '').trim();
+const configRecipients = normalizeRecipients([
+  ...(Array.isArray(config.targetPhones) ? config.targetPhones : []),
+  config.targetPhone
+]);
+const recipients = normalizeRecipients(phoneArg).length
+  ? normalizeRecipients(phoneArg)
+  : configRecipients;
+const phone = recipients[0] || '';
 
 if (action === 'send' && (!url || !/^https:\/\//i.test(url))) {
   fail(
-    'Kullanim / Usage: node send-whatsapp.js <tunnel-url|tunnel.url-file> [phone]\n' +
+    'Kullanim / Usage: node send-whatsapp.js <tunnel-url|tunnel.url-file> [phone[,phone...]]\n' +
       'URL yok veya gecersiz / missing or invalid URL.'
   );
 }
 
-if (action === 'send' && !phone) {
+if (action === 'send' && !recipients.length) {
   fail(
     'Hedef telefon yok / No target phone.\n' +
-      'scripts/whatsapp-config.json icinde targetPhone ayarlayin veya arguman verin.\n' +
+      'scripts/whatsapp-config.json icinde targetPhone (veya targetPhones) ayarlayin ya da arguman verin.\n' +
       'Ornek: node send-whatsapp.js "' + url + '" "+905xxxxxxxxx"'
   );
 }
@@ -534,21 +561,36 @@ async function deliver(sock) {
     return;
   }
   await deleteStored(sock, url);
-  const lid = await resolveSendJid(sock, phone);
-  const pn = toDigits(phone) + '@s.whatsapp.net';
-  const targets = [...new Set([lid, pn].filter(Boolean))];
   const message = String(process.env.DT_WA_TEMPLATE || config.messageTemplate || 'Duendee tunnel linki: {url}').replace('{url}', url);
-  let last = null;
-  for (const target of targets) {
-    console.log('  Link gonderiliyor -> ' + phone + ' (' + target + ')');
-    last = await sendText(sock, target, message);
-    if (last.acked) break;
-    console.log('  Sunucu onayi gelmedi, diger adres deneniyor...');
+  const deliveredRows = [];
+  for (const target of recipients) {
+    let acked = false;
+    try {
+      const lid = await resolveSendJid(sock, target);
+      const pn = toDigits(target) + '@s.whatsapp.net';
+      const targets = [...new Set([lid, pn].filter(Boolean))];
+      let last = null;
+      for (const jid of targets) {
+        console.log('  Link gonderiliyor -> ' + target + ' (' + jid + ')');
+        last = await sendText(sock, jid, message);
+        if (last.acked) break;
+        console.log('  Sunucu onayi gelmedi, diger adres deneniyor...');
+      }
+      acked = !!last?.acked;
+    } catch (err) {
+      console.error('  Gonderilemedi (' + target + '): ' + (err?.message || err));
+    }
+    deliveredRows.push({ phone: target, acked });
   }
-  if (!last?.acked) {
+  const okPhones = deliveredRows.filter((row) => row.acked).map((row) => row.phone);
+  const failedPhones = deliveredRows.filter((row) => !row.acked).map((row) => row.phone);
+  if (!okPhones.length) {
     throw new Error('WhatsApp sunucusu mesaji onaylamadi');
   }
-  console.log('WhatsApp mesaji gonderildi -> ' + phone + ' | ' + url);
+  console.log('WhatsApp mesaji gonderildi -> ' + okPhones.join(', ') + ' | ' + url);
+  if (failedPhones.length) {
+    console.error('  Gonderilemeyen alici(lar): ' + failedPhones.join(', '));
+  }
 }
 
 let qrSeen = false;

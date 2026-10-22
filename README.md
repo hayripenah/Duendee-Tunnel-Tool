@@ -98,7 +98,7 @@ From a git clone:
 Shared pieces (repo root):
 
 - `config.example.json` → auto-copied to `config.json` on first run (or copy manually)
-- `scripts/send-whatsapp.js` + `scripts/whatsapp-config.json` (`targetPhone`)
+- `scripts/send-whatsapp.js` + `scripts/whatsapp-config.json` (`targetPhone`, optional `targetPhones` list)
 - `npm install` in the tool root (WhatsApp helper; installers / first send also try this)
 - Runtime: `.tunnelstate/`, `.whatsapp-session/` (gitignored)
 
@@ -120,6 +120,46 @@ Shared pieces (repo root):
 6. Uninstall — **[1]** tool, **[2]** tool plus Node.js and cloudflared
 
 Closing the window leaves the tunnel running. **[4]** stops it.
+
+## Tunnel watchdog (auto recovery)
+
+Cloudflare quick tunnels (`*.trycloudflare.com`) are temporary. When the connector loses its edge
+connection Cloudflare drops the tunnel on its side (`Unauthorized: Tunnel not found`) and the
+hostname disappears from DNS, so every other device fails with `DNS_PROBE_FINISHED_NXDOMAIN`.
+
+`scripts/tunnel-watchdog.js` runs next to the tunnel and watches it the way an outside device
+does — public DNS lookup (`1.1.1.1`, `8.8.8.8`) plus a real HTTPS request:
+
+- the hostname leaves DNS or cloudflared dies -> a fresh quick tunnel is opened,
+- the local app on `port` is down -> the app is started again,
+- the new address is written to `.tunnelstate/tunnel.url`, published to the fleet record and
+  sent over WhatsApp (the previous link message is retracted first),
+- the live address is written to the fleet record as soon as it resolves publicly, so any other
+  device can pick it up without asking,
+- a dead link is never handed to another device, so no other machine adopts a broken address.
+
+State files live in `.tunnelstate/`: `tunnel.url`, `tunnel.pid`, `watchdog.pid`, `watchdog.log`,
+`recover.lock`, `manual-stop`. The watchdog stops when `manual-stop` exists (menu **[4]**).
+
+The link itself is public — anyone who receives it can open the app from any device and network.
+`scripts/whatsapp-config.json` takes a `targetPhone` plus an optional `targetPhones` list, so a
+rebuilt tunnel reaches every person the link was shared with (comma separated numbers work too).
+
+Tuning via environment variables:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DT_WATCHDOG_INTERVAL_MS` | `15000` | health check interval |
+| `DT_WATCHDOG_MAX_FAILS` | `3` | failed checks before the tunnel is restarted |
+| `DT_WATCHDOG_GRACE_MS` | `20000` | quiet period after a restart |
+| `DT_WATCHDOG_LOCK_MS` | `90000` | recovery lock lifetime (shared with the fleet) |
+| `DT_CF_PROTOCOL` | `http2` | cloudflared transport protocol |
+
+Manual check (no side effects):
+
+```text
+node scripts/tunnel-watchdog.js --root . --check
+```
 
 ## Uninstall
 

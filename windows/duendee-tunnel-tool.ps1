@@ -762,14 +762,17 @@ function Send-TunnelWhatsApp([string]$PublicUrl) {
     Write-UiLine "  $YEL   Geçerli tünel URL'si yok; WhatsApp atlandı.$RST"
     return
   }
-  $phone = ''
+  $phones = @()
   if (Test-Path -LiteralPath $waCfg) {
     try {
       $wc = Get-Content -LiteralPath $waCfg -Raw -Encoding UTF8 | ConvertFrom-Json
-      $phone = [string]$wc.targetPhone
+      if ($wc.targetPhones) { $phones += @($wc.targetPhones) }
+      if ($wc.targetPhone) { $phones += @($wc.targetPhone) }
     } catch {}
   }
-  $line = if ($phone) { $phone } else { '5315162429' }
+  $phones = @($phones | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+  $phone = ($phones -join ',')
+  $line = if ($phones.Count -gt 1) { "$($phones.Count) alici: $($phones -join ', ')" } elseif ($phone) { $phone } else { '5315162429' }
   Write-UiLine "  WhatsApp baglantisi kontrol ediliyor ($line)..."
   Write-UiLine "  WhatsApp'a link gönderiliyor..."
   $prevEa = $ErrorActionPreference
@@ -1414,6 +1417,7 @@ function Test-TunnelRunning {
 }
 
 function Stop-TunnelOnly {
+  Stop-TunnelWatchdog
   $tpid = Read-TunnelPid
   if ($tpid -and (Test-PidAlive $tpid)) {
     Stop-ProcessTree $tpid
@@ -1439,6 +1443,7 @@ function Stop-TunnelAndDevServer {
 }
 
 function Stop-AllToolProcesses {
+  Stop-TunnelWatchdog
   $tpid = Read-TunnelPid
   if ($tpid -and (Test-PidAlive $tpid)) {
     Stop-ProcessTree $tpid
@@ -1516,6 +1521,7 @@ function Invoke-Status {
   }
   $running = Test-TunnelRunning
   if ($running) { Sync-CloudflaredPid }
+  if ($running -and -not (Test-TunnelWatchdogAlive)) { Start-TunnelWatchdog }
   $localUrl = if ($running) { Recover-TunnelUrl } else { '' }
   if (-not $localUrl -and $running) { $localUrl = Get-TunnelUrl }
   $publicOk = $false
@@ -1547,6 +1553,13 @@ function Invoke-Status {
   } else {
     Write-UiLine "  Tünel Servisi ..... ${RED}KAPALI$RST"
   }
+  if ($running) {
+    if (Test-TunnelWatchdogAlive) {
+      Write-UiLine "  Tünel Gözcüsü ..... ${GRN}ÇALIŞIYOR$RST"
+    } else {
+      Write-UiLine "  Tünel Gözcüsü ..... ${RED}KAPALI$RST"
+    }
+  }
   if (Test-Path -LiteralPath $LogFile) { Show-LogTail -Brief }
   Complete-Action
 }
@@ -1556,7 +1569,12 @@ function Invoke-CopyLink {
   Initialize-Utf8Console
   Write-UiLine ''
   $url = if (Test-TunnelRunning) { Get-TunnelUrl } else { $null }
-  if ($url -and -not (Test-PublicUrlLive $url)) { $url = $null }
+  $localDead = $false
+  if ($url -and -not (Test-PublicUrlLive $url)) { $url = $null; $localDead = $true }
+  if ($localDead) {
+    Write-UiLine "  $YEL   Tünel adresi dışarıdan yanıt vermiyor. Gözcü yeni adres açıyor...$RST"
+    Start-TunnelWatchdog
+  }
   if (-not $url) {
     $remote = Invoke-Fleet show
     if ($script:FleetExit -eq 0) { $url = "$remote".Trim() }
@@ -1747,6 +1765,47 @@ function Start-FleetHeartbeat {
   [void](Start-HiddenDetached -CommandLine "`"$node`" `"$js`" heartbeat --root `"$Root`"")
 }
 
+function Get-WatchdogPidFile {
+  Join-Path $StateDir 'watchdog.pid'
+}
+
+function Test-TunnelWatchdogAlive {
+  $file = Get-WatchdogPidFile
+  if (-not (Test-Path -LiteralPath $file)) { return $false }
+  $raw = Get-Content -LiteralPath $file -TotalCount 1 -ErrorAction SilentlyContinue
+  $wpid = 0
+  if ([int]::TryParse("$raw".Trim(), [ref]$wpid) -and $wpid -gt 0) { return (Test-PidAlive $wpid) }
+  return $false
+}
+
+function Stop-TunnelWatchdog {
+  $file = Get-WatchdogPidFile
+  if (-not (Test-Path -LiteralPath $file)) { return }
+  $raw = Get-Content -LiteralPath $file -TotalCount 1 -ErrorAction SilentlyContinue
+  $wpid = 0
+  if ([int]::TryParse("$raw".Trim(), [ref]$wpid) -and $wpid -gt 0 -and (Test-PidAlive $wpid)) {
+    Stop-ProcessTree $wpid
+  }
+  Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+}
+
+function Start-TunnelWatchdog {
+  # Keeps the quick tunnel alive: if the hostname leaves DNS (NXDOMAIN) or
+  # cloudflared dies, a fresh tunnel is opened and the new link is shared.
+  $node = Find-NodeExe
+  $js = Join-Path $Root 'scripts\tunnel-watchdog.js'
+  if (-not $node -or -not (Test-Path -LiteralPath $js)) { return }
+  if (Test-TunnelWatchdogAlive) { return }
+  $cf = Find-Cloudflared
+  if (-not $cf) { return }
+  if (-not (Test-Path -LiteralPath $StateDir)) { New-Item -ItemType Directory -Force -Path $StateDir | Out-Null }
+  $cmd = "`"$node`" `"$js`" --root `"$Root`" --port $Port --cloudflared `"$cf`" --project `"$Project`""
+  if (Start-HiddenDetached -CommandLine $cmd) { return }
+  Start-Process -FilePath $node -WindowStyle Hidden -ArgumentList @(
+    $js, '--root', $Root, '--port', "$Port", '--cloudflared', $cf, '--project', $Project
+  ) | Out-Null
+}
+
 function Update-ToolCopy {
   if ($env:DT_SKIP_UPDATE -eq '1') { return }
   $node = Find-NodeExe
@@ -1856,6 +1915,13 @@ function Invoke-Start {
   try {
   $localAlive = Test-TunnelRunning
   $localUrl = if ($localAlive) { Recover-TunnelUrl } else { '' }
+  if ($localAlive -and $localUrl -and -not (Test-PublicUrlLive $localUrl)) {
+    # The quick tunnel hostname is gone from DNS or the edge dropped it.
+    # Reusing it would publish a link that fails with NXDOMAIN everywhere.
+    Write-UiLine "  $YEL   Mevcut tünel dışarıdan yanıt vermiyor, yenisi açılıyor...$RST"
+    $localAlive = $false
+    $localUrl = ''
+  }
   if ([string]::IsNullOrWhiteSpace($localUrl)) { $localUrl = '-' }
   $aliveFlag = if ($localAlive) { '1' } else { '0' }
   $decision = Invoke-Fleet begin --local-alive $aliveFlag --local-url "$localUrl"
@@ -1886,6 +1952,7 @@ function Invoke-Start {
       if ($keepUrl) { [IO.File]::WriteAllText($UrlFile, $keepUrl) }
     }
     Start-FleetHeartbeat
+    Start-TunnelWatchdog
   $tunnelAlive = $true
   $existing = Recover-TunnelUrl
   if ($tunnelAlive) {
@@ -1964,6 +2031,8 @@ function Invoke-Start {
     return
   }
   $dnsReady = Wait-TunnelNameVisible $url
+  Start-TunnelWatchdog
+  $liveReady = Wait-PublicTunnelReady $url 45
   Write-UiLine ''
   Write-UiLine "$GRN$BOLD"
   Write-UiLine '  +======================================================+'
@@ -1973,6 +2042,10 @@ function Invoke-Start {
   Write-UiLine ''
   Show-LogTail
   Write-UiLine ''
+  if (-not $liveReady) {
+    Write-UiLine "  $YEL   Adres şu an dışarıdan yanıt vermiyor. Gözcü tüneli yeniden açacak.$RST"
+    Write-UiLine ''
+  }
   if ($url) {
     Set-Clipboard -Value $url
     Write-UiLine "       $url"
@@ -2530,6 +2603,10 @@ try {
       if (Test-Path -LiteralPath (Join-Path $StateDir 'manual-stop')) { exit 0 }
       Invoke-Start
       exit 0
+    }
+    'start-origin' {
+      if (Start-AppOrigin) { exit 0 }
+      exit 1
     }
   }
 
