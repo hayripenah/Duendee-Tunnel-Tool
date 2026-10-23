@@ -360,12 +360,13 @@ function startCloudflared(bin, port) {
     '--http-host-header',
     `127.0.0.1:${port}`,
     '--no-autoupdate',
+    '--no-prechecks',
     '--protocol',
     PROTOCOL,
     '--edge-ip-version',
     '4',
     '--retries',
-    '5'
+    '8'
   ]
   let outFd = null
   let errFd = null

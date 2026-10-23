@@ -1630,7 +1630,7 @@ fd = os.open(pidfile, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
 os.write(fd, str(os.getpid()).encode())
 os.close(fd)
 os.execvp(cmd[0], cmd)
-' "$PID_FILE" "$CF" tunnel --url "$target" --http-host-header "127.0.0.1:${PORT}" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 5 >"$OUT_LOG" 2>"$LOG" </dev/null &
+' "$PID_FILE" "$CF" tunnel --url "$target" --http-host-header "127.0.0.1:${PORT}" --no-autoupdate --no-prechecks --protocol http2 --edge-ip-version 4 --retries 8 >"$OUT_LOG" 2>"$LOG" </dev/null &
     local helper=$! pid_wait
     for pid_wait in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
       [[ -s "$PID_FILE" ]] && break
@@ -1639,9 +1639,9 @@ os.execvp(cmd[0], cmd)
     wait "$helper" 2>/dev/null || true
   else
     if command -v setsid >/dev/null 2>&1; then
-      setsid nohup "$CF" tunnel --url "$target" --http-host-header "127.0.0.1:${PORT}" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 5 >"$OUT_LOG" 2>"$LOG" </dev/null &
+      setsid nohup "$CF" tunnel --url "$target" --http-host-header "127.0.0.1:${PORT}" --no-autoupdate --no-prechecks --protocol http2 --edge-ip-version 4 --retries 8 >"$OUT_LOG" 2>"$LOG" </dev/null &
     else
-      nohup "$CF" tunnel --url "$target" --http-host-header "127.0.0.1:${PORT}" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 5 >"$OUT_LOG" 2>"$LOG" </dev/null &
+      nohup "$CF" tunnel --url "$target" --http-host-header "127.0.0.1:${PORT}" --no-autoupdate --no-prechecks --protocol http2 --edge-ip-version 4 --retries 8 >"$OUT_LOG" 2>"$LOG" </dev/null &
     fi
     echo $! >"$PID_FILE"
     disown "$!" 2>/dev/null || true

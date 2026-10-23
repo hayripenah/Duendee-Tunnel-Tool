@@ -155,6 +155,10 @@ Tuning via environment variables:
 | `DT_WATCHDOG_LOCK_MS` | `90000` | recovery lock lifetime (shared with the fleet) |
 | `DT_CF_PROTOCOL` | `http2` | cloudflared transport protocol |
 
+Before opening a quick tunnel, Windows repairs flaky adapter DNS (prefers `1.1.1.1` / `8.8.8.8`),
+skips cloudflared connectivity prechecks (`--no-prechecks`), and retries when the local DNS
+resolver times out against `region*.v2.argotunnel.com`.
+
 Manual check (no side effects):
 
 ```text

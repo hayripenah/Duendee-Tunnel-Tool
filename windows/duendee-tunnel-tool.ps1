@@ -1371,29 +1371,136 @@ function Wait-PublicTunnelReady([string]$Url, [int]$Seconds = 60) {
   return $false
 }
 
+function Repair-TunnelDns {
+  # Broken / slow ISP DNS causes "Failed to initialize DNS local resolver" and
+  # i/o timeouts against region*.v2.argotunnel.com. Prefer public resolvers.
+  Write-UiLine "  $DIM   DNS kontrol ediliyor...$RST"
+  try { Clear-DnsClientCache | Out-Null } catch {}
+  $wanted = @('1.1.1.1', '8.8.8.8')
+  $changed = $false
+  $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {
+      $_.Status -eq 'Up' -and $_.HardwareInterface -and $_.InterfaceDescription -notmatch '(?i)virtual|hyper-v|vmware|loopback|bluetooth'
+    })
+  if ($adapters.Count -eq 0) {
+    $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' })
+  }
+  foreach ($adapter in $adapters) {
+    $current = @()
+    try {
+      $current = @(
+        (Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
+      )
+    } catch {}
+    $needsFix = ($current.Count -eq 0) -or
+      ($current -contains '127.0.0.1') -or
+      ($current -match '^192\.168\.') -or
+      ($current -match '^10\.') -or
+      ($current -match '^172\.(1[6-9]|2[0-9]|3[0-1])\.') -or
+      (-not (($current -contains '1.1.1.1') -or ($current -contains '8.8.8.8') -or ($current -contains '9.9.9.9')))
+    if (-not $needsFix) { continue }
+    $ok = $false
+    try {
+      Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ServerAddresses $wanted -ErrorAction Stop
+      $ok = $true
+    } catch {
+      try {
+        & netsh.exe interface ipv4 set dnsservers name="$($adapter.Name)" static 1.1.1.1 primary | Out-Null
+        & netsh.exe interface ipv4 add dnsservers name="$($adapter.Name)" 8.8.8.8 index=2 | Out-Null
+        $ok = ($LASTEXITCODE -eq 0)
+      } catch { $ok = $false }
+    }
+    if ($ok) {
+      $changed = $true
+      Write-UiLine "  $GRN   DNS düzeltildi: $($adapter.Name) -> 1.1.1.1, 8.8.8.8$RST"
+    } else {
+      Write-UiLine "  $YEL   DNS yazılamadı ($($adapter.Name)). Yönetici olarak çalıştırmayı deneyin.$RST"
+    }
+  }
+  if ($changed) {
+    try { Clear-DnsClientCache | Out-Null } catch {}
+    Start-Sleep -Milliseconds 400
+  }
+  $edgeOk = (Test-NslookupHasA 'region1.v2.argotunnel.com' '1.1.1.1') -or (Test-NslookupHasA 'region1.v2.argotunnel.com' '8.8.8.8')
+  if ($edgeOk) {
+    Write-UiLine "  $DIM   Edge DNS OK (region1.v2.argotunnel.com)$RST"
+  } else {
+    Write-UiLine "  $YEL   Edge DNS zayıf; tünel yine de denenecek.$RST"
+  }
+  return $edgeOk
+}
+
+function Get-CloudflaredTunnelArgs([string]$Target) {
+  # --no-prechecks: avoid hard-fail exits on flaky UDP/QUIC probes when http2 works.
+  # http2 + IPv4: skip QUIC/IPv6 paths that time out on many Turkish ISP/mobile hotspots.
+  return @(
+    'tunnel',
+    '--url', $Target,
+    '--http-host-header', "127.0.0.1:$Port",
+    '--no-autoupdate',
+    '--no-prechecks',
+    '--protocol', 'http2',
+    '--edge-ip-version', '4',
+    '--retries', '8'
+  )
+}
+
+function Test-TunnelDnsResolverFailed {
+  if (-not (Test-Path -LiteralPath $LogFile)) { return $false }
+  return [bool](Select-String -LiteralPath $LogFile -Pattern 'Failed to initialize DNS local resolver|lookup region\d+\.v2\.argotunnel\.com: i/o timeout' -Quiet)
+}
+
 function Start-QuickTunnelOnce([string]$Cloudflared) {
   Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $UrlFile, $LogFile, $OutLogFile -Force -ErrorAction SilentlyContinue
   $target = "http://127.0.0.1:$Port"
-  $cfCmd = "`"$Cloudflared`" tunnel --url `"$target`" --http-host-header `"127.0.0.1:$Port`" --no-autoupdate --protocol http2 --edge-ip-version 4 --retries 5 > `"$OutLogFile`" 2> `"$LogFile`""
+  $argList = Get-CloudflaredTunnelArgs -Target $target
+  $argStr = ($argList | ForEach-Object {
+      if ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
+    }) -join ' '
+  $cfCmd = "`"$Cloudflared`" $argStr > `"$OutLogFile`" 2> `"$LogFile`""
+  $env:TUNNEL_NO_PRECHECKS = 'true'
   $proc = Start-HiddenCmd $cfCmd
   if (-not $proc) { return $null }
   Set-Content -LiteralPath $PidFile -Value $proc.Id -Encoding Ascii
   Sync-CloudflaredPid
   Start-Sleep -Milliseconds 300
   $waitStart = [datetime]::UtcNow
-  $deadline = $waitStart.AddSeconds(45)
+  $deadline = $waitStart.AddSeconds(90)
   $tick = 0
   while ([datetime]::UtcNow -lt $deadline) {
     $tick++
     $found = Get-TunnelUrl
-    if ($found) { return $found }
-    if (-not (Test-PidAlive $proc.Id) -and -not (Test-CloudflaredAlive)) { return $null }
+    if ($found) {
+      # Prefer a live connector; URL alone can appear before the edge handshake finishes.
+      if ((Test-CloudflaredAlive) -or (Test-TunnelRegistered)) { return $found }
+    }
+    if (-not (Test-PidAlive $proc.Id) -and -not (Test-CloudflaredAlive)) {
+      if (Test-TunnelDnsResolverFailed) {
+        Write-UiLine "  $YEL   DNS local resolver zaman aşımı; yeniden denenecek.$RST"
+      }
+      return $null
+    }
     if (($tick % 20) -eq 0) {
       $sec = [int]([datetime]::UtcNow - $waitStart).TotalSeconds
       Write-UiLine "  $DIM   ... $sec saniye beklendi$RST"
     }
     Start-Sleep -Milliseconds 250
+  }
+  return (Get-TunnelUrl)
+}
+
+function Start-QuickTunnelWithRetry([string]$Cloudflared, [int]$Attempts = 3) {
+  [void](Repair-TunnelDns)
+  for ($i = 1; $i -le $Attempts; $i++) {
+    if ($i -gt 1) {
+      Write-UiLine "  $DIM   Tünel yeniden deneniyor ($i/$Attempts)...$RST"
+      [void](Repair-TunnelDns)
+      Start-Sleep -Seconds 2
+    }
+    $url = Start-QuickTunnelOnce -Cloudflared $Cloudflared
+    if ($url -and (Test-CloudflaredAlive)) { return $url }
+    if ($url -and (Test-TunnelRegistered)) { return $url }
+    Stop-TunnelOnly
   }
   return $null
 }
@@ -2011,13 +2118,16 @@ function Invoke-Start {
   Write-UiLine "  $DIM   Uygulama http://127.0.0.1:$Port hazır.$RST"
 
   Write-UiLine "  ${C1}[4]$RST Tünel açılıyor..."
-  $url = Start-QuickTunnelOnce -Cloudflared $cf
+  $url = Start-QuickTunnelWithRetry -Cloudflared $cf -Attempts 3
   if ($url -and -not (Test-CloudflaredAlive)) {
-    Start-Sleep -Milliseconds 500
+    Start-Sleep -Milliseconds 800
     Sync-CloudflaredPid
   }
-  if (-not $url -or -not (Test-CloudflaredAlive)) {
+  if (-not $url -or (-not (Test-CloudflaredAlive) -and -not (Test-TunnelRegistered))) {
     Write-UiLine "  $RED$BOLD[HATA]$RST Tünel açılmadı."
+    if (Test-TunnelDnsResolverFailed) {
+      Write-UiLine "  $YEL   DNS local resolver zaman aşımı görüldü. Wi-Fi DNS'ini 1.1.1.1 / 8.8.8.8 yapıp yönetici olarak tekrar deneyin.$RST"
+    }
     Show-LogTail
     Stop-TunnelOnly
     Complete-Action
