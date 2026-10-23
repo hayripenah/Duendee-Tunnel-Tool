@@ -1372,59 +1372,60 @@ function Wait-PublicTunnelReady([string]$Url, [int]$Seconds = 60) {
 }
 
 function Repair-TunnelDns {
-  # Broken / slow ISP DNS causes "Failed to initialize DNS local resolver" and
-  # i/o timeouts against region*.v2.argotunnel.com. Prefer public resolvers.
+  # Only touch adapter DNS when edge resolution actually fails.
+  # Forcing 1.1.1.1 on every start fought DHCP/router settings and felt like
+  # "DNS keeps breaking" — especially on flaky Wi-Fi / hotspot switches.
   Write-UiLine "  $DIM   DNS kontrol ediliyor...$RST"
   try { Clear-DnsClientCache | Out-Null } catch {}
-  $wanted = @('1.1.1.1', '8.8.8.8')
+
+  $edgeOk = (Test-NslookupHasA 'region1.v2.argotunnel.com' '') -or
+    (Test-NslookupHasA 'region1.v2.argotunnel.com' '8.8.8.8') -or
+    (Test-NslookupHasA 'region1.v2.argotunnel.com' '1.1.1.1')
+  if ($edgeOk) {
+    Write-UiLine "  $DIM   Edge DNS OK (region1.v2.argotunnel.com)$RST"
+    return $true
+  }
+
+  Write-UiLine "  $YEL   Edge DNS zayıf; genel çözümleyiciler deneniyor...$RST"
+  # Prefer Google/Quad9 first — some networks partially block Cloudflare anycast.
+  $wanted = @('8.8.8.8', '9.9.9.9', '1.1.1.1')
   $changed = $false
   $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {
-      $_.Status -eq 'Up' -and $_.HardwareInterface -and $_.InterfaceDescription -notmatch '(?i)virtual|hyper-v|vmware|loopback|bluetooth'
+      $_.Status -eq 'Up' -and $_.HardwareInterface -and $_.InterfaceDescription -notmatch '(?i)virtual|hyper-v|vmware|loopback|bluetooth|tailscale|wintun|wireguard'
     })
   if ($adapters.Count -eq 0) {
-    $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' })
+    $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {
+        $_.Status -eq 'Up' -and $_.InterfaceDescription -notmatch '(?i)tailscale|wintun|wireguard|loopback'
+      })
   }
   foreach ($adapter in $adapters) {
-    $current = @()
-    try {
-      $current = @(
-        (Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
-      )
-    } catch {}
-    $needsFix = ($current.Count -eq 0) -or
-      ($current -contains '127.0.0.1') -or
-      ($current -match '^192\.168\.') -or
-      ($current -match '^10\.') -or
-      ($current -match '^172\.(1[6-9]|2[0-9]|3[0-1])\.') -or
-      (-not (($current -contains '1.1.1.1') -or ($current -contains '8.8.8.8') -or ($current -contains '9.9.9.9')))
-    if (-not $needsFix) { continue }
     $ok = $false
     try {
       Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ServerAddresses $wanted -ErrorAction Stop
       $ok = $true
     } catch {
       try {
-        & netsh.exe interface ipv4 set dnsservers name="$($adapter.Name)" static 1.1.1.1 primary | Out-Null
-        & netsh.exe interface ipv4 add dnsservers name="$($adapter.Name)" 8.8.8.8 index=2 | Out-Null
+        & netsh.exe interface ipv4 set dnsservers name="$($adapter.Name)" static 8.8.8.8 primary | Out-Null
+        & netsh.exe interface ipv4 add dnsservers name="$($adapter.Name)" 9.9.9.9 index=2 | Out-Null
         $ok = ($LASTEXITCODE -eq 0)
       } catch { $ok = $false }
     }
     if ($ok) {
       $changed = $true
-      Write-UiLine "  $GRN   DNS düzeltildi: $($adapter.Name) -> 1.1.1.1, 8.8.8.8$RST"
+      Write-UiLine "  $GRN   DNS düzeltildi: $($adapter.Name) -> 8.8.8.8, 9.9.9.9$RST"
     } else {
       Write-UiLine "  $YEL   DNS yazılamadı ($($adapter.Name)). Yönetici olarak çalıştırmayı deneyin.$RST"
     }
   }
   if ($changed) {
     try { Clear-DnsClientCache | Out-Null } catch {}
-    Start-Sleep -Milliseconds 400
+    Start-Sleep -Milliseconds 500
   }
-  $edgeOk = (Test-NslookupHasA 'region1.v2.argotunnel.com' '1.1.1.1') -or (Test-NslookupHasA 'region1.v2.argotunnel.com' '8.8.8.8')
+  $edgeOk = (Test-NslookupHasA 'region1.v2.argotunnel.com' '8.8.8.8') -or (Test-NslookupHasA 'region1.v2.argotunnel.com' '1.1.1.1')
   if ($edgeOk) {
     Write-UiLine "  $DIM   Edge DNS OK (region1.v2.argotunnel.com)$RST"
   } else {
-    Write-UiLine "  $YEL   Edge DNS zayıf; tünel yine de denenecek.$RST"
+    Write-UiLine "  $YEL   Edge DNS hâlâ zayıf; tünel yine de denenecek.$RST"
   }
   return $edgeOk
 }
