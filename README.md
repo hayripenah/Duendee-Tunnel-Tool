@@ -97,7 +97,7 @@ From a git clone:
 
 Shared pieces (repo root):
 
-- `config.example.json` → auto-copied to `config.json` on first run (or copy manually)
+- `config.example.json` → auto-copied to `config.json` on first run (`projectPath` = Duendee-fm, optional `appPath` = Duendee-app)
 - `scripts/send-whatsapp.js` + `scripts/whatsapp-config.json` (`targetPhone`, optional `targetPhones` list)
 - `npm install` in the tool root (WhatsApp helper; installers / first send also try this)
 - Runtime: `.tunnelstate/`, `.whatsapp-session/` (gitignored)
@@ -116,10 +116,13 @@ Shared pieces (repo root):
 2. Check status  
 3. Copy public link  
 4. Cancel tunnel  
-5. Autostart — **[T]** tool, **[S]** tool and tunnel, **[K]** off  
+5. Autostart — **[T]** tool, **[S]** tool and tunnel, **[B]** browser, **[D]** desktop app, **[M]** mobile app, **[K]** off  
+
 6. Uninstall — **[1]** tool, **[2]** tool plus Node.js and cloudflared
 
 Closing the window leaves the tunnel running. **[4]** stops it.
+
+When **[D]** / **[M]** are enabled under autostart, tunnel start also updates `Duendee-app`, syncs `www/` from the published FM build, then launches Electron (`electron:tunnel`) and/or Android (`android:run`) against the live tunnel URL.
 
 ## Tunnel watchdog (auto recovery)
 

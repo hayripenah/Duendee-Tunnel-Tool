@@ -70,8 +70,16 @@ $configExample = Join-Path $Root 'config.example.json'
 $script:DuendeeRepoUrl = if ($env:DT_DUENDEE_REPO_URL) { $env:DT_DUENDEE_REPO_URL } else { 'https://github.com/hayripenah/Duendee.git' }
 $script:DuendeeCloneName = if ($env:DT_DUENDEE_CLONE_NAME) { $env:DT_DUENDEE_CLONE_NAME } else { 'Duendee-main' }
 
-function Save-ToolConfig([string]$ProjectPath, [int]$PortNum) {
+function Save-ToolConfig([string]$ProjectPath, [int]$PortNum, [string]$AppPath = '') {
   $obj = [ordered]@{ projectPath = $ProjectPath; port = $PortNum }
+  if (-not [string]::IsNullOrWhiteSpace($AppPath)) {
+    $obj.appPath = $AppPath
+  } elseif (Test-Path -LiteralPath $configPath) {
+    try {
+      $prev = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
+      if ($prev.appPath) { $obj.appPath = [string]$prev.appPath }
+    } catch {}
+  }
   ($obj | ConvertTo-Json -Depth 4) + "`n" | Set-Content -LiteralPath $configPath -Encoding UTF8 -NoNewline
 }
 
@@ -112,6 +120,39 @@ function Test-LooksLikeDuendeeRepo([string]$Path) {
     } catch {}
   }
   return ($remoteHit -or ($nameHit -and $pkgHit) -or ($pkgHit -and (Test-Path -LiteralPath $gitDir)))
+}
+
+function Test-LooksLikeDuendeeApp([string]$Path) {
+  if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Container)) { return $false }
+  $pkg = Join-Path $Path 'package.json'
+  if (-not (Test-Path -LiteralPath $pkg)) { return $false }
+  try {
+    $raw = Get-Content -LiteralPath $pkg -Raw -Encoding UTF8
+    if ($raw -match '"name"\s*:\s*"duendee-app"' -or $raw -match 'Capacitor \+ Electron') { return $true }
+  } catch {}
+  return (
+    (Test-Path -LiteralPath (Join-Path $Path 'electron')) -and
+    (Test-Path -LiteralPath (Join-Path $Path 'capacitor.config.json'))
+  )
+}
+
+function Resolve-DuendeeAppPath([string]$Preferred = '', [string]$Project = '') {
+  $candidates = New-Object System.Collections.Generic.List[string]
+  foreach ($p in @(
+      $Preferred,
+      $env:DT_DUENDEE_APP_DIR,
+      (Join-Path (Split-Path -Parent $Root) 'Duendee-app'),
+      $(if ($Project) { Join-Path (Split-Path -Parent $Project) 'Duendee-app' } else { '' }),
+      (Join-Path (Get-UserDesktopPath) 'Duendee-app')
+    )) {
+    if ([string]::IsNullOrWhiteSpace($p)) { continue }
+    if (-not (Test-Path -LiteralPath $p -PathType Container)) { continue }
+    try { [void]$candidates.Add((Resolve-Path -LiteralPath $p).Path) } catch {}
+  }
+  foreach ($c in $candidates) {
+    if (Test-LooksLikeDuendeeApp $c) { return $c }
+  }
+  return ''
 }
 
 function Install-UserGh {
@@ -501,12 +542,17 @@ function Ensure-ToolConfig {
   }
 
   $proj = [string]$cfgLocal.projectPath
+  $appPath = [string]$cfgLocal.appPath
   $portNum = if ($cfgLocal.port) { [int]$cfgLocal.port } else { 8080 }
   if ($env:DT_DUENDEE_DIR -and (Test-Path -LiteralPath $env:DT_DUENDEE_DIR -PathType Container)) {
     $proj = (Resolve-Path -LiteralPath $env:DT_DUENDEE_DIR).Path
   }
+  if ($env:DT_DUENDEE_APP_DIR -and (Test-Path -LiteralPath $env:DT_DUENDEE_APP_DIR -PathType Container)) {
+    $appPath = (Resolve-Path -LiteralPath $env:DT_DUENDEE_APP_DIR).Path
+  }
   $placeholder = [string]::IsNullOrWhiteSpace($proj) -or
     $proj -match '[\\/]path[\\/]to[\\/]your[\\/]app' -or
+    $proj -match '[\\/]path[\\/]to[\\/]Duendee-fm' -or
     -not (Test-Path -LiteralPath $proj)
 
   if ($placeholder) {
@@ -514,15 +560,20 @@ function Ensure-ToolConfig {
     Write-Ui "  port [$portNum]> "
     $portIn = (Read-Host).Trim()
     if ($portIn -match '^\d+$') { $portNum = [int]$portIn }
-    Save-ToolConfig -ProjectPath $proj -PortNum $portNum
+    $appPath = Resolve-DuendeeAppPath -Preferred $appPath -Project $proj
+    Save-ToolConfig -ProjectPath $proj -PortNum $portNum -AppPath $appPath
     Write-UiLine "  $GRN   Kaydedildi: $configPath$RST"
     Write-UiLine "  $GRN   projectPath = $proj$RST"
+    if ($appPath) { Write-UiLine "  $GRN   appPath = $appPath$RST" }
     Write-UiLine ''
   } elseif (Test-LooksLikeDuendeeRepo $proj) {
     $null = Update-DuendeeRepoSafe $proj
   }
+  if ([string]::IsNullOrWhiteSpace($appPath) -or -not (Test-Path -LiteralPath $appPath -PathType Container)) {
+    $appPath = Resolve-DuendeeAppPath -Preferred $appPath -Project $proj
+  }
 
-  return @{ Project = $proj; Port = $portNum }
+  return @{ Project = $proj; Port = $portNum; AppPath = $appPath }
 }
 
 function Test-UninstallAction([string]$Name) {
@@ -533,10 +584,12 @@ $script:UninstallCli = Test-UninstallAction $Action
 if ($script:UninstallCli) {
   $Project = ''
   $Port = 8080
+  $AppPath = ''
 } else {
   $boot = Ensure-ToolConfig
   $Project = [string]$boot.Project
   $Port = [int]$boot.Port
+  $AppPath = [string]$boot.AppPath
 }
 
 $StateDir = Join-Path $Root '.tunnelstate'
@@ -2051,6 +2104,7 @@ function Invoke-Start {
     Write-UiLine "  $GRN   Aktif tünel var.$RST"
     Set-Clipboard -Value $adoptUrl
     Write-UiLine "       $adoptUrl"
+    Start-CompanionApps -TunnelUrl $adoptUrl
     Complete-Action
     return
   }
@@ -2086,6 +2140,7 @@ function Invoke-Start {
     }
     Set-Clipboard -Value $existing
     Write-UiLine "       $existing"
+    Start-CompanionApps -TunnelUrl $existing
     Complete-Action
     return
   }
@@ -2170,6 +2225,7 @@ function Invoke-Start {
     } else {
       Write-UiLine "  $DIM   Tarayıcı kapalı. [5] > [B].$RST"
     }
+    Start-CompanionApps -TunnelUrl $url
     Send-TunnelWhatsApp -PublicUrl $url
   }
   if ($script:FleetClaimed -or $script:NeedFreshTunnel) {
@@ -2242,6 +2298,140 @@ function Set-BrowserOpens([bool]$On) {
   Set-Content -LiteralPath (Get-BrowserFlagPath) -Value $(if ($On) { '1' } else { '0' }) -Encoding Ascii
 }
 
+function Get-StateFlagPath([string]$Name) {
+  Join-Path $StateDir $Name
+}
+
+function Test-StateFlag([string]$Name, [bool]$DefaultOn = $false) {
+  $path = Get-StateFlagPath $Name
+  if (-not (Test-Path -LiteralPath $path)) { return $DefaultOn }
+  $raw = Get-Content -LiteralPath $path -TotalCount 1 -ErrorAction SilentlyContinue
+  return ("$raw".Trim() -ne '0')
+}
+
+function Set-StateFlag([string]$Name, [bool]$On) {
+  if (-not (Test-Path -LiteralPath $StateDir)) {
+    New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+  }
+  Set-Content -LiteralPath (Get-StateFlagPath $Name) -Value $(if ($On) { '1' } else { '0' }) -Encoding Ascii
+}
+
+function Test-DesktopAppLaunch { Test-StateFlag 'launch-desktop' $false }
+function Set-DesktopAppLaunch([bool]$On) { Set-StateFlag 'launch-desktop' $On }
+function Test-MobileAppLaunch { Test-StateFlag 'launch-mobile' $false }
+function Set-MobileAppLaunch([bool]$On) { Set-StateFlag 'launch-mobile' $On }
+
+function Update-GitRepoSafe([string]$Path, [string]$Label = 'Repo') {
+  if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return $false }
+  if (-not (Test-Path -LiteralPath (Join-Path $Path '.git'))) { return $false }
+  if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return $false }
+  Write-UiLine "  $DIM   $Label güncelleniyor...$RST"
+  try {
+    $env:GIT_TERMINAL_PROMPT = '0'
+    $gh = Get-Command gh -ErrorAction SilentlyContinue
+    $cred = @('-c', 'credential.helper=')
+    if ($gh) {
+      & $gh.Source auth status 1>$null 2>$null
+      if ($LASTEXITCODE -eq 0) { $cred = @('-c', 'credential.helper=!gh auth git-credential') }
+    }
+    if (Update-DuendeeFromGit -Path $Path -Cred $cred -Remote 'origin') {
+      Write-UiLine "  $DIM   $Label güncel.$RST"
+      return $true
+    }
+  } catch {}
+  Write-UiLine "  $DIM   $Label mevcut haliyle kullanılacak.$RST"
+  return $false
+}
+
+function Ensure-AppNpmDeps([string]$Path) {
+  if (Test-Path -LiteralPath (Join-Path $Path 'node_modules\electron\package.json')) { return $true }
+  Write-UiLine "  $DIM   Duendee-app bağımlılıkları kuruluyor...$RST"
+  Push-Location $Path
+  try {
+    & npm install --omit=dev *>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { & npm install *>&1 | Out-Null }
+    return ($LASTEXITCODE -eq 0)
+  } finally { Pop-Location }
+}
+
+function Start-CompanionApps([string]$TunnelUrl) {
+  $wantDesktop = Test-DesktopAppLaunch
+  $wantMobile = Test-MobileAppLaunch
+  if (-not $wantDesktop -and -not $wantMobile) { return }
+  if ([string]::IsNullOrWhiteSpace($TunnelUrl) -or $TunnelUrl -notmatch '^https://') {
+    Write-UiLine "  $YEL   Masaüstü/mobil app için geçerli tünel URL'si yok.$RST"
+    return
+  }
+  $path = $AppPath
+  if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-LooksLikeDuendeeApp $path)) {
+    $path = Resolve-DuendeeAppPath -Preferred $AppPath -Project $Project
+  }
+  if (-not (Test-LooksLikeDuendeeApp $path)) {
+    Write-UiLine "  $YEL   Duendee-app bulunamadı. config.json içine appPath yazın.$RST"
+    return
+  }
+  $script:AppPath = $path
+  Write-UiLine "  $DIM   Duendee-app: $path$RST"
+  [void](Update-GitRepoSafe $path 'Duendee-app')
+  if (-not (Ensure-AppNpmDeps $path)) {
+    Write-UiLine "  $RED   Duendee-app npm install başarısız.$RST"
+    return
+  }
+  $dist = Join-Path $Project 'dist'
+  Push-Location $path
+  try {
+    if (Test-Path -LiteralPath (Join-Path $dist 'index.html')) {
+      Write-UiLine "  $DIM   Duendee-app www senkronu (mevcut dist)...$RST"
+      & npm run sync:skip-build *>&1 | Out-Host
+    } else {
+      Write-UiLine "  $DIM   Duendee-app www senkronu (build)...$RST"
+      & npm run sync *>&1 | Out-Host
+    }
+    if ($LASTEXITCODE -ne 0) {
+      Write-UiLine "  $RED   Duendee-app sync başarısız.$RST"
+      return
+    }
+  } finally { Pop-Location }
+
+  if ($wantDesktop) {
+    Write-UiLine "  $GRN   Masaüstü app (Electron) açılıyor...$RST"
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'cmd.exe'
+    $psi.Arguments = '/c npm run electron:tunnel'
+    $psi.WorkingDirectory = $path
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $false
+    try {
+      $psi.EnvironmentVariables['DUENDEE_TUNNEL_URL'] = $TunnelUrl
+      $psi.EnvironmentVariables['DUENDEE_START_MODE'] = 'tunnel'
+      [void][System.Diagnostics.Process]::Start($psi)
+    } catch {
+      Write-UiLine "  $RED   Electron başlatılamadı: $($_.Exception.Message)$RST"
+    }
+  }
+
+  if ($wantMobile) {
+    Write-UiLine "  $GRN   Mobil app (Android) derlenip açılıyor...$RST"
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'cmd.exe'
+    $psi.Arguments = '/c npm run android:run'
+    $psi.WorkingDirectory = $path
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $false
+    try {
+      $psi.EnvironmentVariables['DUENDEE_TUNNEL_URL'] = $TunnelUrl
+      [void][System.Diagnostics.Process]::Start($psi)
+    } catch {
+      Write-UiLine "  $YEL   Android run başlatılamadı, Studio açılıyor...$RST"
+      try {
+        Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','npx cap open android' -WorkingDirectory $path
+      } catch {
+        Write-UiLine "  $RED   Mobil app açılamadı: $($_.Exception.Message)$RST"
+      }
+    }
+  }
+}
+
 function Invoke-Autostart {
   Clear-Host
   Initialize-Utf8Console
@@ -2260,16 +2450,28 @@ function Invoke-Autostart {
   } else {
     Write-UiLine "  $DIM   Tarayıcı:$RST $RED$BOLD[KAPALI]$RST"
   }
+  if (Test-DesktopAppLaunch) {
+    Write-UiLine "  $DIM   Masaüstü app:$RST $GRN$BOLD[AÇIK]$RST"
+  } else {
+    Write-UiLine "  $DIM   Masaüstü app:$RST $RED$BOLD[KAPALI]$RST"
+  }
+  if (Test-MobileAppLaunch) {
+    Write-UiLine "  $DIM   Mobil app:$RST $GRN$BOLD[AÇIK]$RST"
+  } else {
+    Write-UiLine "  $DIM   Mobil app:$RST $RED$BOLD[KAPALI]$RST"
+  }
   Write-UiLine ''
   Write-UiLine "  [T]  Yalnızca tool'u otomatik başlat"
   Write-UiLine "  [S]  Tool'u ve tünel servisini otomatik başlat"
   Write-UiLine "  [B]  Tünel başladığında tarayıcıyı aç / kapat"
+  Write-UiLine "  [D]  Tünel başladığında masaüstü app'i aç / kapat"
+  Write-UiLine "  [M]  Tünel başladığında mobil app'i aç / kapat"
   if ($mode -ne 'off') {
     Write-UiLine "  [K]  Otomatik başlatmayı kapat"
   }
   Write-UiLine "  $DIM$BOLD[X]$RST  ${DIM}Geri dön$RST"
   Write-UiLine ''
-  $choices = if ($mode -ne 'off') { 'TSBKX' } else { 'TSBX' }
+  $choices = if ($mode -ne 'off') { 'TSBDMKX' } else { 'TSBDMX' }
   Write-Ui "$DIM   Seçim: $RST"
   $c = Get-Choice $choices
   Write-UiLine ''
@@ -2279,6 +2481,22 @@ function Invoke-Autostart {
     Set-BrowserOpens $next
     if ($next) { Write-UiLine "  $GRN   Tünel başladığında tarayıcı açılacak.$RST" }
     else { Write-UiLine "  $RED   Tünel başladığında tarayıcı açılmayacak.$RST" }
+    Complete-Action
+    return
+  }
+  if ($c -eq 'D') {
+    $next = -not (Test-DesktopAppLaunch)
+    Set-DesktopAppLaunch $next
+    if ($next) { Write-UiLine "  $GRN   Tünel başladığında masaüstü app açılacak.$RST" }
+    else { Write-UiLine "  $RED   Tünel başladığında masaüstü app açılmayacak.$RST" }
+    Complete-Action
+    return
+  }
+  if ($c -eq 'M') {
+    $next = -not (Test-MobileAppLaunch)
+    Set-MobileAppLaunch $next
+    if ($next) { Write-UiLine "  $GRN   Tünel başladığında mobil app açılacak.$RST" }
+    else { Write-UiLine "  $RED   Tünel başladığında mobil app açılmayacak.$RST" }
     Complete-Action
     return
   }

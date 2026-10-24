@@ -56,15 +56,24 @@ DUENDEE_CLONE_NAME="${DT_DUENDEE_CLONE_NAME:-Duendee-main}"
 save_config() {
   local proj="$1"
   local port="$2"
+  local app="${3:-${APP_PATH:-}}"
   local cfg="${ROOT}/config.json"
   if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import json,sys; json.dump({"projectPath":sys.argv[1],"port":int(sys.argv[2])}, open(sys.argv[3],"w",encoding="utf-8"), indent=2); open(sys.argv[3],"a",encoding="utf-8").write("\n")' \
-      "$proj" "$port" "$cfg"
+    python3 -c 'import json,sys
+o={"projectPath":sys.argv[1],"port":int(sys.argv[2])}
+if sys.argv[3]: o["appPath"]=sys.argv[3]
+json.dump(o, open(sys.argv[4],"w",encoding="utf-8"), indent=2)
+open(sys.argv[4],"a",encoding="utf-8").write("\n")' \
+      "$proj" "$port" "$app" "$cfg"
   elif command -v node >/dev/null 2>&1; then
-    node -e 'const fs=require("fs"); const o={projectPath:process.argv[1],port:Number(process.argv[2])||8080}; fs.writeFileSync(process.argv[3], JSON.stringify(o,null,2)+"\n")' \
-      "$proj" "$port" "$cfg"
+    node -e 'const fs=require("fs"); const o={projectPath:process.argv[1],port:Number(process.argv[2])||8080}; if(process.argv[3]) o.appPath=process.argv[3]; fs.writeFileSync(process.argv[4], JSON.stringify(o,null,2)+"\n")' \
+      "$proj" "$port" "$app" "$cfg"
   else
-    printf '{\n  "projectPath": "%s",\n  "port": %s\n}\n' "$proj" "$port" >"$cfg"
+    if [[ -n "$app" ]]; then
+      printf '{\n  "projectPath": "%s",\n  "appPath": "%s",\n  "port": %s\n}\n' "$proj" "$app" "$port" >"$cfg"
+    else
+      printf '{\n  "projectPath": "%s",\n  "port": %s\n}\n' "$proj" "$port" >"$cfg"
+    fi
   fi
 }
 
@@ -73,9 +82,11 @@ read_config_fields() {
   if command -v python3 >/dev/null 2>&1; then
     PROJECT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get("projectPath",""))' "$cfg")"
     PORT="$(python3 -c 'import json,sys; c=json.load(open(sys.argv[1],encoding="utf-8")); print(c.get("port") or 8080)' "$cfg")"
+    APP_PATH="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get("appPath",""))' "$cfg")"
   elif command -v node >/dev/null 2>&1; then
     PROJECT="$(node -e 'const c=require(process.argv[1]); process.stdout.write(String(c.projectPath||""))' "$cfg")"
     PORT="$(node -e 'const c=require(process.argv[1]); process.stdout.write(String(c.port||8080))' "$cfg")"
+    APP_PATH="$(node -e 'const c=require(process.argv[1]); process.stdout.write(String(c.appPath||""))' "$cfg")"
   else
     die "config.json okumak için python3 veya node gerekli."
   fi
@@ -558,6 +569,9 @@ load_config() {
   elif [[ ! -d "$PROJECT" ]]; then
     needs_setup=1
   fi
+  if [[ -n "${DT_DUENDEE_APP_DIR:-}" && -d "${DT_DUENDEE_APP_DIR}" ]]; then
+    APP_PATH="$(cd "${DT_DUENDEE_APP_DIR}" && pwd)"
+  fi
   if (( needs_setup )); then
     resolve_project_path_interactive "${PROJECT:-}"
     PROJECT="$RESOLVED_PROJECT"
@@ -566,15 +580,20 @@ load_config() {
     if [[ "$port_in" =~ ^[0-9]+$ ]]; then
       PORT="$port_in"
     fi
-    save_config "$PROJECT" "$PORT"
+    APP_PATH="$(resolve_duendee_app_path "${APP_PATH:-}" 2>/dev/null || true)"
+    save_config "$PROJECT" "$PORT" "${APP_PATH:-}"
     echo -e "  ${GRN}   Kaydedildi: ${cfg}${RST}"
     echo -e "  ${GRN}   projectPath = ${PROJECT}${RST}"
+    [[ -n "${APP_PATH:-}" ]] && echo -e "  ${GRN}   appPath = ${APP_PATH}${RST}"
     echo
   elif looks_like_duendee "$PROJECT"; then
     update_duendee_safe "$PROJECT"
   fi
   [[ -d "$PROJECT" ]] || die "projectPath bulunamadı: $PROJECT"
   PORT="${PORT:-8080}"
+  if [[ -z "${APP_PATH:-}" || ! -d "${APP_PATH}" ]]; then
+    APP_PATH="$(resolve_duendee_app_path "" 2>/dev/null || true)"
+  fi
 }
 
 ensure_whatsapp_deps() {
@@ -941,6 +960,130 @@ browser_mark() {
     printf '%b' "${GRN}[TARAYICI]${RST}"
   else
     printf '%b' "${RED}[TARAYICI KAPALI]${RST}"
+  fi
+}
+
+state_flag_on() {
+  local name="$1" default="${2:-0}" f="${STATE}/${name}"
+  if [[ ! -f "$f" ]]; then
+    [[ "$default" == "1" ]]
+    return
+  fi
+  [[ "$(tr -d '[:space:]' <"$f" 2>/dev/null || true)" != "0" ]]
+}
+
+set_state_flag() {
+  mkdir -p "$STATE"
+  printf '%s\n' "$2" >"${STATE}/$1"
+}
+
+desktop_app_launch() { state_flag_on launch-desktop 0; }
+mobile_app_launch() { state_flag_on launch-mobile 0; }
+set_desktop_app_launch() { set_state_flag launch-desktop "$1"; }
+set_mobile_app_launch() { set_state_flag launch-mobile "$1"; }
+
+looks_like_duendee_app() {
+  local path="$1" pkg
+  [[ -d "$path" ]] || return 1
+  pkg="$path/package.json"
+  [[ -f "$pkg" ]] || return 1
+  if grep -Eq '"name"[[:space:]]*:[[:space:]]*"duendee-app"|Capacitor \+ Electron' "$pkg" 2>/dev/null; then
+    return 0
+  fi
+  [[ -d "$path/electron" && -f "$path/capacitor.config.json" ]]
+}
+
+resolve_duendee_app_path() {
+  local preferred="${1:-${APP_PATH:-}}" cand
+  for cand in \
+    "${DT_DUENDEE_APP_DIR:-}" \
+    "$preferred" \
+    "$(dirname "$ROOT")/Duendee-app" \
+    "$(dirname "${PROJECT:-.}")/Duendee-app" \
+    "$(desktop_dir)/Duendee-app"
+  do
+    [[ -n "$cand" && -d "$cand" ]] || continue
+    if looks_like_duendee_app "$cand"; then
+      printf '%s\n' "$(cd "$cand" && pwd)"
+      return 0
+    fi
+  done
+  return 1
+}
+
+update_git_repo_safe() {
+  local path="$1" label="${2:-Repo}"
+  [[ -d "$path/.git" ]] || return 1
+  command -v git >/dev/null 2>&1 || return 1
+  echo -e "  ${DIM}   ${label} güncelleniyor...${RST}"
+  if update_duendee_from_git "$path" origin 2>/dev/null; then
+    echo -e "  ${DIM}   ${label} güncel.${RST}"
+    return 0
+  fi
+  echo -e "  ${DIM}   ${label} mevcut haliyle kullanılacak.${RST}"
+  return 1
+}
+
+ensure_app_npm_deps() {
+  local path="$1"
+  [[ -f "$path/node_modules/electron/package.json" ]] && return 0
+  echo -e "  ${DIM}   Duendee-app bağımlılıkları kuruluyor...${RST}"
+  (cd "$path" && npm install --omit=dev) || (cd "$path" && npm install) || return 1
+}
+
+start_companion_apps() {
+  local url="${1:-}" path=""
+  desktop_app_launch || mobile_app_launch || return 0
+  if [[ -z "$url" || "$url" != https://* ]]; then
+    echo -e "  ${YEL}   Masaüstü/mobil app için geçerli tünel URL'si yok.${RST}"
+    return 0
+  fi
+  path="$(resolve_duendee_app_path "${APP_PATH:-}" 2>/dev/null || true)"
+  if [[ -z "$path" ]]; then
+    echo -e "  ${YEL}   Duendee-app bulunamadı. config.json içine appPath yazın.${RST}"
+    return 0
+  fi
+  APP_PATH="$path"
+  echo -e "  ${DIM}   Duendee-app: ${path}${RST}"
+  update_git_repo_safe "$path" "Duendee-app" || true
+  ensure_app_npm_deps "$path" || {
+    echo -e "  ${RED}   Duendee-app npm install başarısız.${RST}"
+    return 0
+  }
+  if [[ -f "${PROJECT}/dist/index.html" ]]; then
+    echo -e "  ${DIM}   Duendee-app www senkronu (mevcut dist)...${RST}"
+    (cd "$path" && npm run sync:skip-build) || {
+      echo -e "  ${RED}   Duendee-app sync başarısız.${RST}"
+      return 0
+    }
+  else
+    echo -e "  ${DIM}   Duendee-app www senkronu (build)...${RST}"
+    (cd "$path" && npm run sync) || {
+      echo -e "  ${RED}   Duendee-app sync başarısız.${RST}"
+      return 0
+    }
+  fi
+  if desktop_app_launch; then
+    echo -e "  ${GRN}   Masaüstü app (Electron) açılıyor...${RST}"
+    if command -v setsid >/dev/null 2>&1; then
+      setsid nohup env DUENDEE_TUNNEL_URL="$url" DUENDEE_START_MODE=tunnel \
+        npm --prefix "$path" run electron:tunnel >>"${STATE}/app-desktop.log" 2>&1 </dev/null &
+    else
+      nohup env DUENDEE_TUNNEL_URL="$url" DUENDEE_START_MODE=tunnel \
+        npm --prefix "$path" run electron:tunnel >>"${STATE}/app-desktop.log" 2>&1 </dev/null &
+    fi
+    disown $! 2>/dev/null || true
+  fi
+  if mobile_app_launch; then
+    echo -e "  ${GRN}   Mobil app (Android) derlenip açılıyor...${RST}"
+    if command -v setsid >/dev/null 2>&1; then
+      setsid nohup env DUENDEE_TUNNEL_URL="$url" \
+        npm --prefix "$path" run android:run >>"${STATE}/app-mobile.log" 2>&1 </dev/null &
+    else
+      nohup env DUENDEE_TUNNEL_URL="$url" \
+        npm --prefix "$path" run android:run >>"${STATE}/app-mobile.log" 2>&1 </dev/null &
+    fi
+    disown $! 2>/dev/null || true
   fi
 }
 
@@ -1746,6 +1889,7 @@ do_start() {
       echo -e "  ${GRN}   Aktif tünel var.${RST}"
       echo -e "     ${URL}"
       copy_clipboard "$URL" >/dev/null 2>&1 || true
+      start_companion_apps "$URL"
       echo
       wait_key
       return
@@ -1785,6 +1929,7 @@ do_start() {
     fi
     echo -e "     ${URL}"
     copy_clipboard "$URL" >/dev/null 2>&1 || true
+    start_companion_apps "$URL"
     echo
     wait_key
     return
@@ -1858,6 +2003,7 @@ do_start() {
     else
       echo -e "  ${DIM}   Tarayıcı kapalı. [5] > [B].${RST}"
     fi
+    start_companion_apps "$URL"
     send_tunnel_whatsapp "$URL"
   fi
   if [[ -f "${STATE}/fleet-claimed" || "$fresh" -eq 1 ]]; then
@@ -2139,7 +2285,7 @@ disable_autostart() {
 }
 
 do_autostart() {
-  local ans="" choices="TSBX"
+  local ans="" choices="TSBDMX"
   clear
   echo
   echo -e "${C5}   --- Cihaz Açılışında Otomatik Başlat ---${RST}"
@@ -2156,13 +2302,25 @@ do_autostart() {
   else
     echo -e "  ${DIM}   Tarayıcı:${RST} ${RED}${BOLD}[KAPALI]${RST}"
   fi
+  if desktop_app_launch; then
+    echo -e "  ${DIM}   Masaüstü app:${RST} ${GRN}${BOLD}[AÇIK]${RST}"
+  else
+    echo -e "  ${DIM}   Masaüstü app:${RST} ${RED}${BOLD}[KAPALI]${RST}"
+  fi
+  if mobile_app_launch; then
+    echo -e "  ${DIM}   Mobil app:${RST} ${GRN}${BOLD}[AÇIK]${RST}"
+  else
+    echo -e "  ${DIM}   Mobil app:${RST} ${RED}${BOLD}[KAPALI]${RST}"
+  fi
   echo
   echo "  [T]  Yalnızca tool'u otomatik başlat"
   echo "  [S]  Tool'u ve tünel servisini otomatik başlat"
   echo "  [B]  Tünel başladığında tarayıcıyı aç / kapat"
+  echo "  [D]  Tünel başladığında masaüstü app'i aç / kapat"
+  echo "  [M]  Tünel başladığında mobil app'i aç / kapat"
   if [[ "$AUTOMODE" != "off" ]]; then
     echo "  [K]  Otomatik başlatmayı kapat"
-    choices="TSBKX"
+    choices="TSBDMKX"
   fi
   echo -e "  ${DIM}${BOLD}[X]${RST}  ${DIM}Geri dön${RST}"
   echo
@@ -2197,6 +2355,24 @@ do_autostart() {
       else
         set_browser_opens 1
         echo -e "  ${GRN}   Tünel başladığında tarayıcı açılacak.${RST}"
+      fi
+      ;;
+    D)
+      if desktop_app_launch; then
+        set_desktop_app_launch 0
+        echo -e "  ${RED}   Tünel başladığında masaüstü app açılmayacak.${RST}"
+      else
+        set_desktop_app_launch 1
+        echo -e "  ${GRN}   Tünel başladığında masaüstü app açılacak.${RST}"
+      fi
+      ;;
+    M)
+      if mobile_app_launch; then
+        set_mobile_app_launch 0
+        echo -e "  ${RED}   Tünel başladığında mobil app açılmayacak.${RST}"
+      else
+        set_mobile_app_launch 1
+        echo -e "  ${GRN}   Tünel başladığında mobil app açılacak.${RST}"
       fi
       ;;
     K)
