@@ -55,13 +55,13 @@ curl -fsSL https://raw.githubusercontent.com/hayripenah/Duendee-Tunnel-Tool/main
 
 On Windows, keep using the PowerShell one-liner above.
 
-### First-run projectPath (Duendee-main)
+### First-run projectPath (Duendee-fm)
 
 On first run the tool copies `config.example.json` → `config.json`, then resolves `projectPath`:
 
-1. Searches common locations for a local **Duendee** / **Duendee-main** repo (Desktop, home, Documents, `YEK/Cursor`, git remotes matching `hayripenah/Duendee`).
-2. If found: offers that path (Enter accepts #1). Every later launch moves that repo to the latest `origin/main`.
-3. If not found: **Enter clones** `https://github.com/hayripenah/Duendee.git` to **Desktop/`Duendee-main`** by default.
+1. Searches common locations for a local **Duendee-fm** / **Duendee** repo (Desktop, home, Documents, `YEK/Cursor`, git remotes matching `hayripenah/Duendee`). **Duendee-main is never used.**
+2. If found: offers that path (Enter accepts #1). Every tunnel start pulls that repo to the latest `origin/main` before publishing.
+3. If not found: **Enter clones** `https://github.com/hayripenah/Duendee.git` to **Desktop/`Duendee-fm`** by default.
 4. Always allows a custom directory (typed path; Windows folder browser; Linux `zenity`/`kdialog` when available).
 
 Override with env vars: `DT_DUENDEE_DIR`, `DT_DUENDEE_REPO_URL`, `DT_DUENDEE_CLONE_NAME`.

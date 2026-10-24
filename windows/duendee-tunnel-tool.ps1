@@ -68,7 +68,7 @@ $C6 = "$Esc[38;2;251;113;133m"
 $configPath = Join-Path $Root 'config.json'
 $configExample = Join-Path $Root 'config.example.json'
 $script:DuendeeRepoUrl = if ($env:DT_DUENDEE_REPO_URL) { $env:DT_DUENDEE_REPO_URL } else { 'https://github.com/hayripenah/Duendee.git' }
-$script:DuendeeCloneName = if ($env:DT_DUENDEE_CLONE_NAME) { $env:DT_DUENDEE_CLONE_NAME } else { 'Duendee-main' }
+$script:DuendeeCloneName = if ($env:DT_DUENDEE_CLONE_NAME) { $env:DT_DUENDEE_CLONE_NAME } else { 'Duendee-fm' }
 
 function Save-ToolConfig([string]$ProjectPath, [int]$PortNum, [string]$AppPath = '') {
   $obj = [ordered]@{ projectPath = $ProjectPath; port = $PortNum }
@@ -95,10 +95,17 @@ function Get-UserDesktopPath {
   return $fallback
 }
 
+function Test-IsDuendeeMainPath([string]$Path) {
+  if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+  return ((Split-Path -Leaf $Path) -match '^(?i)duendee-main$')
+}
+
 function Test-LooksLikeDuendeeRepo([string]$Path) {
   if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Container)) { return $false }
+  # Tunnel publishes Duendee-fm only. Never treat Duendee-main as the app tree.
+  if (Test-IsDuendeeMainPath $Path) { return $false }
   $leaf = Split-Path -Leaf $Path
-  $nameHit = $leaf -match '^(?i)duendee(-main)?$'
+  $nameHit = $leaf -match '^(?i)duendee(-fm)?$'
   $pkg = Join-Path $Path 'package.json'
   $pkgHit = $false
   if (Test-Path -LiteralPath $pkg) {
@@ -352,9 +359,10 @@ function Find-LocalDuendeeRepos {
     }
   }
   if ($env:DT_DUENDEE_DIR) { & $add $env:DT_DUENDEE_DIR }
+  & $add (Join-Path (Split-Path -Parent $Root) 'Duendee-fm')
   foreach ($base in @($desktop, $userHome, $docs, (Join-Path $userHome 'YEK\Cursor'), (Join-Path $desktop 'YEK\Cursor'), (Join-Path $userHome 'Cursor'), (Join-Path $desktop 'Cursor'))) {
     if (-not $base) { continue }
-    foreach ($name in @('Duendee-main', 'Duendee', 'duendee-main', 'duendee')) {
+    foreach ($name in @('Duendee-fm', 'Duendee', 'duendee-fm', 'duendee')) {
       & $add (Join-Path $base $name)
     }
   }
@@ -362,13 +370,13 @@ function Find-LocalDuendeeRepos {
     if (-not $scanRoot -or -not (Test-Path -LiteralPath $scanRoot)) { continue }
     try {
       Get-ChildItem -LiteralPath $scanRoot -Directory -ErrorAction SilentlyContinue | Where-Object {
-        $_.Name -match '^(?i)duendee(-main)?$'
+        $_.Name -match '^(?i)duendee(-fm)?$'
       } | ForEach-Object { & $add $_.FullName }
       Get-ChildItem -LiteralPath $scanRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
         $cursor = Join-Path $_.FullName 'Cursor'
         if (Test-Path -LiteralPath $cursor) {
           Get-ChildItem -LiteralPath $cursor -Directory -ErrorAction SilentlyContinue | Where-Object {
-            $_.Name -match '^(?i)duendee(-main)?$'
+            $_.Name -match '^(?i)duendee(-fm)?$'
           } | ForEach-Object { & $add $_.FullName }
         }
       }
@@ -553,6 +561,7 @@ function Ensure-ToolConfig {
   $placeholder = [string]::IsNullOrWhiteSpace($proj) -or
     $proj -match '[\\/]path[\\/]to[\\/]your[\\/]app' -or
     $proj -match '[\\/]path[\\/]to[\\/]Duendee-fm' -or
+    (Test-IsDuendeeMainPath $proj) -or
     -not (Test-Path -LiteralPath $proj)
 
   if ($placeholder) {
@@ -2001,22 +2010,13 @@ function Get-DuendeeDepStamp([string]$Path) {
   return ($parts -join '|')
 }
 
-function Test-DuendeeWorktreeDirty([string]$Path) {
-  if (-not (Test-Path -LiteralPath (Join-Path $Path '.git'))) { return $true }
-  $prev = $ErrorActionPreference
-  $ErrorActionPreference = 'Continue'
-  try {
-    $out = & git -C $Path status --porcelain 2>$null
-    if ($LASTEXITCODE -ne 0) { return $true }
-    return -not [string]::IsNullOrWhiteSpace("$out")
-  } finally {
-    $ErrorActionPreference = $prev
-  }
-}
-
 function Sync-DuendeeForPublish {
+  if (Test-IsDuendeeMainPath $Project) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST projectPath Duendee-main olamaz. Yayına yalnızca Duendee-fm alınır."
+    return $false
+  }
   if (-not (Test-LooksLikeDuendeeRepo $Project)) {
-    Write-UiLine "  $RED$BOLD[HATA]$RST projectPath Duendee deposu değil. Güncel sürüm yayına alınamadı."
+    Write-UiLine "  $RED$BOLD[HATA]$RST projectPath Duendee-fm deposu değil. Güncel sürüm yayına alınamadı."
     return $false
   }
   Stop-DevServer
@@ -2027,11 +2027,10 @@ function Sync-DuendeeForPublish {
     return $false
   }
   $before = Get-DuendeeDepStamp $Project
-  # projectPath is the app to publish. A hard reset would drop uncommitted Duendee-main edits.
-  if (Test-DuendeeWorktreeDirty $Project) {
-    Write-UiLine "  $DIM   Duendee-main klasöründeki güncel dosyalar yayına alınıyor.$RST"
-  } elseif (-not (Update-DuendeeRepoSafe $Project)) {
-    Write-UiLine "  $DIM   Uzak depo alınamadı. Klasördeki mevcut Duendee yayına alınıyor.$RST"
+  Write-UiLine "  $DIM   Duendee-fm güncel reposu yayına alınıyor...$RST"
+  if (-not (Update-DuendeeRepoSafe $Project)) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST Duendee-fm güncellenemedi. Eski sürüm yayına alınmadı."
+    return $false
   }
   $after = Get-DuendeeDepStamp $Project
   if (-not (Test-Path -LiteralPath (Join-Path $Project 'node_modules')) -or $before -ne $after) {
@@ -2126,7 +2125,7 @@ function Invoke-Start {
     Write-UiLine "  $GRN   Aktif tünel var.$RST"
     $existing = Recover-TunnelUrl
     if (-not $existing) { $existing = Get-TunnelUrl }
-    Write-UiLine "  ${C1}[2]$RST Güncel Duendee yayına alınıyor..."
+    Write-UiLine "  ${C1}[2]$RST Güncel Duendee-fm yayına alınıyor..."
     if (-not (Sync-DuendeeForPublish)) {
       Complete-Action
       return
@@ -2159,7 +2158,7 @@ function Invoke-Start {
   if (Read-TunnelPid) { Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue }
 
   if (-not $script:NeedFreshTunnel) {
-    Write-UiLine "  ${C1}[2]$RST Güncel Duendee yayına alınıyor..."
+    Write-UiLine "  ${C1}[2]$RST Güncel Duendee-fm yayına alınıyor..."
     if (-not (Sync-DuendeeForPublish)) {
       Complete-Action
       return

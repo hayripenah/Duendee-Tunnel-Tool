@@ -51,7 +51,7 @@ die() {
 }
 
 DUENDEE_REPO_URL="${DT_DUENDEE_REPO_URL:-https://github.com/hayripenah/Duendee.git}"
-DUENDEE_CLONE_NAME="${DT_DUENDEE_CLONE_NAME:-Duendee-main}"
+DUENDEE_CLONE_NAME="${DT_DUENDEE_CLONE_NAME:-Duendee-fm}"
 
 save_config() {
   local proj="$1"
@@ -113,13 +113,24 @@ desktop_dir() {
   printf '%s' "$d"
 }
 
+is_duendee_main_path() {
+  local path="$1" leaf
+  [[ -n "$path" ]] || return 1
+  leaf="$(basename "$path")"
+  [[ "$leaf" =~ ^[Dd]uendee-[Mm]ain$ ]]
+}
+
 looks_like_duendee() {
   local path="$1"
   [[ -d "$path" ]] || return 1
+  # Tunnel publishes Duendee-fm only. Never treat Duendee-main as the app tree.
+  if is_duendee_main_path "$path"; then
+    return 1
+  fi
   local leaf base pkg remote
   leaf="$(basename "$path")"
   local name_hit=0 pkg_hit=0 remote_hit=0
-  [[ "$leaf" =~ ^[Dd]uendee(-main)?$ ]] && name_hit=1
+  [[ "$leaf" =~ ^[Dd]uendee(-fm)?$ ]] && name_hit=1
   pkg="$path/package.json"
   if [[ -f "$pkg" ]]; then
     if grep -Eqi 'hayripenah|dev:tunnel|vite_react_shadcn' "$pkg" 2>/dev/null; then
@@ -352,7 +363,7 @@ find_local_duendee() {
     "$home/Cursor" "$desktop/Cursor"
     "$home/YEK" "$desktop/YEK"
   )
-  local -a names=(Duendee-main Duendee duendee-main duendee)
+  local -a names=(Duendee-fm Duendee duendee-fm duendee)
   local -a hits=()
   local seen="" b n p child
 
@@ -370,6 +381,7 @@ find_local_duendee() {
   }
 
   [[ -n "${DT_DUENDEE_DIR:-}" ]] && add_hit "$DT_DUENDEE_DIR"
+  add_hit "$(dirname "$ROOT")/Duendee-fm"
   for b in "${bases[@]}"; do
     [[ -d "$b" ]] || continue
     for n in "${names[@]}"; do
@@ -378,7 +390,7 @@ find_local_duendee() {
     for child in "$b"/*; do
       [[ -d "$child" ]] || continue
       n="$(basename "$child")"
-      if [[ "$n" =~ ^[Dd]uendee(-main)?$ ]]; then
+      if [[ "$n" =~ ^[Dd]uendee(-fm)?$ ]]; then
         add_hit "$child"
       fi
       if [[ -d "$child/Cursor" ]]; then
@@ -565,6 +577,10 @@ load_config() {
   if [[ -z "${PROJECT:-}" ]]; then
     needs_setup=1
   elif [[ "$PROJECT" == *"/path/to/your/app"* || "$PROJECT" == *"\\path\\to\\your\\app"* ]]; then
+    needs_setup=1
+  elif [[ "$PROJECT" == *"/path/to/Duendee-fm"* || "$PROJECT" == *"\\path\\to\\Duendee-fm"* ]]; then
+    needs_setup=1
+  elif is_duendee_main_path "$PROJECT"; then
     needs_setup=1
   elif [[ ! -d "$PROJECT" ]]; then
     needs_setup=1
@@ -1604,8 +1620,12 @@ dep_stamp() {
 }
 
 prepare_latest_duendee() {
+  if is_duendee_main_path "$PROJECT"; then
+    echo -e "  ${RED}${BOLD}[HATA]${RST} projectPath Duendee-main olamaz. Yayına yalnızca Duendee-fm alınır."
+    return 1
+  fi
   if ! looks_like_duendee "$PROJECT"; then
-    echo -e "  ${RED}${BOLD}[HATA]${RST} projectPath Duendee deposu değil. Güncel sürüm yayına alınamadı."
+    echo -e "  ${RED}${BOLD}[HATA]${RST} projectPath Duendee-fm deposu değil. Güncel sürüm yayına alınamadı."
     return 1
   fi
   kill_dev_server
@@ -1617,8 +1637,9 @@ prepare_latest_duendee() {
   fi
   local before after
   before="$(dep_stamp "$PROJECT")"
+  echo -e "  ${DIM}   Duendee-fm güncel reposu yayına alınıyor...${RST}"
   if ! update_duendee_safe "$PROJECT"; then
-    echo -e "  ${RED}${BOLD}[HATA]${RST} Duendee güncellenemedi. Eski sürüm yayına alınmadı."
+    echo -e "  ${RED}${BOLD}[HATA]${RST} Duendee-fm güncellenemedi. Eski sürüm yayına alınmadı."
     return 1
   fi
   after="$(dep_stamp "$PROJECT")"
@@ -1986,7 +2007,7 @@ do_start() {
   fi
 
   if [[ "$fresh" -eq 0 ]]; then
-    echo -e "  ${C1}[2]${RST} Güncel Duendee yayına alınıyor..."
+    echo -e "  ${C1}[2]${RST} Güncel Duendee-fm yayına alınıyor..."
     if ! prepare_latest_duendee; then
       wait_key
       return
