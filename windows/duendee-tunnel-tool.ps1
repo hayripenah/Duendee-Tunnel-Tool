@@ -1656,8 +1656,13 @@ function Show-Menu {
     'tunnel' { "$GRN[TOOL+TÜNEL]$RST" }
     default { "$RED[KAPALI]$RST" }
   }
-  $browserLabel = if (Test-BrowserOpens) { "$GRN[TARAYICI]$RST" } else { "$RED[TARAYICI KAPALI]$RST" }
-  Write-UiLine "  [5]  Cihaz Açılışında Otomatik Başlat  $autoLabel  $browserLabel"
+  $launchLabel = switch (Get-LaunchType) {
+    'desktop' { "$GRN[MASAÜSTÜ]$RST" }
+    'mobile' { "$GRN[MOBİL]$RST" }
+    'all' { "$GRN[HEPSİ]$RST" }
+    default { "$GRN[TARAYICI]$RST" }
+  }
+  Write-UiLine "  [5]  Cihaz Açılışında Otomatik Başlat  $autoLabel  $launchLabel"
   Write-UiLine "  [6]  Aracı Cihazdan Kaldır"
   Write-UiLine ''
   Write-Ui "$DIM   Seçim: $RST"
@@ -2279,47 +2284,73 @@ function Invoke-Cancel {
   Complete-Action
 }
 
-function Get-BrowserFlagPath {
-  Join-Path $StateDir 'open-browser'
+function Get-LaunchTypePath {
+  Join-Path $StateDir 'launch-type'
+}
+
+function Get-LaunchType {
+  $path = Get-LaunchTypePath
+  if (Test-Path -LiteralPath $path) {
+    $raw = ("$(Get-Content -LiteralPath $path -TotalCount 1 -ErrorAction SilentlyContinue)").Trim().ToLowerInvariant()
+    if ($raw -in @('browser', 'desktop', 'mobile', 'all')) { return $raw }
+  }
+  # Migrate older independent flags once.
+  $browserFile = Join-Path $StateDir 'open-browser'
+  $deskFile = Join-Path $StateDir 'launch-desktop'
+  $mobFile = Join-Path $StateDir 'launch-mobile'
+  $browserOn = $true
+  if (Test-Path -LiteralPath $browserFile) {
+    $browserOn = ("$(Get-Content -LiteralPath $browserFile -TotalCount 1 -ErrorAction SilentlyContinue)").Trim() -ne '0'
+  }
+  $deskOn = $false
+  if (Test-Path -LiteralPath $deskFile) {
+    $deskOn = ("$(Get-Content -LiteralPath $deskFile -TotalCount 1 -ErrorAction SilentlyContinue)").Trim() -ne '0'
+  }
+  $mobOn = $false
+  if (Test-Path -LiteralPath $mobFile) {
+    $mobOn = ("$(Get-Content -LiteralPath $mobFile -TotalCount 1 -ErrorAction SilentlyContinue)").Trim() -ne '0'
+  }
+  if ($deskOn -and $mobOn -and $browserOn) { return 'all' }
+  if ($deskOn -and -not $mobOn -and -not $browserOn) { return 'desktop' }
+  if ($mobOn -and -not $deskOn -and -not $browserOn) { return 'mobile' }
+  if ($deskOn -or $mobOn) { return 'all' }
+  return 'browser'
+}
+
+function Set-LaunchType([string]$Type) {
+  $normalized = "$Type".Trim().ToLowerInvariant()
+  if ($normalized -notin @('browser', 'desktop', 'mobile', 'all')) { $normalized = 'browser' }
+  if (-not (Test-Path -LiteralPath $StateDir)) {
+    New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+  }
+  Set-Content -LiteralPath (Get-LaunchTypePath) -Value $normalized -Encoding Ascii
+}
+
+function Get-LaunchTypeLabel([string]$Type = '') {
+  if ([string]::IsNullOrWhiteSpace($Type)) { $Type = Get-LaunchType }
+  switch ($Type) {
+    'desktop' { return 'Masaüstü App' }
+    'mobile' { return 'Mobil App' }
+    'all' { return 'Hepsi' }
+    default { return 'Tarayıcı' }
+  }
 }
 
 function Test-BrowserOpens {
   if ($env:DT_RECOVER -eq '1') { return $false }
-  $path = Get-BrowserFlagPath
-  if (-not (Test-Path -LiteralPath $path)) { return $true }
-  $raw = Get-Content -LiteralPath $path -TotalCount 1 -ErrorAction SilentlyContinue
-  return ("$raw".Trim() -ne '0')
+  $t = Get-LaunchType
+  return ($t -eq 'browser' -or $t -eq 'all')
 }
 
-function Set-BrowserOpens([bool]$On) {
-  if (-not (Test-Path -LiteralPath $StateDir)) {
-    New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
-  }
-  Set-Content -LiteralPath (Get-BrowserFlagPath) -Value $(if ($On) { '1' } else { '0' }) -Encoding Ascii
+function Test-DesktopAppLaunch {
+  $t = Get-LaunchType
+  return ($t -eq 'desktop' -or $t -eq 'all')
 }
 
-function Get-StateFlagPath([string]$Name) {
-  Join-Path $StateDir $Name
+function Test-MobileAppLaunch {
+  $t = Get-LaunchType
+  return ($t -eq 'mobile' -or $t -eq 'all')
 }
-
-function Test-StateFlag([string]$Name, [bool]$DefaultOn = $false) {
-  $path = Get-StateFlagPath $Name
-  if (-not (Test-Path -LiteralPath $path)) { return $DefaultOn }
-  $raw = Get-Content -LiteralPath $path -TotalCount 1 -ErrorAction SilentlyContinue
-  return ("$raw".Trim() -ne '0')
-}
-
-function Set-StateFlag([string]$Name, [bool]$On) {
-  if (-not (Test-Path -LiteralPath $StateDir)) {
-    New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
-  }
-  Set-Content -LiteralPath (Get-StateFlagPath $Name) -Value $(if ($On) { '1' } else { '0' }) -Encoding Ascii
-}
-
-function Test-DesktopAppLaunch { Test-StateFlag 'launch-desktop' $false }
-function Set-DesktopAppLaunch([bool]$On) { Set-StateFlag 'launch-desktop' $On }
-function Test-MobileAppLaunch { Test-StateFlag 'launch-mobile' $false }
-function Set-MobileAppLaunch([bool]$On) { Set-StateFlag 'launch-mobile' $On }
 
 function Update-GitRepoSafe([string]$Path, [string]$Label = 'Repo') {
   if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return $false }
@@ -2444,59 +2475,41 @@ function Invoke-Autostart {
     'tunnel' { Write-UiLine "  $DIM   Durum:$RST $GRN$BOLD[TOOL+TÜNEL]$RST" }
     default { Write-UiLine "  $DIM   Durum:$RST $RED$BOLD[KAPALI]$RST" }
   }
-  Write-UiLine ''
-  if (Test-BrowserOpens) {
-    Write-UiLine "  $DIM   Tarayıcı:$RST $GRN$BOLD[AÇIK]$RST"
-  } else {
-    Write-UiLine "  $DIM   Tarayıcı:$RST $RED$BOLD[KAPALI]$RST"
-  }
-  if (Test-DesktopAppLaunch) {
-    Write-UiLine "  $DIM   Masaüstü app:$RST $GRN$BOLD[AÇIK]$RST"
-  } else {
-    Write-UiLine "  $DIM   Masaüstü app:$RST $RED$BOLD[KAPALI]$RST"
-  }
-  if (Test-MobileAppLaunch) {
-    Write-UiLine "  $DIM   Mobil app:$RST $GRN$BOLD[AÇIK]$RST"
-  } else {
-    Write-UiLine "  $DIM   Mobil app:$RST $RED$BOLD[KAPALI]$RST"
-  }
+  $launch = Get-LaunchType
+  Write-UiLine "  $DIM   Derleme/Başlatma Tipi:$RST $GRN$BOLD[$(Get-LaunchTypeLabel $launch)]$RST"
   Write-UiLine ''
   Write-UiLine "  [T]  Yalnızca tool'u otomatik başlat"
   Write-UiLine "  [S]  Tool'u ve tünel servisini otomatik başlat"
-  Write-UiLine "  [B]  Tünel başladığında tarayıcıyı aç / kapat"
-  Write-UiLine "  [D]  Tünel başladığında masaüstü app'i aç / kapat"
-  Write-UiLine "  [M]  Tünel başladığında mobil app'i aç / kapat"
+  Write-UiLine ''
+  Write-UiLine "  $DIM--- Derleme/Başlatma Tipi ---$RST"
+  Write-UiLine "  [1]  Tarayıcı$(if ($launch -eq 'browser') { "  $GRN[SEÇİLİ]$RST" } else { '' })"
+  Write-UiLine "  [2]  Masaüstü App$(if ($launch -eq 'desktop') { "  $GRN[SEÇİLİ]$RST" } else { '' })"
+  Write-UiLine "  [3]  Mobil App$(if ($launch -eq 'mobile') { "  $GRN[SEÇİLİ]$RST" } else { '' })"
+  Write-UiLine "  [4]  Hepsi$(if ($launch -eq 'all') { "  $GRN[SEÇİLİ]$RST" } else { '' })"
   if ($mode -ne 'off') {
     Write-UiLine "  [K]  Otomatik başlatmayı kapat"
   }
   Write-UiLine "  $DIM$BOLD[X]$RST  ${DIM}Geri dön$RST"
   Write-UiLine ''
-  $choices = if ($mode -ne 'off') { 'TSBDMKX' } else { 'TSBDMX' }
+  $choices = if ($mode -ne 'off') { 'TS1234KX' } else { 'TS1234X' }
   Write-Ui "$DIM   Seçim: $RST"
   $c = Get-Choice $choices
   Write-UiLine ''
   if ($c -eq 'X') { return }
-  if ($c -eq 'B') {
-    $next = -not (Test-BrowserOpens)
-    Set-BrowserOpens $next
-    if ($next) { Write-UiLine "  $GRN   Tünel başladığında tarayıcı açılacak.$RST" }
-    else { Write-UiLine "  $RED   Tünel başladığında tarayıcı açılmayacak.$RST" }
-    Complete-Action
-    return
-  }
-  if ($c -eq 'D') {
-    $next = -not (Test-DesktopAppLaunch)
-    Set-DesktopAppLaunch $next
-    if ($next) { Write-UiLine "  $GRN   Tünel başladığında masaüstü app açılacak.$RST" }
-    else { Write-UiLine "  $RED   Tünel başladığında masaüstü app açılmayacak.$RST" }
-    Complete-Action
-    return
-  }
-  if ($c -eq 'M') {
-    $next = -not (Test-MobileAppLaunch)
-    Set-MobileAppLaunch $next
-    if ($next) { Write-UiLine "  $GRN   Tünel başladığında mobil app açılacak.$RST" }
-    else { Write-UiLine "  $RED   Tünel başladığında mobil app açılmayacak.$RST" }
+  if ($c -in @('1', '2', '3', '4')) {
+    $next = switch ($c) {
+      '1' { 'browser' }
+      '2' { 'desktop' }
+      '3' { 'mobile' }
+      default { 'all' }
+    }
+    if ($next -eq $launch) {
+      Write-UiLine "  $DIM   Bu derleme/başlatma tipi zaten seçili.$RST"
+    } else {
+      Set-LaunchType $next
+      Write-UiLine "  $GRN   Derleme/Başlatma Tipi: $(Get-LaunchTypeLabel $next)$RST"
+      Write-UiLine "  $DIM   Tünel her başlatıldığında bu seçim uygulanacak.$RST"
+    }
     Complete-Action
     return
   }

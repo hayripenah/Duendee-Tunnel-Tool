@@ -116,13 +116,14 @@ Shared pieces (repo root):
 2. Check status  
 3. Copy public link  
 4. Cancel tunnel  
-5. Autostart — **[T]** tool, **[S]** tool and tunnel, **[B]** browser, **[D]** desktop app, **[M]** mobile app, **[K]** off  
+5. Autostart — **[T]** tool, **[S]** tool and tunnel, **Derleme/Başlatma Tipi** **[1]** browser / **[2]** desktop / **[3]** mobile / **[4]** all, **[K]** off  
+
 
 6. Uninstall — **[1]** tool, **[2]** tool plus Node.js and cloudflared
 
 Closing the window leaves the tunnel running. **[4]** stops it.
 
-When **[D]** / **[M]** are enabled under autostart, tunnel start also updates `Duendee-app`, syncs `www/` from the published FM build, then launches Electron (`electron:tunnel`) and/or Android (`android:run`) against the live tunnel URL.
+Under autostart, **Derleme/Başlatma Tipi** picks what opens on every tunnel start: browser, desktop Electron, Android, or all. Desktop/mobile modes update `Duendee-app`, sync `www/` from the FM build, then run `electron:tunnel` / `android:run` against the live URL.
 
 ## Tunnel watchdog (auto recovery)
 

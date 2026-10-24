@@ -943,44 +943,90 @@ autostate() {
   fi
 }
 
-browser_opens() {
-  [[ "${DT_RECOVER:-}" == "1" ]] && return 1
-  local f="${STATE}/open-browser"
-  [[ -f "$f" ]] || return 0
-  [[ "$(tr -d '[:space:]' <"$f" 2>/dev/null || true)" != "0" ]]
+launch_type() {
+  local f="${STATE}/launch-type" raw="" browser_on=1 desk_on=0 mob_on=0
+  if [[ -f "$f" ]]; then
+    raw="$(tr -d '[:space:]' <"$f" 2>/dev/null || true)"
+    raw="${raw,,}"
+    case "$raw" in
+      browser|desktop|mobile|all) printf '%s\n' "$raw"; return 0 ;;
+    esac
+  fi
+  if [[ -f "${STATE}/open-browser" ]]; then
+    [[ "$(tr -d '[:space:]' <"${STATE}/open-browser" 2>/dev/null || true)" != "0" ]] || browser_on=0
+  fi
+  if [[ -f "${STATE}/launch-desktop" ]]; then
+    [[ "$(tr -d '[:space:]' <"${STATE}/launch-desktop" 2>/dev/null || true)" != "0" ]] && desk_on=1
+  fi
+  if [[ -f "${STATE}/launch-mobile" ]]; then
+    [[ "$(tr -d '[:space:]' <"${STATE}/launch-mobile" 2>/dev/null || true)" != "0" ]] && mob_on=1
+  fi
+  if [[ "$desk_on" -eq 1 && "$mob_on" -eq 1 && "$browser_on" -eq 1 ]]; then
+    printf '%s\n' all
+  elif [[ "$desk_on" -eq 1 && "$mob_on" -eq 0 && "$browser_on" -eq 0 ]]; then
+    printf '%s\n' desktop
+  elif [[ "$mob_on" -eq 1 && "$desk_on" -eq 0 && "$browser_on" -eq 0 ]]; then
+    printf '%s\n' mobile
+  elif [[ "$desk_on" -eq 1 || "$mob_on" -eq 1 ]]; then
+    printf '%s\n' all
+  else
+    printf '%s\n' browser
+  fi
 }
 
-set_browser_opens() {
+set_launch_type() {
+  local t="${1:-browser}"
+  case "$t" in
+    browser|desktop|mobile|all) ;;
+    *) t=browser ;;
+  esac
   mkdir -p "$STATE"
-  printf '%s\n' "$1" >"${STATE}/open-browser"
+  printf '%s\n' "$t" >"${STATE}/launch-type"
+}
+
+launch_type_label() {
+  case "${1:-$(launch_type)}" in
+    desktop) printf '%s' 'Masaüstü App' ;;
+    mobile) printf '%s' 'Mobil App' ;;
+    all) printf '%s' 'Hepsi' ;;
+    *) printf '%s' 'Tarayıcı' ;;
+  esac
+}
+
+browser_opens() {
+  [[ "${DT_RECOVER:-}" == "1" ]] && return 1
+  case "$(launch_type)" in
+    browser|all) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+desktop_app_launch() {
+  case "$(launch_type)" in
+    desktop|all) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+mobile_app_launch() {
+  case "$(launch_type)" in
+    mobile|all) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+launch_type_mark() {
+  case "$(launch_type)" in
+    desktop) printf '%b' "${GRN}[MASAÜSTÜ]${RST}" ;;
+    mobile) printf '%b' "${GRN}[MOBİL]${RST}" ;;
+    all) printf '%b' "${GRN}[HEPSİ]${RST}" ;;
+    *) printf '%b' "${GRN}[TARAYICI]${RST}" ;;
+  esac
 }
 
 browser_mark() {
-  if browser_opens; then
-    printf '%b' "${GRN}[TARAYICI]${RST}"
-  else
-    printf '%b' "${RED}[TARAYICI KAPALI]${RST}"
-  fi
+  launch_type_mark
 }
-
-state_flag_on() {
-  local name="$1" default="${2:-0}" f="${STATE}/${name}"
-  if [[ ! -f "$f" ]]; then
-    [[ "$default" == "1" ]]
-    return
-  fi
-  [[ "$(tr -d '[:space:]' <"$f" 2>/dev/null || true)" != "0" ]]
-}
-
-set_state_flag() {
-  mkdir -p "$STATE"
-  printf '%s\n' "$2" >"${STATE}/$1"
-}
-
-desktop_app_launch() { state_flag_on launch-desktop 0; }
-mobile_app_launch() { state_flag_on launch-mobile 0; }
-set_desktop_app_launch() { set_state_flag launch-desktop "$1"; }
-set_mobile_app_launch() { set_state_flag launch-mobile "$1"; }
 
 looks_like_duendee_app() {
   local path="$1" pkg
@@ -2285,7 +2331,7 @@ disable_autostart() {
 }
 
 do_autostart() {
-  local ans="" choices="TSBDMX"
+  local ans="" choices="TS1234X" launch=""
   clear
   echo
   echo -e "${C5}   --- Cihaz Açılışında Otomatik Başlat ---${RST}"
@@ -2296,31 +2342,36 @@ do_autostart() {
     tunnel) echo -e "  ${DIM}   Durum:${RST} ${GRN}${BOLD}[TOOL+TÜNEL]${RST}" ;;
     *) echo -e "  ${DIM}   Durum:${RST} ${RED}${BOLD}[KAPALI]${RST}" ;;
   esac
-  echo
-  if browser_opens; then
-    echo -e "  ${DIM}   Tarayıcı:${RST} ${GRN}${BOLD}[AÇIK]${RST}"
-  else
-    echo -e "  ${DIM}   Tarayıcı:${RST} ${RED}${BOLD}[KAPALI]${RST}"
-  fi
-  if desktop_app_launch; then
-    echo -e "  ${DIM}   Masaüstü app:${RST} ${GRN}${BOLD}[AÇIK]${RST}"
-  else
-    echo -e "  ${DIM}   Masaüstü app:${RST} ${RED}${BOLD}[KAPALI]${RST}"
-  fi
-  if mobile_app_launch; then
-    echo -e "  ${DIM}   Mobil app:${RST} ${GRN}${BOLD}[AÇIK]${RST}"
-  else
-    echo -e "  ${DIM}   Mobil app:${RST} ${RED}${BOLD}[KAPALI]${RST}"
-  fi
+  launch="$(launch_type)"
+  echo -e "  ${DIM}   Derleme/Başlatma Tipi:${RST} ${GRN}${BOLD}[$(launch_type_label "$launch")]${RST}"
   echo
   echo "  [T]  Yalnızca tool'u otomatik başlat"
   echo "  [S]  Tool'u ve tünel servisini otomatik başlat"
-  echo "  [B]  Tünel başladığında tarayıcıyı aç / kapat"
-  echo "  [D]  Tünel başladığında masaüstü app'i aç / kapat"
-  echo "  [M]  Tünel başladığında mobil app'i aç / kapat"
+  echo
+  echo -e "  ${DIM}--- Derleme/Başlatma Tipi ---${RST}"
+  if [[ "$launch" == "browser" ]]; then
+    echo -e "  [1]  Tarayıcı  ${GRN}[SEÇİLİ]${RST}"
+  else
+    echo "  [1]  Tarayıcı"
+  fi
+  if [[ "$launch" == "desktop" ]]; then
+    echo -e "  [2]  Masaüstü App  ${GRN}[SEÇİLİ]${RST}"
+  else
+    echo "  [2]  Masaüstü App"
+  fi
+  if [[ "$launch" == "mobile" ]]; then
+    echo -e "  [3]  Mobil App  ${GRN}[SEÇİLİ]${RST}"
+  else
+    echo "  [3]  Mobil App"
+  fi
+  if [[ "$launch" == "all" ]]; then
+    echo -e "  [4]  Hepsi  ${GRN}[SEÇİLİ]${RST}"
+  else
+    echo "  [4]  Hepsi"
+  fi
   if [[ "$AUTOMODE" != "off" ]]; then
     echo "  [K]  Otomatik başlatmayı kapat"
-    choices="TSBDMKX"
+    choices="TS1234KX"
   fi
   echo -e "  ${DIM}${BOLD}[X]${RST}  ${DIM}Geri dön${RST}"
   echo
@@ -2348,31 +2399,20 @@ do_autostart() {
         echo -e "  ${RED}${BOLD}[HATA]${RST} Ayar kaydedilemedi."
       fi
       ;;
-    B)
-      if browser_opens; then
-        set_browser_opens 0
-        echo -e "  ${RED}   Tünel başladığında tarayıcı açılmayacak.${RST}"
+    1|2|3|4)
+      local next=browser
+      case "$ans" in
+        1) next=browser ;;
+        2) next=desktop ;;
+        3) next=mobile ;;
+        4) next=all ;;
+      esac
+      if [[ "$next" == "$launch" ]]; then
+        echo -e "  ${DIM}   Bu derleme/başlatma tipi zaten seçili.${RST}"
       else
-        set_browser_opens 1
-        echo -e "  ${GRN}   Tünel başladığında tarayıcı açılacak.${RST}"
-      fi
-      ;;
-    D)
-      if desktop_app_launch; then
-        set_desktop_app_launch 0
-        echo -e "  ${RED}   Tünel başladığında masaüstü app açılmayacak.${RST}"
-      else
-        set_desktop_app_launch 1
-        echo -e "  ${GRN}   Tünel başladığında masaüstü app açılacak.${RST}"
-      fi
-      ;;
-    M)
-      if mobile_app_launch; then
-        set_mobile_app_launch 0
-        echo -e "  ${RED}   Tünel başladığında mobil app açılmayacak.${RST}"
-      else
-        set_mobile_app_launch 1
-        echo -e "  ${GRN}   Tünel başladığında mobil app açılacak.${RST}"
+        set_launch_type "$next"
+        echo -e "  ${GRN}   Derleme/Başlatma Tipi: $(launch_type_label "$next")${RST}"
+        echo -e "  ${DIM}   Tünel her başlatıldığında bu seçim uygulanacak.${RST}"
       fi
       ;;
     K)
