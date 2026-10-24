@@ -2434,13 +2434,16 @@ function Build-DuendeeAndroidApk([string]$AppDir, [hashtable]$Sdk) {
   # Gradle local.properties wants escaped backslashes on Windows.
   $escaped = $Sdk.SdkRoot.Replace('\', '\\')
   Set-Content -LiteralPath (Join-Path $androidDir 'local.properties') -Value "sdk.dir=$escaped`n" -Encoding Ascii
-  Write-UiLine "  $DIM   Capacitor android sync...$RST"
+  Write-UiLine "  $DIM   Capacitor android sync + DuendeeFM ikonları...$RST"
   Push-Location $AppDir
   try {
     & npx --yes cap sync android *>&1 | Out-Host
     if ($LASTEXITCODE -ne 0) {
       Write-UiLine "  $RED   cap sync android başarısız.$RST"
       return $null
+    }
+    if (Test-Path -LiteralPath (Join-Path $AppDir 'scripts\sync-native-branding.mjs')) {
+      & node (Join-Path $AppDir 'scripts\sync-native-branding.mjs') *>&1 | Out-Host
     }
   } finally { Pop-Location }
   Write-UiLine "  $DIM   APK derleniyor (assembleDebug)...$RST"
@@ -2457,11 +2460,22 @@ function Build-DuendeeAndroidApk([string]$AppDir, [hashtable]$Sdk) {
     }
   } finally { Pop-Location }
   $apkDir = Join-Path $androidDir 'app\build\outputs\apk\debug'
-  $apk = Get-ChildItem -LiteralPath $apkDir -Filter '*.apk' -ErrorAction SilentlyContinue |
+  $named = Join-Path $apkDir 'DuendeeFM.apk'
+  if (Test-Path -LiteralPath $named) { return (Resolve-Path -LiteralPath $named).Path }
+  $apk = Get-ChildItem -LiteralPath $apkDir -Filter 'DuendeeFM*.apk' -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  if (-not $apk) {
+    $apk = Get-ChildItem -LiteralPath $apkDir -Filter '*.apk' -ErrorAction SilentlyContinue |
+      Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  }
   if (-not $apk) {
     Write-UiLine "  $RED   APK bulunamadı: $apkDir$RST"
     return $null
+  }
+  if ($apk.Name -ne 'DuendeeFM.apk') {
+    $dest = Join-Path $apkDir 'DuendeeFM.apk'
+    Copy-Item -LiteralPath $apk.FullName -Destination $dest -Force
+    return (Resolve-Path -LiteralPath $dest).Path
   }
   return $apk.FullName
 }

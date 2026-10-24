@@ -572,7 +572,9 @@ async function sendApkDocument(sock, jid, filePath, caption) {
   const sentMsg = await sock.sendMessage(jid, {
     document: buf,
     mimetype: 'application/vnd.android.package-archive',
-    fileName: path.basename(filePath),
+    fileName: /duendeefm\.apk$/i.test(path.basename(filePath))
+      ? path.basename(filePath)
+      : 'DuendeeFM.apk',
     caption: caption || undefined
   });
   const id = sentMsg?.key?.id;

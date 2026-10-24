@@ -1129,11 +1129,14 @@ build_duendee_android_apk() {
     return 1
   }
   printf 'sdk.dir=%s\n' "$ANDROID_SDK_ROOT_BUILD" >"${android_dir}/local.properties"
-  echo -e "  ${DIM}   Capacitor android sync...${RST}"
+  echo -e "  ${DIM}   Capacitor android sync + DuendeeFM ikonları...${RST}"
   (cd "$app_dir" && npx --yes cap sync android) || {
     echo -e "  ${RED}   cap sync android başarısız.${RST}"
     return 1
   }
+  if [[ -f "${app_dir}/scripts/sync-native-branding.mjs" ]]; then
+    (cd "$app_dir" && node scripts/sync-native-branding.mjs) || true
+  fi
   echo -e "  ${DIM}   APK derleniyor (assembleDebug)...${RST}"
   (
     export JAVA_HOME="$JAVA_HOME_BUILD"
@@ -1145,11 +1148,20 @@ build_duendee_android_apk() {
     echo -e "  ${RED}   Gradle assembleDebug başarısız.${RST}"
     return 1
   }
-  apk="$(ls -1t "${android_dir}/app/build/outputs/apk/debug/"*.apk 2>/dev/null | head -n1 || true)"
+  local out_dir="${android_dir}/app/build/outputs/apk/debug"
+  if [[ -f "${out_dir}/DuendeeFM.apk" ]]; then
+    apk="${out_dir}/DuendeeFM.apk"
+  else
+    apk="$(ls -1t "${out_dir}"/DuendeeFM*.apk "${out_dir}"/*.apk 2>/dev/null | head -n1 || true)"
+  fi
   [[ -n "$apk" && -f "$apk" ]] || {
     echo -e "  ${RED}   APK bulunamadı.${RST}"
     return 1
   }
+  if [[ "$(basename "$apk")" != "DuendeeFM.apk" ]]; then
+    cp -f "$apk" "${out_dir}/DuendeeFM.apk"
+    apk="${out_dir}/DuendeeFM.apk"
+  fi
   BUILT_APK="$apk"
   return 0
 }
