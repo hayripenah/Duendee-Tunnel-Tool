@@ -62,6 +62,8 @@ function resolveUrl(raw) {
 }
 
 const url = action === 'retract' ? '' : resolveUrl(process.argv[2] || process.env.DT_WA_URL || '');
+const apkPath = String(process.env.DT_WA_APK || '').trim();
+const apkOnly = Boolean(apkPath) && process.env.DT_WA_APK_ONLY === '1';
 
 // Everyone the tunnel link was shared with can be listed, so a rebuilt tunnel
 // reaches all of them instead of only one number.
@@ -91,11 +93,20 @@ const recipients = normalizeRecipients(phoneArg).length
   : configRecipients;
 const phone = recipients[0] || '';
 
-if (action === 'send' && (!url || !/^https:\/\//i.test(url))) {
+if (action === 'send' && apkPath) {
+  if (!fs.existsSync(apkPath) || !/\.apk$/i.test(apkPath)) {
+    fail('DT_WA_APK gecersiz veya .apk degil: ' + apkPath);
+  }
+}
+if (action === 'send' && !apkOnly && (!url || !/^https:\/\//i.test(url))) {
   fail(
     'Kullanim / Usage: node send-whatsapp.js <tunnel-url|tunnel.url-file> [phone[,phone...]]\n' +
-      'URL yok veya gecersiz / missing or invalid URL.'
+      'URL yok veya gecersiz / missing or invalid URL.\n' +
+      'APK icin: DT_WA_APK=/path/app.apk (opsiyonel DT_WA_APK_ONLY=1)'
   );
+}
+if (action === 'send' && apkOnly && !apkPath) {
+  fail('DT_WA_APK_ONLY=1 icin DT_WA_APK gerekli.');
 }
 
 if (action === 'send' && !recipients.length) {
@@ -541,6 +552,25 @@ async function sendText(sock, jid, message) {
   return { sentMsg, id, jid: remoteJid, acked };
 }
 
+async function sendApkDocument(sock, jid, filePath, caption) {
+  const buf = fs.readFileSync(filePath);
+  const sentMsg = await sock.sendMessage(jid, {
+    document: buf,
+    mimetype: 'application/vnd.android.package-archive',
+    fileName: path.basename(filePath),
+    caption: caption || undefined
+  });
+  const id = sentMsg?.key?.id;
+  if (!id) {
+    throw new Error('APK mesaj anahtari donmedi');
+  }
+  const remoteJid = sentMsg.key?.remoteJid || jid;
+  // Track under a non-trycloudflare token so link retract does not wipe the APK.
+  rememberSent(id, remoteJid, 'apk:' + path.basename(filePath));
+  const acked = await waitForServerAck(sock, id, 60000);
+  return { sentMsg, id, jid: remoteJid, acked };
+}
+
 async function deliver(sock) {
   await waitUntilUsable(sock);
   const linked = sock.user?.id || readLinkedId();
@@ -554,14 +584,28 @@ async function deliver(sock) {
   } catch {
     /* presence is optional */
   }
-  if (process.env.DT_WA_KEEP_EXISTING === '1' && loadSent().some((row) => sameUrl(row.url, url))) {
+  if (
+    !apkOnly &&
+    process.env.DT_WA_KEEP_EXISTING === '1' &&
+    loadSent().some((row) => sameUrl(row.url, url))
+  ) {
     console.log('  Bu link zaten WhatsApp mesajinda.');
     delivered = true;
     finish(0, 'Mevcut link mesaji duruyor.');
     return;
   }
-  await deleteStored(sock, url);
-  const message = String(process.env.DT_WA_TEMPLATE || config.messageTemplate || 'Duendee tunnel linki: {url}').replace('{url}', url);
+  if (!apkOnly && url) {
+    await deleteStored(sock, url);
+  }
+  const message = String(process.env.DT_WA_TEMPLATE || config.messageTemplate || 'Duendee tunnel linki: {url}').replace(
+    '{url}',
+    url || ''
+  );
+  const apkCaption =
+    process.env.DT_WA_APK_CAPTION ||
+    (url
+      ? 'DuendeeFM Android APK\nTünel: ' + url
+      : 'DuendeeFM Android APK');
   const deliveredRows = [];
   for (const target of recipients) {
     let acked = false;
@@ -571,10 +615,23 @@ async function deliver(sock) {
       const targets = [...new Set([lid, pn].filter(Boolean))];
       let last = null;
       for (const jid of targets) {
-        console.log('  Link gonderiliyor -> ' + target + ' (' + jid + ')');
-        last = await sendText(sock, jid, message);
-        if (last.acked) break;
-        console.log('  Sunucu onayi gelmedi, diger adres deneniyor...');
+        if (!apkOnly && url) {
+          console.log('  Link gonderiliyor -> ' + target + ' (' + jid + ')');
+          last = await sendText(sock, jid, message);
+          if (!last.acked) {
+            console.log('  Sunucu onayi gelmedi, diger adres deneniyor...');
+            continue;
+          }
+        }
+        if (apkPath) {
+          console.log('  APK gonderiliyor -> ' + target + ' (' + path.basename(apkPath) + ')');
+          last = await sendApkDocument(sock, jid, apkPath, apkCaption);
+          if (!last.acked) {
+            console.log('  APK sunucu onayi gelmedi, diger adres deneniyor...');
+            continue;
+          }
+        }
+        if (last?.acked) break;
       }
       acked = !!last?.acked;
     } catch (err) {
@@ -587,7 +644,8 @@ async function deliver(sock) {
   if (!okPhones.length) {
     throw new Error('WhatsApp sunucusu mesaji onaylamadi');
   }
-  console.log('WhatsApp mesaji gonderildi -> ' + okPhones.join(', ') + ' | ' + url);
+  const what = apkPath ? (apkOnly ? path.basename(apkPath) : url + ' + ' + path.basename(apkPath)) : url;
+  console.log('WhatsApp mesaji gonderildi -> ' + okPhones.join(', ') + ' | ' + what);
   if (failedPhones.length) {
     console.error('  Gonderilemeyen alici(lar): ' + failedPhones.join(', '));
   }

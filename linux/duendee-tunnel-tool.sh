@@ -1093,6 +1093,99 @@ ensure_app_npm_deps() {
   (cd "$path" && npm install --omit=dev) || (cd "$path" && npm install) || return 1
 }
 
+ensure_android_sdk_env() {
+  local ensure="${OS_DIR}/scripts/ensure-android-sdk.sh" log out
+  [[ -f "$ensure" ]] || {
+    echo -e "  ${RED}   ensure-android-sdk.sh yok.${RST}"
+    return 1
+  }
+  echo -e "  ${DIM}   Android SDK / JDK kontrol ediliyor (yoksa kurulacak)...${RST}"
+  chmod +x "$ensure" 2>/dev/null || true
+  log="$(mktemp)"
+  out="$(mktemp)"
+  if ! bash "$ensure" >"$out" 2>"$log"; then
+    sed 's/^/  /' "$log" >&2 || true
+    rm -f "$log" "$out"
+    echo -e "  ${RED}   Android SDK kurulumu başarısız.${RST}"
+    return 1
+  fi
+  sed 's/^/  /' "$log" >&2 || true
+  JAVA_HOME_BUILD="$(sed -n 's/^JAVA_HOME=//p' "$out" | tail -n1)"
+  ANDROID_SDK_ROOT_BUILD="$(sed -n 's/^ANDROID_SDK_ROOT=//p' "$out" | tail -n1)"
+  rm -f "$log" "$out"
+  [[ -n "$JAVA_HOME_BUILD" && -n "$ANDROID_SDK_ROOT_BUILD" ]] || {
+    echo -e "  ${RED}   JAVA_HOME / ANDROID_SDK_ROOT okunamadı.${RST}"
+    return 1
+  }
+  return 0
+}
+
+build_duendee_android_apk() {
+  local app_dir="$1" android_dir gradlew apk
+  android_dir="${app_dir}/android"
+  gradlew="${android_dir}/gradlew"
+  [[ -x "$gradlew" || -f "$gradlew" ]] || {
+    echo -e "  ${RED}   gradlew yok: ${android_dir}${RST}"
+    return 1
+  }
+  printf 'sdk.dir=%s\n' "$ANDROID_SDK_ROOT_BUILD" >"${android_dir}/local.properties"
+  echo -e "  ${DIM}   Capacitor android sync...${RST}"
+  (cd "$app_dir" && npx --yes cap sync android) || {
+    echo -e "  ${RED}   cap sync android başarısız.${RST}"
+    return 1
+  }
+  echo -e "  ${DIM}   APK derleniyor (assembleDebug)...${RST}"
+  (
+    export JAVA_HOME="$JAVA_HOME_BUILD"
+    export ANDROID_SDK_ROOT="$ANDROID_SDK_ROOT_BUILD"
+    export ANDROID_HOME="$ANDROID_SDK_ROOT_BUILD"
+    export PATH="${JAVA_HOME}/bin:${ANDROID_SDK_ROOT}/platform-tools:${PATH}"
+    cd "$android_dir" && chmod +x gradlew && ./gradlew assembleDebug --no-daemon
+  ) || {
+    echo -e "  ${RED}   Gradle assembleDebug başarısız.${RST}"
+    return 1
+  }
+  apk="$(ls -1t "${android_dir}/app/build/outputs/apk/debug/"*.apk 2>/dev/null | head -n1 || true)"
+  [[ -n "$apk" && -f "$apk" ]] || {
+    echo -e "  ${RED}   APK bulunamadı.${RST}"
+    return 1
+  }
+  BUILT_APK="$apk"
+  return 0
+}
+
+send_whatsapp_apk() {
+  local apk_path="$1" public_url="${2:-}" node=""
+  [[ -f "$WHATSAPP_JS" ]] || {
+    echo -e "  ${YEL}   WhatsApp APK gönderimi atlandı (script yok).${RST}"
+    return 0
+  }
+  if command -v node >/dev/null 2>&1; then
+    node="$(command -v node)"
+  elif [[ -x "${HOME}/.local/bin/node" ]]; then
+    node="${HOME}/.local/bin/node"
+  fi
+  [[ -n "$node" ]] || {
+    echo -e "  ${YEL}   node yok; WhatsApp APK atlandı.${RST}"
+    return 0
+  }
+  ensure_whatsapp_deps || {
+    echo -e "  ${YEL}   WhatsApp paketleri eksik; APK gönderilemedi.${RST}"
+    return 0
+  }
+  [[ -f "$apk_path" ]] || {
+    echo -e "  ${YEL}   APK yok: ${apk_path}${RST}"
+    return 0
+  }
+  echo "  WhatsApp'a APK gönderiliyor ($(basename "$apk_path"))..."
+  DT_WA_APK="$apk_path" DT_WA_APK_ONLY=1 DT_WA_URL="${public_url}" \
+    "$node" "$WHATSAPP_JS" "${public_url:-apk}" || {
+    echo -e "  ${YEL}   WhatsApp APK gönderimi başarısız.${RST}"
+    return 0
+  }
+  echo -e "  ${GRN}   WhatsApp APK gonderildi.${RST}"
+}
+
 start_companion_apps() {
   local url="${1:-}" path=""
   desktop_app_launch || mobile_app_launch || return 0
@@ -1137,15 +1230,12 @@ start_companion_apps() {
     disown $! 2>/dev/null || true
   fi
   if mobile_app_launch; then
-    echo -e "  ${GRN}   Mobil app (Android) derlenip açılıyor...${RST}"
-    if command -v setsid >/dev/null 2>&1; then
-      setsid nohup env DUENDEE_TUNNEL_URL="$url" \
-        npm --prefix "$path" run android:run >>"${STATE}/app-mobile.log" 2>&1 </dev/null &
-    else
-      nohup env DUENDEE_TUNNEL_URL="$url" \
-        npm --prefix "$path" run android:run >>"${STATE}/app-mobile.log" 2>&1 </dev/null &
-    fi
-    disown $! 2>/dev/null || true
+    echo -e "  ${GRN}   Mobil app güncel repodan APK olarak derleniyor...${RST}"
+    ensure_android_sdk_env || return 0
+    BUILT_APK=""
+    build_duendee_android_apk "$path" || return 0
+    echo -e "  ${GRN}   APK hazır: ${BUILT_APK}${RST}"
+    send_whatsapp_apk "$BUILT_APK" "$url"
   fi
 }
 

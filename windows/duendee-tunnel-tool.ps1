@@ -2384,6 +2384,118 @@ function Ensure-AppNpmDeps([string]$Path) {
   } finally { Pop-Location }
 }
 
+function Ensure-AndroidSdkEnv {
+  $ensure = Join-Path $OsDir 'scripts\ensure-android-sdk.ps1'
+  if (-not (Test-Path -LiteralPath $ensure)) {
+    Write-UiLine "  $RED   ensure-android-sdk.ps1 yok.$RST"
+    return $null
+  }
+  Write-UiLine "  $DIM   Android SDK / JDK kontrol ediliyor (yoksa kurulacak)...$RST"
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ensure 2>&1
+    $code = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $prev
+  }
+  $out | ForEach-Object { Write-UiLine "  $DIM   $_$RST" }
+  if ($code -ne 0) {
+    Write-UiLine "  $RED   Android SDK kurulumu başarısız.$RST"
+    return $null
+  }
+  $javaHome = ''
+  $sdkRoot = ''
+  foreach ($line in @($out)) {
+    $s = "$line"
+    if ($s -match '^JAVA_HOME=(.+)$') { $javaHome = $Matches[1].Trim() }
+    if ($s -match '^ANDROID_SDK_ROOT=(.+)$') { $sdkRoot = $Matches[1].Trim() }
+  }
+  if (-not $javaHome -or -not $sdkRoot) {
+    Write-UiLine "  $RED   JAVA_HOME / ANDROID_SDK_ROOT okunamadı.$RST"
+    return $null
+  }
+  return @{ JavaHome = $javaHome; SdkRoot = $sdkRoot }
+}
+
+function Build-DuendeeAndroidApk([string]$AppDir, [hashtable]$Sdk) {
+  $androidDir = Join-Path $AppDir 'android'
+  $gradlew = Join-Path $androidDir 'gradlew.bat'
+  if (-not (Test-Path -LiteralPath $gradlew)) {
+    Write-UiLine "  $RED   gradlew.bat yok: $androidDir$RST"
+    return $null
+  }
+  # Gradle local.properties wants escaped backslashes on Windows.
+  $escaped = $Sdk.SdkRoot.Replace('\', '\\')
+  Set-Content -LiteralPath (Join-Path $androidDir 'local.properties') -Value "sdk.dir=$escaped`n" -Encoding Ascii
+  Write-UiLine "  $DIM   Capacitor android sync...$RST"
+  Push-Location $AppDir
+  try {
+    & npx --yes cap sync android *>&1 | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+      Write-UiLine "  $RED   cap sync android başarısız.$RST"
+      return $null
+    }
+  } finally { Pop-Location }
+  Write-UiLine "  $DIM   APK derleniyor (assembleDebug)...$RST"
+  $env:JAVA_HOME = $Sdk.JavaHome
+  $env:ANDROID_SDK_ROOT = $Sdk.SdkRoot
+  $env:ANDROID_HOME = $Sdk.SdkRoot
+  $env:Path = "$(Join-Path $Sdk.JavaHome 'bin');$(Join-Path $Sdk.SdkRoot 'platform-tools');$env:Path"
+  Push-Location $androidDir
+  try {
+    & cmd.exe /c "`"$gradlew`" assembleDebug --no-daemon" *>&1 | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+      Write-UiLine "  $RED   Gradle assembleDebug başarısız.$RST"
+      return $null
+    }
+  } finally { Pop-Location }
+  $apkDir = Join-Path $androidDir 'app\build\outputs\apk\debug'
+  $apk = Get-ChildItem -LiteralPath $apkDir -Filter '*.apk' -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  if (-not $apk) {
+    Write-UiLine "  $RED   APK bulunamadı: $apkDir$RST"
+    return $null
+  }
+  return $apk.FullName
+}
+
+function Send-WhatsAppApk([string]$ApkPath, [string]$PublicUrl) {
+  $waJs = Join-Path $Root 'scripts\send-whatsapp.js'
+  $node = Find-NodeExe
+  if (-not (Test-Path -LiteralPath $waJs) -or -not $node) {
+    Write-UiLine "  $YEL   WhatsApp APK gönderimi atlandı (script/node yok).$RST"
+    return
+  }
+  if (-not (Ensure-WhatsAppDeps)) {
+    Write-UiLine "  $YEL   WhatsApp paketleri eksik; APK gönderilemedi.$RST"
+    return
+  }
+  if (-not (Test-Path -LiteralPath $ApkPath)) {
+    Write-UiLine "  $YEL   APK yok: $ApkPath$RST"
+    return
+  }
+  Write-UiLine "  WhatsApp'a APK gönderiliyor ($([IO.Path]::GetFileName($ApkPath)))..."
+  $prevEa = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $env:DT_WA_APK = $ApkPath
+    $env:DT_WA_APK_ONLY = '1'
+    if ($PublicUrl) { $env:DT_WA_URL = $PublicUrl }
+    & $node $waJs $(if ($PublicUrl) { $PublicUrl } else { 'apk' })
+    if ($LASTEXITCODE -ne 0) {
+      Write-UiLine "  $YEL   WhatsApp APK gönderimi başarısız (çıkış $LASTEXITCODE).$RST"
+    } else {
+      Write-UiLine "  $GRN   WhatsApp APK gonderildi.$RST"
+    }
+  } finally {
+    Remove-Item Env:DT_WA_APK -ErrorAction SilentlyContinue
+    Remove-Item Env:DT_WA_APK_ONLY -ErrorAction SilentlyContinue
+    Remove-Item Env:DT_WA_URL -ErrorAction SilentlyContinue
+    $ErrorActionPreference = $prevEa
+  }
+}
+
 function Start-CompanionApps([string]$TunnelUrl) {
   $wantDesktop = Test-DesktopAppLaunch
   $wantMobile = Test-MobileAppLaunch
@@ -2441,24 +2553,13 @@ function Start-CompanionApps([string]$TunnelUrl) {
   }
 
   if ($wantMobile) {
-    Write-UiLine "  $GRN   Mobil app (Android) derlenip açılıyor...$RST"
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = 'cmd.exe'
-    $psi.Arguments = '/c npm run android:run'
-    $psi.WorkingDirectory = $path
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $false
-    try {
-      $psi.EnvironmentVariables['DUENDEE_TUNNEL_URL'] = $TunnelUrl
-      [void][System.Diagnostics.Process]::Start($psi)
-    } catch {
-      Write-UiLine "  $YEL   Android run başlatılamadı, Studio açılıyor...$RST"
-      try {
-        Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','npx cap open android' -WorkingDirectory $path
-      } catch {
-        Write-UiLine "  $RED   Mobil app açılamadı: $($_.Exception.Message)$RST"
-      }
-    }
+    Write-UiLine "  $GRN   Mobil app güncel repodan APK olarak derleniyor...$RST"
+    $sdk = Ensure-AndroidSdkEnv
+    if (-not $sdk) { return }
+    $apk = Build-DuendeeAndroidApk -AppDir $path -Sdk $sdk
+    if (-not $apk) { return }
+    Write-UiLine "  $GRN   APK hazır: $apk$RST"
+    Send-WhatsAppApk -ApkPath $apk -PublicUrl $TunnelUrl
   }
 }
 

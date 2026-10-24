@@ -123,7 +123,7 @@ Shared pieces (repo root):
 
 Closing the window leaves the tunnel running. **[4]** stops it.
 
-Under autostart, **Derleme/Başlatma Tipi** picks what opens on every tunnel start: browser, desktop Electron, Android, or all. Desktop/mobile modes update `Duendee-app`, sync `www/` from the FM build, then run `electron:tunnel` / `android:run` against the live URL.
+Under autostart, **Derleme/Başlatma Tipi** picks what opens on every tunnel start: browser, desktop Electron, Android, or all. Desktop mode updates `Duendee-app` and runs Electron against the live URL. Mobile mode installs a user-local JDK/Android SDK if needed, builds a debug `.apk` from the synced app, and sends that APK over WhatsApp.
 
 ## Tunnel watchdog (auto recovery)
 
