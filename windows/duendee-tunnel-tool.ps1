@@ -67,7 +67,8 @@ $C6 = "$Esc[38;2;251;113;133m"
 
 $configPath = Join-Path $Root 'config.json'
 $configExample = Join-Path $Root 'config.example.json'
-$script:DuendeeRepoUrl = if ($env:DT_DUENDEE_REPO_URL) { $env:DT_DUENDEE_REPO_URL } else { 'https://github.com/hayripenah/Duendee.git' }
+# Always Duendee-FM — Duendee.git is the main product and must never overwrite FM branding.
+$script:DuendeeRepoUrl = if ($env:DT_DUENDEE_REPO_URL) { $env:DT_DUENDEE_REPO_URL } else { 'https://github.com/hayripenah/Duendee-FM.git' }
 $script:DuendeeCloneName = if ($env:DT_DUENDEE_CLONE_NAME) { $env:DT_DUENDEE_CLONE_NAME } else { 'Duendee-fm' }
 $script:LastMobileApkSent = $false
 
@@ -121,8 +122,9 @@ function Test-LooksLikeDuendeeRepo([string]$Path) {
   if (Test-Path -LiteralPath $gitDir) {
     try {
       $remote = (& git -C $Path remote get-url origin 2>$null)
-      if ($remote -and ($remote -match '(?i)github\.com[:/].*hayripenah/Duendee(\.git)?/?$' -or
-          ($remote -match '(?i)/Duendee(\.git)?/?$' -and $remote -notmatch '(?i)Tunnel-Tool'))) {
+      # Accept only Duendee-FM (not Duendee.git / Duendee-main / Tunnel-Tool).
+      if ($remote -and ($remote -match '(?i)github\.com[:/].*hayripenah/Duendee-FM(\.git)?/?$' -or
+          ($remote -match '(?i)/Duendee-FM(\.git)?/?$' -and $remote -notmatch '(?i)Tunnel-Tool'))) {
         $remoteHit = $true
       }
     } catch {}
@@ -334,7 +336,15 @@ function Update-DuendeeRepoSafe([string]$Path) {
         & $gh.Source auth status 1>$null 2>$null
         if ($LASTEXITCODE -eq 0) { $cred = @('-c', 'credential.helper=!gh auth git-credential') }
       }
-      $gitOk = [bool](Update-DuendeeFromGit -Path $Path -Cred $cred -Remote $script:DuendeeRepoUrl)
+      # Prefer the folder's own origin when it already points at Duendee-FM.
+      $originUrl = ''
+      try { $originUrl = [string](& git -C $Path remote get-url origin 2>$null) } catch {}
+      if ($originUrl -match '(?i)Duendee-FM') {
+        $gitOk = [bool](Update-DuendeeFromGit -Path $Path -Cred $cred -Remote 'origin')
+      }
+      if (-not $gitOk) {
+        $gitOk = [bool](Update-DuendeeFromGit -Path $Path -Cred $cred -Remote $script:DuendeeRepoUrl)
+      }
       if (-not $gitOk) {
         $gitOk = [bool](Update-DuendeeFromGit -Path $Path -Cred $cred -Remote 'origin')
       }

@@ -50,7 +50,8 @@ die() {
   exit 1
 }
 
-DUENDEE_REPO_URL="${DT_DUENDEE_REPO_URL:-https://github.com/hayripenah/Duendee.git}"
+# Always Duendee-FM — Duendee.git is the main product and must never overwrite FM branding.
+DUENDEE_REPO_URL="${DT_DUENDEE_REPO_URL:-https://github.com/hayripenah/Duendee-FM.git}"
 DUENDEE_CLONE_NAME="${DT_DUENDEE_CLONE_NAME:-Duendee-fm}"
 
 save_config() {
@@ -141,9 +142,10 @@ looks_like_duendee() {
   fi
   if [[ -d "$path/.git" ]] && command -v git >/dev/null 2>&1; then
     remote="$(git -C "$path" remote get-url origin 2>/dev/null || true)"
-    if [[ "$remote" =~ [Gg]ithub\.com[:/].*[Hh]ayripenah/[Dd]uendee(\.git)?/?$ ]]; then
+    # Accept only Duendee-FM (not Duendee.git / Duendee-main / Tunnel-Tool).
+    if [[ "$remote" =~ [Gg]ithub\.com[:/].*[Hh]ayripenah/[Dd]uendee-[Ff][Mm](\.git)?/?$ ]]; then
       remote_hit=1
-    elif [[ "$remote" =~ /[Dd]uendee(\.git)?/?$ ]] && [[ ! "$remote" =~ [Tt]unnel-[Tt]ool ]]; then
+    elif [[ "$remote" =~ /[Dd]uendee-[Ff][Mm](\.git)?/?$ ]] && [[ ! "$remote" =~ [Tt]unnel-[Tt]ool ]]; then
       remote_hit=1
     fi
   fi
@@ -338,10 +340,16 @@ update_duendee_from_git() {
 }
 
 update_duendee_safe() {
-  local path="$1"
+  local path="$1" origin_url=""
   [[ -d "$path" ]] || return 1
-  echo -e "  ${DIM}   Duendee güncelleniyor...${RST}" >&2
+  echo -e "  ${DIM}   Duendee-fm güncelleniyor...${RST}" >&2
   if [[ -d "$path/.git" ]] && command -v git >/dev/null 2>&1; then
+    origin_url="$(git -C "$path" remote get-url origin 2>/dev/null || true)"
+    # Prefer the folder's own origin when it already points at Duendee-FM.
+    if [[ "$origin_url" =~ [Dd]uendee-[Ff][Mm] ]] && update_duendee_from_git "$path" origin; then
+      echo -e "  ${DIM}   Repo güncel.${RST}" >&2
+      return 0
+    fi
     if update_duendee_from_git "$path" "$DUENDEE_REPO_URL" \
       || update_duendee_from_git "$path" origin; then
       echo -e "  ${DIM}   Repo güncel.${RST}" >&2
