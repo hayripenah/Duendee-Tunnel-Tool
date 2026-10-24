@@ -69,6 +69,7 @@ $configPath = Join-Path $Root 'config.json'
 $configExample = Join-Path $Root 'config.example.json'
 $script:DuendeeRepoUrl = if ($env:DT_DUENDEE_REPO_URL) { $env:DT_DUENDEE_REPO_URL } else { 'https://github.com/hayripenah/Duendee.git' }
 $script:DuendeeCloneName = if ($env:DT_DUENDEE_CLONE_NAME) { $env:DT_DUENDEE_CLONE_NAME } else { 'Duendee-fm' }
+$script:LastMobileApkSent = $false
 
 function Save-ToolConfig([string]$ProjectPath, [int]$PortNum, [string]$AppPath = '') {
   $obj = [ordered]@{ projectPath = $ProjectPath; port = $PortNum }
@@ -875,7 +876,7 @@ function Invoke-RetractWhatsApp {
   $node = Find-NodeExe
   if (-not $node) { return }
   if (-not (Ensure-WhatsAppDeps)) { return }
-  Write-UiLine "  Eski tunnel linki mesajlari kaldiriliyor..."
+  Write-UiLine "  Eski tunnel / APK WhatsApp mesajlari kaldiriliyor..."
   $prevEa = $ErrorActionPreference
   $ErrorActionPreference = 'Continue'
   $prevNative = $null
@@ -888,9 +889,9 @@ function Invoke-RetractWhatsApp {
     if (-not $env:DT_WA_TIMEOUT_MS) { $env:DT_WA_TIMEOUT_MS = '90000' }
     & $node $waJs
     if ($LASTEXITCODE -ne 0) {
-      Write-UiLine "  $YEL   Eski WhatsApp link mesaji kaldirilamadi (çıkış $LASTEXITCODE).$RST"
+      Write-UiLine "  $YEL   Eski WhatsApp tunnel/APK mesaji kaldirilamadi (çıkış $LASTEXITCODE).$RST"
     } else {
-      Write-UiLine "  $GRN   Gecersiz tunnel linki mesaji kaldirildi.$RST"
+      Write-UiLine "  $GRN   Gecersiz tunnel / APK mesaji kaldirildi.$RST"
     }
   } finally {
     Remove-Item Env:DT_WA_ACTION -ErrorAction SilentlyContinue
@@ -2230,7 +2231,12 @@ function Invoke-Start {
       Write-UiLine "  $DIM   Tarayıcı kapalı. [5] > [B].$RST"
     }
     Start-CompanionApps -TunnelUrl $url
-    Send-TunnelWhatsApp -PublicUrl $url
+    # Mobile APK caption already includes the tunnel URL — skip the extra link message.
+    if (-not $script:LastMobileApkSent) {
+      Send-TunnelWhatsApp -PublicUrl $url
+    } else {
+      Write-UiLine "  $DIM   WhatsApp: APK mesajı gönderildi (ayrı link mesajı yok).$RST"
+    }
   }
   if ($script:FleetClaimed -or $script:NeedFreshTunnel) {
     if (-not $url) {
@@ -2497,6 +2503,7 @@ function Send-WhatsAppApk([string]$ApkPath, [string]$PublicUrl) {
 }
 
 function Start-CompanionApps([string]$TunnelUrl) {
+  $script:LastMobileApkSent = $false
   $wantDesktop = Test-DesktopAppLaunch
   $wantMobile = Test-MobileAppLaunch
   if (-not $wantDesktop -and -not $wantMobile) { return }
@@ -2560,6 +2567,7 @@ function Start-CompanionApps([string]$TunnelUrl) {
     if (-not $apk) { return }
     Write-UiLine "  $GRN   APK hazır: $apk$RST"
     Send-WhatsAppApk -ApkPath $apk -PublicUrl $TunnelUrl
+    $script:LastMobileApkSent = $true
   }
 }
 

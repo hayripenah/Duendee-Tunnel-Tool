@@ -510,8 +510,23 @@ async function scanTunnelMessages(sock) {
 
 async function purgeInactiveTunnelLinks(sock) {
   const keepUrl = activeTunnelUrl();
-  const rows = await scanTunnelMessages(sock);
-  const drop = rows.filter((row) => !sameUrl(row.url, keepUrl));
+  const fromChat = await scanTunnelMessages(sock);
+  const byId = new Map();
+  for (const row of fromChat) {
+    if (row?.id) byId.set(row.id + '\n' + (row.jid || ''), row);
+  }
+  // Include locally tracked APK / link sends (cancel must remove APK too).
+  for (const row of loadSent()) {
+    const key = (row.id || '') + '\n' + (row.jid || '');
+    if (!row.id) continue;
+    if (!byId.has(key)) byId.set(key, row);
+  }
+  const drop = [...byId.values()].filter((row) => {
+    const u = String(row.url || '');
+    if (!u) return !keepUrl;
+    if (u.startsWith('apk:')) return !keepUrl;
+    return !sameUrl(u, keepUrl);
+  });
   const targets = await revokeTargets(sock);
   const removedIds = new Set();
   for (const row of drop) {
@@ -520,13 +535,13 @@ async function purgeInactiveTunnelLinks(sock) {
   saveSent(loadSent().filter((row) => !removedIds.has(row.id)));
   const removed = removedIds.size;
   if (keepUrl) console.log('  Aktif tunel linki birakildi.');
-  console.log('  Pasif tunel linkleri kaldirildi: ' + removed);
+  console.log('  Pasif tunel / APK mesajlari kaldirildi: ' + removed);
   return { removed, failed: drop.length - removed, kept: keepUrl ? 1 : 0 };
 }
 
-function rememberSent(id, jid, messageUrl) {
+function rememberSent(id, jid, messageUrl, kind = 'link') {
   const rows = loadSent().filter((row) => row.id !== id);
-  rows.push({ id, jid, url: messageUrl, at: new Date().toISOString() });
+  rows.push({ id, jid, url: messageUrl, kind, at: new Date().toISOString() });
   saveSent(rows);
 }
 
@@ -565,8 +580,8 @@ async function sendApkDocument(sock, jid, filePath, caption) {
     throw new Error('APK mesaj anahtari donmedi');
   }
   const remoteJid = sentMsg.key?.remoteJid || jid;
-  // Track under a non-trycloudflare token so link retract does not wipe the APK.
-  rememberSent(id, remoteJid, 'apk:' + path.basename(filePath));
+  // Store the live tunnel URL so cancel/retract can delete the APK message too.
+  rememberSent(id, remoteJid, url || 'apk:' + path.basename(filePath), 'apk');
   const acked = await waitForServerAck(sock, id, 60000);
   return { sentMsg, id, jid: remoteJid, acked };
 }
@@ -829,9 +844,16 @@ async function main() {
     try {
       await waitUntilUsable(currentSock);
       if (action === 'retract') {
+        // Drop every tracked send (link + APK) when the tunnel is cancelled.
+        await deleteStored(currentSock, activeTunnelUrl());
         const purged = await purgeInactiveTunnelLinks(currentSock);
         delivered = true;
-        finish(purged.failed ? 1 : 0, purged.failed ? 'Bazi pasif tunel linkleri kaldirilamadi.' : 'Pasif tunel link mesajlari tarandi.');
+        finish(
+          purged.failed ? 1 : 0,
+          purged.failed
+            ? 'Bazi pasif tunel / APK mesajlari kaldirilamadi.'
+            : 'Pasif tunel ve APK mesajlari tarandi.'
+        );
         return;
       }
       await deliver(currentSock);

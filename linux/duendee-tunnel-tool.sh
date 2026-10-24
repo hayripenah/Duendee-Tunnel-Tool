@@ -701,13 +701,13 @@ retract_tunnel_whatsapp() {
   [[ -f "$wa_js" && -f "$creds" ]] || return 0
   command -v node >/dev/null 2>&1 || return 0
   ensure_whatsapp_deps || return 0
-  echo "  Eski tunnel linki mesajlari kaldiriliyor..."
+  echo "  Eski tunnel / APK WhatsApp mesajlari kaldiriliyor..."
   local ec=0
   DT_WA_ACTION=retract DT_WA_TIMEOUT_MS="${DT_WA_TIMEOUT_MS:-90000}" node "$wa_js" || ec=$?
   if (( ec != 0 )); then
-    echo -e "  ${YEL}   Eski WhatsApp link mesaji kaldirilamadi (çıkış ${ec}).${RST}"
+    echo -e "  ${YEL}   Eski WhatsApp tunnel/APK mesaji kaldirilamadi (çıkış ${ec}).${RST}"
   else
-    echo -e "  ${GRN}   Gecersiz tunnel linki mesaji kaldirildi.${RST}"
+    echo -e "  ${GRN}   Gecersiz tunnel / APK mesaji kaldirildi.${RST}"
   fi
 }
 
@@ -1188,6 +1188,7 @@ send_whatsapp_apk() {
 
 start_companion_apps() {
   local url="${1:-}" path=""
+  LAST_MOBILE_APK_SENT=0
   desktop_app_launch || mobile_app_launch || return 0
   if [[ -z "$url" || "$url" != https://* ]]; then
     echo -e "  ${YEL}   Masaüstü/mobil app için geçerli tünel URL'si yok.${RST}"
@@ -1236,6 +1237,7 @@ start_companion_apps() {
     build_duendee_android_apk "$path" || return 0
     echo -e "  ${GRN}   APK hazır: ${BUILT_APK}${RST}"
     send_whatsapp_apk "$BUILT_APK" "$url"
+    LAST_MOBILE_APK_SENT=1
   fi
 }
 
@@ -2161,7 +2163,12 @@ do_start() {
       echo -e "  ${DIM}   Tarayıcı kapalı. [5] > [B].${RST}"
     fi
     start_companion_apps "$URL"
-    send_tunnel_whatsapp "$URL"
+    # Mobile APK caption already includes the tunnel URL — skip the extra link message.
+    if [[ "${LAST_MOBILE_APK_SENT:-0}" -eq 1 ]]; then
+      echo -e "  ${DIM}   WhatsApp: APK mesajı gönderildi (ayrı link mesajı yok).${RST}"
+    else
+      send_tunnel_whatsapp "$URL"
+    fi
   fi
   if [[ -f "${STATE}/fleet-claimed" || "$fresh" -eq 1 ]]; then
     if ! fleet_node publish --root "$ROOT" --url "$URL"; then
