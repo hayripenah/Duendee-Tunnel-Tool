@@ -2592,6 +2592,157 @@ function Send-WhatsAppApk([string]$ApkPath, [string]$PublicUrl) {
   }
 }
 
+function Get-DesktopAppInstallDir {
+  Join-Path $env:LOCALAPPDATA 'DuendeeFM'
+}
+
+function Get-DesktopAppExe {
+  $dir = Get-DesktopAppInstallDir
+  foreach ($name in @('DuendeeFM.exe', 'duendeefm.exe')) {
+    $p = Join-Path $dir $name
+    if (Test-Path -LiteralPath $p -PathType Leaf) { return (Resolve-Path -LiteralPath $p).Path }
+  }
+  return $null
+}
+
+function Get-DesktopAppStartupShortcutPath {
+  Join-Path ([Environment]::GetFolderPath('Startup')) 'DuendeeFM.lnk'
+}
+
+function Get-DesktopAppDesktopShortcutPath {
+  Join-Path (Get-UserDesktopPath) 'DuendeeFM.lnk'
+}
+
+function Test-DesktopAppAutostart {
+  Test-Path -LiteralPath (Get-DesktopAppStartupShortcutPath)
+}
+
+function Set-DesktopAppShortcut([string]$ExePath, [string]$LnkPath, [string]$Arguments = '') {
+  if ([string]::IsNullOrWhiteSpace($ExePath) -or -not (Test-Path -LiteralPath $ExePath)) { return $false }
+  try {
+    $w = New-Object -ComObject WScript.Shell
+    $sc = $w.CreateShortcut($LnkPath)
+    $sc.TargetPath = $ExePath
+    $sc.WorkingDirectory = (Split-Path -Parent $ExePath)
+    $sc.Arguments = $Arguments
+    $sc.WindowStyle = 1
+    $sc.Description = 'DuendeeFM'
+    $icoPng = Join-Path (Split-Path -Parent $ExePath) 'resources\app.asar.unpacked\electron\icon.png'
+    $icoBeside = Join-Path (Split-Path -Parent $ExePath) 'DuendeeFM.exe'
+    if (Test-Path -LiteralPath $icoBeside) { $sc.IconLocation = "$icoBeside,0" }
+    $sc.Save()
+    return $true
+  } catch {
+    return $false
+  }
+}
+
+function Set-DesktopAppAutostart([bool]$Enable) {
+  $lnk = Get-DesktopAppStartupShortcutPath
+  if (-not $Enable) {
+    Remove-Item -LiteralPath $lnk -Force -ErrorAction SilentlyContinue
+    return -not (Test-Path -LiteralPath $lnk)
+  }
+  $exe = Get-DesktopAppExe
+  if (-not $exe) { return $false }
+  return [bool](Set-DesktopAppShortcut -ExePath $exe -LnkPath $lnk -Arguments '')
+}
+
+function Install-DuendeeDesktopApp([string]$AppDir, [switch]$ForceRebuild) {
+  $exe = Get-DesktopAppExe
+  if ($exe -and -not $ForceRebuild) { return $exe }
+  if (-not (Test-LooksLikeDuendeeApp $AppDir)) { return $null }
+  Write-UiLine "  $DIM   DuendeeFM masaüstü app kalıcı olarak derleniyor (electron-builder)...$RST"
+  $npmCmd = (Get-Command npm.cmd -ErrorAction SilentlyContinue)
+  if (-not $npmCmd) { $npmCmd = Get-Command npm -ErrorAction SilentlyContinue }
+  if (-not $npmCmd) {
+    Write-UiLine "  $RED   npm bulunamadı.$RST"
+    return $null
+  }
+  if (-not (Ensure-AppNpmDeps $AppDir)) {
+    Write-UiLine "  $RED   Duendee-app npm install başarısız.$RST"
+    return $null
+  }
+  $packLog = Join-Path $AppDir 'electron-pack.log'
+  $packCode = Invoke-NativeProcess -FilePath $npmCmd.Source -ArgumentList @('run', 'electron:pack') -WorkingDirectory $AppDir -LogPath $packLog
+  if ($packCode -ne 0) {
+    Write-UiLine "  $RED   Masaüstü app derlemesi başarısız (exit $packCode). Log: $packLog$RST"
+    return $null
+  }
+  $unpacked = $null
+  foreach ($cand in @(
+      (Join-Path $AppDir 'dist-desktop\win-unpacked'),
+      (Join-Path $AppDir 'dist-desktop\win-arm64-unpacked')
+    )) {
+    if (Test-Path -LiteralPath (Join-Path $cand 'DuendeeFM.exe')) { $unpacked = $cand; break }
+  }
+  if (-not $unpacked) {
+    Write-UiLine "  $RED   Derleme çıktısı bulunamadı (win-unpacked/DuendeeFM.exe).$RST"
+    return $null
+  }
+  $dest = Get-DesktopAppInstallDir
+  if (Test-Path -LiteralPath $dest) {
+    Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null
+  Copy-Item -LiteralPath $unpacked -Destination $dest -Recurse -Force
+  $exe = Get-DesktopAppExe
+  if (-not $exe) {
+    Write-UiLine "  $RED   Kurulum sonrası DuendeeFM.exe bulunamadı.$RST"
+    return $null
+  }
+  $deskLnk = Get-DesktopAppDesktopShortcutPath
+  if (Set-DesktopAppShortcut -ExePath $exe -LnkPath $deskLnk) {
+    Write-UiLine "  $GRN   Masaüstü kısayolu: $deskLnk$RST"
+  } else {
+    Write-UiLine "  $YEL   Masaüstü kısayolu oluşturulamadı.$RST"
+  }
+  if (Test-DesktopAppAutostart) {
+    [void](Set-DesktopAppAutostart $true)
+  }
+  Write-UiLine "  $GRN   DuendeeFM kuruldu: $exe$RST"
+  return $exe
+}
+
+function Start-DuendeeDesktopApp([string]$AppDir, [string]$TunnelUrl) {
+  $exe = Install-DuendeeDesktopApp -AppDir $AppDir
+  if ($exe) {
+    Write-UiLine "  $GRN   Masaüstü app (DuendeeFM) açılıyor...$RST"
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $exe
+    $psi.WorkingDirectory = (Split-Path -Parent $exe)
+    $psi.UseShellExecute = $false
+    try {
+      if ($TunnelUrl) {
+        $psi.EnvironmentVariables['DUENDEE_TUNNEL_URL'] = $TunnelUrl
+        $psi.EnvironmentVariables['DUENDEE_START_MODE'] = 'tunnel'
+      } else {
+        $psi.EnvironmentVariables['DUENDEE_START_MODE'] = 'local'
+      }
+      [void][System.Diagnostics.Process]::Start($psi)
+      return $true
+    } catch {
+      Write-UiLine "  $RED   DuendeeFM başlatılamadı: $($_.Exception.Message)$RST"
+    }
+  }
+  Write-UiLine "  $YEL   Kalıcı paket yok/başarısız; geliştirme Electron deneniyor...$RST"
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = 'cmd.exe'
+  $psi.Arguments = '/c npm run electron:tunnel'
+  $psi.WorkingDirectory = $AppDir
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $false
+  try {
+    $psi.EnvironmentVariables['DUENDEE_TUNNEL_URL'] = $TunnelUrl
+    $psi.EnvironmentVariables['DUENDEE_START_MODE'] = 'tunnel'
+    [void][System.Diagnostics.Process]::Start($psi)
+    return $true
+  } catch {
+    Write-UiLine "  $RED   Electron başlatılamadı: $($_.Exception.Message)$RST"
+    return $false
+  }
+}
+
 function Start-CompanionApps([string]$TunnelUrl) {
   $script:LastMobileApkSent = $false
   $wantDesktop = Test-DesktopAppLaunch
@@ -2638,20 +2789,7 @@ function Start-CompanionApps([string]$TunnelUrl) {
   }
 
   if ($wantDesktop) {
-    Write-UiLine "  $GRN   Masaüstü app (Electron) açılıyor...$RST"
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = 'cmd.exe'
-    $psi.Arguments = '/c npm run electron:tunnel'
-    $psi.WorkingDirectory = $path
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $false
-    try {
-      $psi.EnvironmentVariables['DUENDEE_TUNNEL_URL'] = $TunnelUrl
-      $psi.EnvironmentVariables['DUENDEE_START_MODE'] = 'tunnel'
-      [void][System.Diagnostics.Process]::Start($psi)
-    } catch {
-      Write-UiLine "  $RED   Electron başlatılamadı: $($_.Exception.Message)$RST"
-    }
+    [void](Start-DuendeeDesktopApp -AppDir $path -TunnelUrl $TunnelUrl)
   }
 
   if ($wantMobile) {
@@ -2674,31 +2812,93 @@ function Invoke-Autostart {
   Write-UiLine ''
   $mode = Get-AutoMode
   switch ($mode) {
-    'tool' { Write-UiLine "  $DIM   Durum:$RST $GRN$BOLD[TOOL]$RST" }
-    'tunnel' { Write-UiLine "  $DIM   Durum:$RST $GRN$BOLD[TOOL+TÜNEL]$RST" }
-    default { Write-UiLine "  $DIM   Durum:$RST $RED$BOLD[KAPALI]$RST" }
+    'tool' { Write-UiLine "  $DIM   Tool:$RST $GRN$BOLD[TOOL]$RST" }
+    'tunnel' { Write-UiLine "  $DIM   Tool:$RST $GRN$BOLD[TOOL+TÜNEL]$RST" }
+    default { Write-UiLine "  $DIM   Tool:$RST $RED$BOLD[KAPALI]$RST" }
+  }
+  $appAuto = Test-DesktopAppAutostart
+  if ($appAuto) {
+    Write-UiLine "  $DIM   Masaüstü App:$RST $GRN$BOLD[BAŞLANGIÇTA]$RST"
+  } else {
+    Write-UiLine "  $DIM   Masaüstü App:$RST $RED$BOLD[KAPALI]$RST"
   }
   $launch = Get-LaunchType
   Write-UiLine "  $DIM   Derleme/Başlatma Tipi:$RST $GRN$BOLD[$(Get-LaunchTypeLabel $launch)]$RST"
   Write-UiLine ''
   Write-UiLine "  [T]  Yalnızca tool'u otomatik başlat"
   Write-UiLine "  [S]  Tool'u ve tünel servisini otomatik başlat"
+  Write-UiLine "  [A]  Masaüstü App (DuendeeFM) başlangıç uygulamalarına ekle/çıkar"
+  Write-UiLine "  [D]  Masaüstü App'i kalıcı derle + masaüstü kısayolu"
   Write-UiLine ''
   Write-UiLine "  $DIM--- Derleme/Başlatma Tipi ---$RST"
   Write-UiLine "  [1]  Tarayıcı$(if ($launch -eq 'browser') { "  $GRN[SEÇİLİ]$RST" } else { '' })"
   Write-UiLine "  [2]  Masaüstü App$(if ($launch -eq 'desktop') { "  $GRN[SEÇİLİ]$RST" } else { '' })"
   Write-UiLine "  [3]  Mobil App$(if ($launch -eq 'mobile') { "  $GRN[SEÇİLİ]$RST" } else { '' })"
   Write-UiLine "  [4]  Hepsi$(if ($launch -eq 'all') { "  $GRN[SEÇİLİ]$RST" } else { '' })"
-  if ($mode -ne 'off') {
-    Write-UiLine "  [K]  Otomatik başlatmayı kapat"
+  if ($mode -ne 'off' -or $appAuto) {
+    Write-UiLine "  [K]  Tool otomatik başlatmayı kapat"
   }
   Write-UiLine "  $DIM$BOLD[X]$RST  ${DIM}Geri dön$RST"
   Write-UiLine ''
-  $choices = if ($mode -ne 'off') { 'TS1234KX' } else { 'TS1234X' }
+  $choices = if ($mode -ne 'off' -or $appAuto) { 'TSAD1234KX' } else { 'TSAD1234X' }
   Write-Ui "$DIM   Seçim: $RST"
   $c = Get-Choice $choices
   Write-UiLine ''
   if ($c -eq 'X') { return }
+  if ($c -eq 'D') {
+    $appPath = $AppPath
+    if ([string]::IsNullOrWhiteSpace($appPath) -or -not (Test-LooksLikeDuendeeApp $appPath)) {
+      $appPath = Resolve-DuendeeAppPath -Preferred $AppPath -Project $Project
+    }
+    if (-not (Test-LooksLikeDuendeeApp $appPath)) {
+      Write-UiLine "  $YEL   Duendee-app bulunamadı.$RST"
+      Complete-Action
+      return
+    }
+    $script:AppPath = $appPath
+    [void](Update-GitRepoSafe $appPath 'Duendee-app')
+    $exe = Install-DuendeeDesktopApp -AppDir $appPath -ForceRebuild
+    if ($exe) {
+      Write-UiLine "  $GRN   Kalıcı DuendeeFM hazır. Masaüstü kısayolu güncellendi.$RST"
+    }
+    Complete-Action
+    return
+  }
+  if ($c -eq 'A') {
+    if ($appAuto) {
+      if (Set-DesktopAppAutostart $false) {
+        Write-UiLine "  $RED   DuendeeFM başlangıç uygulamalarından çıkarıldı.$RST"
+      } else {
+        Write-UiLine "  $RED$BOLD[HATA]$RST Başlangıç kaydı kaldırılamadı."
+      }
+      Complete-Action
+      return
+    }
+    $appPath = $AppPath
+    if ([string]::IsNullOrWhiteSpace($appPath) -or -not (Test-LooksLikeDuendeeApp $appPath)) {
+      $appPath = Resolve-DuendeeAppPath -Preferred $AppPath -Project $Project
+    }
+    if (-not (Test-LooksLikeDuendeeApp $appPath)) {
+      Write-UiLine "  $YEL   Duendee-app bulunamadı.$RST"
+      Complete-Action
+      return
+    }
+    $script:AppPath = $appPath
+    [void](Update-GitRepoSafe $appPath 'Duendee-app')
+    $exe = Install-DuendeeDesktopApp -AppDir $appPath
+    if (-not $exe) {
+      Complete-Action
+      return
+    }
+    if (Set-DesktopAppAutostart $true) {
+      Write-UiLine "  $GRN   DuendeeFM başlangıç uygulamalarına eklendi.$RST"
+      Write-UiLine "  $DIM   Kayıt: $(Get-DesktopAppStartupShortcutPath)$RST"
+    } else {
+      Write-UiLine "  $RED$BOLD[HATA]$RST Başlangıç kaydı yazılamadı."
+    }
+    Complete-Action
+    return
+  }
   if ($c -in @('1', '2', '3', '4')) {
     $next = switch ($c) {
       '1' { 'browser' }
@@ -2712,6 +2912,16 @@ function Invoke-Autostart {
       Set-LaunchType $next
       Write-UiLine "  $GRN   Derleme/Başlatma Tipi: $(Get-LaunchTypeLabel $next)$RST"
       Write-UiLine "  $DIM   Tünel her başlatıldığında bu seçim uygulanacak.$RST"
+      if ($next -eq 'desktop' -or $next -eq 'all') {
+        $appPath = $AppPath
+        if ([string]::IsNullOrWhiteSpace($appPath) -or -not (Test-LooksLikeDuendeeApp $appPath)) {
+          $appPath = Resolve-DuendeeAppPath -Preferred $AppPath -Project $Project
+        }
+        if (Test-LooksLikeDuendeeApp $appPath) {
+          $script:AppPath = $appPath
+          [void](Install-DuendeeDesktopApp -AppDir $appPath)
+        }
+      }
     }
     Complete-Action
     return
@@ -2731,9 +2941,11 @@ function Invoke-Autostart {
     switch ($target) {
       'tool' { Write-UiLine "  $GRN   Yalnızca tool otomatik başlayacak.$RST" }
       'tunnel' { Write-UiLine "  $GRN   Tool ve tünel servisi otomatik başlayacak.$RST" }
-      default { Write-UiLine "  $RED   Otomatik başlatma kapatıldı.$RST" }
+      default { Write-UiLine "  $RED   Tool otomatik başlatma kapatıldı.$RST" }
     }
-    Write-UiLine "  $DIM   Kayıt: Başlangıç klasörü - Duendee Tunnel Tool$RST"
+    if ($target -ne 'off') {
+      Write-UiLine "  $DIM   Kayıt: Başlangıç klasörü - Duendee Tunnel Tool$RST"
+    }
   } else {
     Write-UiLine "  $RED$BOLD[HATA]$RST Ayar kaydedilemedi."
   }

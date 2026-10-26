@@ -116,14 +116,14 @@ Shared pieces (repo root):
 2. Check status  
 3. Copy public link  
 4. Cancel tunnel  
-5. Autostart — **[T]** tool, **[S]** tool and tunnel, **Derleme/Başlatma Tipi** **[1]** browser / **[2]** desktop / **[3]** mobile / **[4]** all, **[K]** off  
+5. Autostart — **[T]** tool, **[S]** tool and tunnel, **[A]** DuendeeFM desktop app in Startup, **[D]** permanently pack desktop app + Desktop shortcut, **Derleme/Başlatma Tipi** **[1]** browser / **[2]** desktop / **[3]** mobile / **[4]** all, **[K]** tool autostart off  
 
 
 6. Uninstall — **[1]** tool, **[2]** tool plus Node.js and cloudflared
 
 Closing the window leaves the tunnel running. **[4]** stops it.
 
-Under autostart, **Derleme/Başlatma Tipi** picks what opens on every tunnel start: browser, desktop Electron, Android, or all. Desktop mode updates `Duendee-app` and runs Electron against the live URL. Mobile mode installs a user-local JDK/Android SDK if needed, builds a debug `.apk` from the synced app, and sends that APK over WhatsApp.
+Under autostart, **Derleme/Başlatma Tipi** picks what opens on every tunnel start: browser, desktop Electron, Android, or all. Desktop mode packs a permanent **DuendeeFM** app (electron-builder), installs it under the user profile, places a Desktop shortcut, and launches that build against the live tunnel URL. **[A]** adds/removes DuendeeFM from the OS Startup apps list. Mobile mode installs a user-local JDK/Android SDK if needed, builds `DuendeeFM.apk`, and sends it over WhatsApp.
 
 ## Tunnel watchdog (auto recovery)
 

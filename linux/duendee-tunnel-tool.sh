@@ -1206,6 +1206,145 @@ send_whatsapp_apk() {
   echo -e "  ${GRN}   WhatsApp APK gonderildi.${RST}"
 }
 
+desktop_app_install_dir() {
+  printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/DuendeeFM"
+}
+
+desktop_app_exe() {
+  local dir bin
+  dir="$(desktop_app_install_dir)"
+  for bin in DuendeeFM duendeefm; do
+    if [[ -x "${dir}/${bin}" ]]; then
+      printf '%s\n' "${dir}/${bin}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+desktop_app_autostart_file() {
+  printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/duendeefm.desktop"
+}
+
+desktop_app_desktop_file() {
+  printf '%s\n' "$(desktop_dir)/DuendeeFM.desktop"
+}
+
+desktop_app_autostart_on() {
+  [[ -f "$(desktop_app_autostart_file)" ]]
+}
+
+write_duendeefm_desktop_entry() {
+  local exe="$1" dest="$2" autostart="${3:-0}" icon
+  icon="${exe%/*}/resources/app.asar.unpacked/electron/icon.png"
+  [[ -f "$icon" ]] || icon="${exe%/*}/icon.png"
+  [[ -f "$icon" ]] || icon="${OS_DIR}/duendee-tunnel-tool.png"
+  mkdir -p "$(dirname "$dest")"
+  cat >"$dest" <<EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=DuendeeFM
+Comment=DuendeeFM desktop app
+Exec=env DUENDEE_START_MODE=local ${exe}
+Icon=${icon}
+Terminal=false
+Categories=AudioVideo;Music;
+StartupNotify=true
+EOF
+  if [[ "$autostart" == "1" ]]; then
+    printf 'X-GNOME-Autostart-enabled=true\n' >>"$dest"
+  fi
+  chmod +x "$dest" 2>/dev/null || true
+  if command -v gio >/dev/null 2>&1; then
+    gio set "$dest" metadata::trusted true >/dev/null 2>&1 || true
+  fi
+}
+
+install_duendee_desktop_app() {
+  local app_dir="$1" force="${2:-0}" exe unpacked dest
+  if exe="$(desktop_app_exe 2>/dev/null)" && [[ "$force" != "1" ]]; then
+    printf '%s\n' "$exe"
+    return 0
+  fi
+  [[ -d "$app_dir" ]] || return 1
+  echo -e "  ${DIM}   DuendeeFM masaüstü app kalıcı olarak derleniyor (electron-builder)...${RST}" >&2
+  ensure_app_npm_deps "$app_dir" || {
+    echo -e "  ${RED}   Duendee-app npm install başarısız.${RST}" >&2
+    return 1
+  }
+  (cd "$app_dir" && npm run electron:pack) || {
+    echo -e "  ${RED}   Masaüstü app derlemesi başarısız.${RST}" >&2
+    return 1
+  }
+  unpacked=""
+  for cand in \
+    "${app_dir}/dist-desktop/linux-unpacked" \
+    "${app_dir}/dist-desktop/linux-arm64-unpacked"; do
+    if [[ -x "${cand}/DuendeeFM" || -x "${cand}/duendeefm" ]]; then
+      unpacked="$cand"
+      break
+    fi
+  done
+  [[ -n "$unpacked" ]] || {
+    echo -e "  ${RED}   Derleme çıktısı bulunamadı (linux-unpacked).${RST}" >&2
+    return 1
+  }
+  dest="$(desktop_app_install_dir)"
+  rm -rf "$dest"
+  mkdir -p "$(dirname "$dest")"
+  cp -a "$unpacked" "$dest"
+  exe="$(desktop_app_exe)" || {
+    echo -e "  ${RED}   Kurulum sonrası DuendeeFM bulunamadı.${RST}" >&2
+    return 1
+  }
+  write_duendeefm_desktop_entry "$exe" "$(desktop_app_desktop_file)" 0
+  echo -e "  ${GRN}   Masaüstü kısayolu: $(desktop_app_desktop_file)${RST}" >&2
+  if desktop_app_autostart_on; then
+    write_duendeefm_desktop_entry "$exe" "$(desktop_app_autostart_file)" 1
+  fi
+  mkdir -p "${HOME}/.local/share/applications"
+  write_duendeefm_desktop_entry "$exe" "${HOME}/.local/share/applications/duendeefm.desktop" 0
+  echo -e "  ${GRN}   DuendeeFM kuruldu: ${exe}${RST}" >&2
+  printf '%s\n' "$exe"
+}
+
+set_desktop_app_autostart() {
+  local enable="$1" exe
+  if [[ "$enable" != "1" ]]; then
+    rm -f "$(desktop_app_autostart_file)"
+    return 0
+  fi
+  exe="$(desktop_app_exe)" || return 1
+  write_duendeefm_desktop_entry "$exe" "$(desktop_app_autostart_file)" 1
+}
+
+start_duendee_desktop_app() {
+  local app_dir="$1" url="${2:-}" exe
+  exe="$(install_duendee_desktop_app "$app_dir")" || exe=""
+  if [[ -n "$exe" && -x "$exe" ]]; then
+    echo -e "  ${GRN}   Masaüstü app (DuendeeFM) açılıyor...${RST}"
+    if command -v setsid >/dev/null 2>&1; then
+      setsid nohup env DUENDEE_TUNNEL_URL="$url" DUENDEE_START_MODE=tunnel \
+        "$exe" >>"${STATE}/app-desktop.log" 2>&1 </dev/null &
+    else
+      nohup env DUENDEE_TUNNEL_URL="$url" DUENDEE_START_MODE=tunnel \
+        "$exe" >>"${STATE}/app-desktop.log" 2>&1 </dev/null &
+    fi
+    disown $! 2>/dev/null || true
+    return 0
+  fi
+  echo -e "  ${YEL}   Kalıcı paket yok/başarısız; geliştirme Electron deneniyor...${RST}"
+  if command -v setsid >/dev/null 2>&1; then
+    setsid nohup env DUENDEE_TUNNEL_URL="$url" DUENDEE_START_MODE=tunnel \
+      npm --prefix "$app_dir" run electron:tunnel >>"${STATE}/app-desktop.log" 2>&1 </dev/null &
+  else
+    nohup env DUENDEE_TUNNEL_URL="$url" DUENDEE_START_MODE=tunnel \
+      npm --prefix "$app_dir" run electron:tunnel >>"${STATE}/app-desktop.log" 2>&1 </dev/null &
+  fi
+  disown $! 2>/dev/null || true
+}
+
 start_companion_apps() {
   local url="${1:-}" path=""
   LAST_MOBILE_APK_SENT=0
@@ -1240,15 +1379,7 @@ start_companion_apps() {
     }
   fi
   if desktop_app_launch; then
-    echo -e "  ${GRN}   Masaüstü app (Electron) açılıyor...${RST}"
-    if command -v setsid >/dev/null 2>&1; then
-      setsid nohup env DUENDEE_TUNNEL_URL="$url" DUENDEE_START_MODE=tunnel \
-        npm --prefix "$path" run electron:tunnel >>"${STATE}/app-desktop.log" 2>&1 </dev/null &
-    else
-      nohup env DUENDEE_TUNNEL_URL="$url" DUENDEE_START_MODE=tunnel \
-        npm --prefix "$path" run electron:tunnel >>"${STATE}/app-desktop.log" 2>&1 </dev/null &
-    fi
-    disown $! 2>/dev/null || true
+    start_duendee_desktop_app "$path" "$url" || true
   fi
   if mobile_app_launch; then
     echo -e "  ${GRN}   Mobil app güncel repodan APK olarak derleniyor...${RST}"
@@ -2469,22 +2600,30 @@ disable_autostart() {
 }
 
 do_autostart() {
-  local ans="" choices="TS1234X" launch=""
+  local ans="" choices="TSAD1234X" launch="" app_auto=0 app_path=""
   clear
   echo
   echo -e "${C5}   --- Cihaz Açılışında Otomatik Başlat ---${RST}"
   echo
   autostate
   case "$AUTOMODE" in
-    tool) echo -e "  ${DIM}   Durum:${RST} ${GRN}${BOLD}[TOOL]${RST}" ;;
-    tunnel) echo -e "  ${DIM}   Durum:${RST} ${GRN}${BOLD}[TOOL+TÜNEL]${RST}" ;;
-    *) echo -e "  ${DIM}   Durum:${RST} ${RED}${BOLD}[KAPALI]${RST}" ;;
+    tool) echo -e "  ${DIM}   Tool:${RST} ${GRN}${BOLD}[TOOL]${RST}" ;;
+    tunnel) echo -e "  ${DIM}   Tool:${RST} ${GRN}${BOLD}[TOOL+TÜNEL]${RST}" ;;
+    *) echo -e "  ${DIM}   Tool:${RST} ${RED}${BOLD}[KAPALI]${RST}" ;;
   esac
+  if desktop_app_autostart_on; then
+    app_auto=1
+    echo -e "  ${DIM}   Masaüstü App:${RST} ${GRN}${BOLD}[BAŞLANGIÇTA]${RST}"
+  else
+    echo -e "  ${DIM}   Masaüstü App:${RST} ${RED}${BOLD}[KAPALI]${RST}"
+  fi
   launch="$(launch_type)"
   echo -e "  ${DIM}   Derleme/Başlatma Tipi:${RST} ${GRN}${BOLD}[$(launch_type_label "$launch")]${RST}"
   echo
   echo "  [T]  Yalnızca tool'u otomatik başlat"
   echo "  [S]  Tool'u ve tünel servisini otomatik başlat"
+  echo "  [A]  Masaüstü App (DuendeeFM) başlangıç uygulamalarına ekle/çıkar"
+  echo "  [D]  Masaüstü App'i kalıcı derle + masaüstü kısayolu"
   echo
   echo -e "  ${DIM}--- Derleme/Başlatma Tipi ---${RST}"
   if [[ "$launch" == "browser" ]]; then
@@ -2507,9 +2646,9 @@ do_autostart() {
   else
     echo "  [4]  Hepsi"
   fi
-  if [[ "$AUTOMODE" != "off" ]]; then
-    echo "  [K]  Otomatik başlatmayı kapat"
-    choices="TS1234KX"
+  if [[ "$AUTOMODE" != "off" || "$app_auto" -eq 1 ]]; then
+    echo "  [K]  Tool otomatik başlatmayı kapat"
+    choices="TSAD1234KX"
   fi
   echo -e "  ${DIM}${BOLD}[X]${RST}  ${DIM}Geri dön${RST}"
   echo
@@ -2537,6 +2676,38 @@ do_autostart() {
         echo -e "  ${RED}${BOLD}[HATA]${RST} Ayar kaydedilemedi."
       fi
       ;;
+    D)
+      app_path="$(resolve_duendee_app_path "${APP_PATH:-}" 2>/dev/null || true)"
+      if [[ -z "$app_path" ]]; then
+        echo -e "  ${YEL}   Duendee-app bulunamadı.${RST}"
+      else
+        APP_PATH="$app_path"
+        update_git_repo_safe "$app_path" "Duendee-app" || true
+        if install_duendee_desktop_app "$app_path" 1 >/dev/null; then
+          echo -e "  ${GRN}   Kalıcı DuendeeFM hazır. Masaüstü kısayolu güncellendi.${RST}"
+        fi
+      fi
+      ;;
+    A)
+      if desktop_app_autostart_on; then
+        set_desktop_app_autostart 0
+        echo -e "  ${RED}   DuendeeFM başlangıç uygulamalarından çıkarıldı.${RST}"
+      else
+        app_path="$(resolve_duendee_app_path "${APP_PATH:-}" 2>/dev/null || true)"
+        if [[ -z "$app_path" ]]; then
+          echo -e "  ${YEL}   Duendee-app bulunamadı.${RST}"
+        else
+          APP_PATH="$app_path"
+          update_git_repo_safe "$app_path" "Duendee-app" || true
+          if install_duendee_desktop_app "$app_path" >/dev/null && set_desktop_app_autostart 1; then
+            echo -e "  ${GRN}   DuendeeFM başlangıç uygulamalarına eklendi.${RST}"
+            echo -e "  ${DIM}   Kayıt: $(desktop_app_autostart_file)${RST}"
+          else
+            echo -e "  ${RED}${BOLD}[HATA]${RST} Başlangıç kaydı yazılamadı."
+          fi
+        fi
+      fi
+      ;;
     1|2|3|4)
       local next=browser
       case "$ans" in
@@ -2551,15 +2722,26 @@ do_autostart() {
         set_launch_type "$next"
         echo -e "  ${GRN}   Derleme/Başlatma Tipi: $(launch_type_label "$next")${RST}"
         echo -e "  ${DIM}   Tünel her başlatıldığında bu seçim uygulanacak.${RST}"
+        if [[ "$next" == "desktop" || "$next" == "all" ]]; then
+          app_path="$(resolve_duendee_app_path "${APP_PATH:-}" 2>/dev/null || true)"
+          if [[ -n "$app_path" ]]; then
+            APP_PATH="$app_path"
+            install_duendee_desktop_app "$app_path" >/dev/null || true
+          fi
+        fi
       fi
       ;;
     K)
-      [[ "$AUTOMODE" == "off" ]] && return 0
+      [[ "$AUTOMODE" == "off" ]] && {
+        echo
+        wait_key
+        return 0
+      }
       disable_autostart
       autostate
       echo
       if [[ "$AUTOMODE" == "off" ]]; then
-        echo -e "  ${RED}   Otomatik başlatma kapatıldı.${RST}"
+        echo -e "  ${RED}   Tool otomatik başlatma kapatıldı.${RST}"
       else
         echo -e "  ${RED}${BOLD}[HATA]${RST} Ayar kapatılamadı, kayıt duruyor."
       fi
