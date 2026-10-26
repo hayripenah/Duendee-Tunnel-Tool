@@ -2434,6 +2434,66 @@ function Ensure-AndroidSdkEnv {
   return @{ JavaHome = $javaHome; SdkRoot = $sdkRoot }
 }
 
+function Invoke-NativeProcess([string]$FilePath, [string[]]$ArgumentList, [string]$WorkingDirectory, [string]$LogPath) {
+  # Reliable exit code on Windows PowerShell 5.1 (avoids $LASTEXITCODE / *>&1 ErrorRecord traps).
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $FilePath
+  if ($ArgumentList -and $ArgumentList.Count -gt 0) {
+    $psi.Arguments = ($ArgumentList | ForEach-Object {
+        $a = "$_"
+        if ($a -match '[\s"]') { '"' + ($a -replace '"', '\"') + '"' } else { $a }
+      }) -join ' '
+  }
+  $psi.WorkingDirectory = $WorkingDirectory
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.CreateNoWindow = $true
+  $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+  $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+  $proc = New-Object System.Diagnostics.Process
+  $proc.StartInfo = $psi
+  $stdout = New-Object System.Text.StringBuilder
+  $stderr = New-Object System.Text.StringBuilder
+  # Capture ANSI locals — event handlers do not see function scope.
+  $dim = $DIM; $rst = $RST; $red = $RED
+  $outHandler = ([System.Diagnostics.DataReceivedEventHandler] {
+    if (-not [string]::IsNullOrEmpty($EventArgs.Data)) {
+      [void]$stdout.AppendLine($EventArgs.Data)
+      # Deprecation notes are not failures — print dim, never as NativeCommandError.
+      if ($EventArgs.Data -match '^(Note:|WARNING:)') {
+        [Console]::WriteLine(("  {0}{1}{2}" -f $dim, $EventArgs.Data, $rst))
+      } else {
+        [Console]::WriteLine($EventArgs.Data)
+      }
+    }
+  }).GetNewClosure()
+  $errHandler = ([System.Diagnostics.DataReceivedEventHandler] {
+    if (-not [string]::IsNullOrEmpty($EventArgs.Data)) {
+      [void]$stderr.AppendLine($EventArgs.Data)
+      if ($EventArgs.Data -match '^(Note:|WARNING:)') {
+        [Console]::WriteLine(("  {0}{1}{2}" -f $dim, $EventArgs.Data, $rst))
+      } elseif ($EventArgs.Data -match '(?i)(error:|FAILED|What went wrong|Execution failed)') {
+        [Console]::WriteLine(("  {0}{1}{2}" -f $red, $EventArgs.Data, $rst))
+      } else {
+        [Console]::WriteLine($EventArgs.Data)
+      }
+    }
+  }).GetNewClosure()
+  $proc.add_OutputDataReceived($outHandler)
+  $proc.add_ErrorDataReceived($errHandler)
+  [void]$proc.Start()
+  $proc.BeginOutputReadLine()
+  $proc.BeginErrorReadLine()
+  $proc.WaitForExit()
+  $code = $proc.ExitCode
+  if ($LogPath) {
+    $combined = ($stdout.ToString() + $stderr.ToString())
+    Set-Content -LiteralPath $LogPath -Value $combined -Encoding UTF8
+  }
+  return $code
+}
+
 function Build-DuendeeAndroidApk([string]$AppDir, [hashtable]$Sdk) {
   $androidDir = Join-Path $AppDir 'android'
   $gradlew = Join-Path $androidDir 'gradlew.bat'
@@ -2441,76 +2501,70 @@ function Build-DuendeeAndroidApk([string]$AppDir, [hashtable]$Sdk) {
     Write-UiLine "  $RED   gradlew.bat yok: $androidDir$RST"
     return $null
   }
-  # Gradle local.properties wants escaped backslashes on Windows.
-  $escaped = $Sdk.SdkRoot.Replace('\', '\\')
-  Set-Content -LiteralPath (Join-Path $androidDir 'local.properties') -Value "sdk.dir=$escaped`n" -Encoding Ascii
-  Write-UiLine "  $DIM   Capacitor android sync + DuendeeFM ikonları...$RST"
-  Push-Location $AppDir
-  try {
-    $prevEa = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    $prevNative = $null
-    if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
-      $prevNative = $PSNativeCommandUseErrorActionPreference
-      $PSNativeCommandUseErrorActionPreference = $false
-    }
-    try {
-      & npx --yes cap sync android
-      if ($LASTEXITCODE -ne 0) {
-        Write-UiLine "  $RED   cap sync android başarısız.$RST"
-        return $null
-      }
-      if (Test-Path -LiteralPath (Join-Path $AppDir 'scripts\sync-native-branding.mjs')) {
-        & node (Join-Path $AppDir 'scripts\sync-native-branding.mjs')
-      }
-    } finally {
-      $ErrorActionPreference = $prevEa
-      if ($null -ne $prevNative) { $PSNativeCommandUseErrorActionPreference = $prevNative }
-    }
-  } finally { Pop-Location }
-  Write-UiLine "  $DIM   APK derleniyor (assembleDebug)...$RST"
+  # Cap sync + Gradle both need JDK/SDK on PATH (was set too late before).
   $env:JAVA_HOME = $Sdk.JavaHome
   $env:ANDROID_SDK_ROOT = $Sdk.SdkRoot
   $env:ANDROID_HOME = $Sdk.SdkRoot
   $env:Path = "$(Join-Path $Sdk.JavaHome 'bin');$(Join-Path $Sdk.SdkRoot 'platform-tools');$env:Path"
-  Push-Location $androidDir
-  try {
-    $prevEa = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    $prevNative = $null
-    if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
-      $prevNative = $PSNativeCommandUseErrorActionPreference
-      $PSNativeCommandUseErrorActionPreference = $false
+  # Gradle local.properties wants escaped backslashes on Windows.
+  $escaped = $Sdk.SdkRoot.Replace('\', '\\')
+  Set-Content -LiteralPath (Join-Path $androidDir 'local.properties') -Value "sdk.dir=$escaped`n" -Encoding Ascii
+  Write-UiLine "  $DIM   Capacitor android sync + DuendeeFM ikonları...$RST"
+  $npxCmd = (Get-Command npx.cmd -ErrorAction SilentlyContinue)
+  if (-not $npxCmd) { $npxCmd = Get-Command npx -ErrorAction SilentlyContinue }
+  if (-not $npxCmd) {
+    Write-UiLine "  $RED   npx bulunamadı (Node.js).$RST"
+    return $null
+  }
+  $capLog = Join-Path $androidDir 'cap-sync.log'
+  $capCode = Invoke-NativeProcess -FilePath $npxCmd.Source -ArgumentList @('--yes', 'cap', 'sync', 'android') -WorkingDirectory $AppDir -LogPath $capLog
+  if ($capCode -ne 0) {
+    Write-UiLine "  $RED   cap sync android başarısız (exit $capCode). Log: $capLog$RST"
+    return $null
+  }
+  if (Test-Path -LiteralPath (Join-Path $AppDir 'scripts\sync-native-branding.mjs')) {
+    $nodeCmd = Get-Command node.exe -ErrorAction SilentlyContinue
+    if ($nodeCmd) {
+      [void](Invoke-NativeProcess -FilePath $nodeCmd.Source -ArgumentList @((Join-Path $AppDir 'scripts\sync-native-branding.mjs')) -WorkingDirectory $AppDir -LogPath $null)
     }
-    try {
-      & cmd.exe /c "`"$gradlew`" assembleDebug --no-daemon"
-      if ($LASTEXITCODE -ne 0) {
-        Write-UiLine "  $RED   Gradle assembleDebug başarısız.$RST"
-        return $null
-      }
-    } finally {
-      $ErrorActionPreference = $prevEa
-      if ($null -ne $prevNative) { $PSNativeCommandUseErrorActionPreference = $prevNative }
-    }
-  } finally { Pop-Location }
+  }
+  Write-UiLine "  $DIM   APK derleniyor (assembleDebug)...$RST"
+  $gradleLog = Join-Path $androidDir 'assemble-debug.log'
+  $gradleCode = Invoke-NativeProcess -FilePath $gradlew -ArgumentList @('assembleDebug', '--no-daemon') -WorkingDirectory $androidDir -LogPath $gradleLog
   $apkDir = Join-Path $androidDir 'app\build\outputs\apk\debug'
   $named = Join-Path $apkDir 'DuendeeFM.apk'
-  if (Test-Path -LiteralPath $named) { return (Resolve-Path -LiteralPath $named).Path }
-  $apk = Get-ChildItem -LiteralPath $apkDir -Filter 'DuendeeFM*.apk' -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime -Descending | Select-Object -First 1
-  if (-not $apk) {
-    $apk = Get-ChildItem -LiteralPath $apkDir -Filter '*.apk' -ErrorAction SilentlyContinue |
+  $apk = $null
+  if (Test-Path -LiteralPath $apkDir) {
+    $apk = Get-ChildItem -LiteralPath $apkDir -Filter 'DuendeeFM*.apk' -ErrorAction SilentlyContinue |
       Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $apk) {
+      $apk = Get-ChildItem -LiteralPath $apkDir -Filter '*.apk' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    }
+  }
+  if ($gradleCode -ne 0) {
+    Write-UiLine "  $RED   Gradle assembleDebug başarısız (exit $gradleCode).$RST"
+    Write-UiLine "  $DIM   Tam log: $gradleLog$RST"
+    if (Test-Path -LiteralPath $gradleLog) {
+      Get-Content -LiteralPath $gradleLog -ErrorAction SilentlyContinue |
+        Where-Object { $_ -match '(?i)(error:|FAILED|What went wrong|Execution failed|cannot find symbol)' } |
+        Select-Object -Last 20 |
+        ForEach-Object { Write-UiLine "  $RED   $_$RST" }
+    }
+    return $null
   }
   if (-not $apk) {
     Write-UiLine "  $RED   APK bulunamadı: $apkDir$RST"
+    Write-UiLine "  $DIM   Tam log: $gradleLog$RST"
     return $null
   }
+  Write-UiLine "  $GRN   BUILD SUCCESSFUL$RST"
   if ($apk.Name -ne 'DuendeeFM.apk') {
     $dest = Join-Path $apkDir 'DuendeeFM.apk'
     Copy-Item -LiteralPath $apk.FullName -Destination $dest -Force
     return (Resolve-Path -LiteralPath $dest).Path
   }
+  if (Test-Path -LiteralPath $named) { return (Resolve-Path -LiteralPath $named).Path }
   return $apk.FullName
 }
 
@@ -2575,20 +2629,25 @@ function Start-CompanionApps([string]$TunnelUrl) {
     return
   }
   $dist = Join-Path $Project 'dist'
-  Push-Location $path
-  try {
-    if (Test-Path -LiteralPath (Join-Path $dist 'index.html')) {
-      Write-UiLine "  $DIM   Duendee-app www senkronu (mevcut dist)...$RST"
-      & npm run sync:skip-build *>&1 | Out-Host
-    } else {
-      Write-UiLine "  $DIM   Duendee-app www senkronu (build)...$RST"
-      & npm run sync *>&1 | Out-Host
-    }
-    if ($LASTEXITCODE -ne 0) {
-      Write-UiLine "  $RED   Duendee-app sync başarısız.$RST"
-      return
-    }
-  } finally { Pop-Location }
+  $npmCmd = (Get-Command npm.cmd -ErrorAction SilentlyContinue)
+  if (-not $npmCmd) { $npmCmd = Get-Command npm -ErrorAction SilentlyContinue }
+  if (-not $npmCmd) {
+    Write-UiLine "  $RED   npm bulunamadı.$RST"
+    return
+  }
+  $syncArgs = if (Test-Path -LiteralPath (Join-Path $dist 'index.html')) {
+    Write-UiLine "  $DIM   Duendee-app www senkronu (mevcut dist)...$RST"
+    @('run', 'sync:skip-build')
+  } else {
+    Write-UiLine "  $DIM   Duendee-app www senkronu (build)...$RST"
+    @('run', 'sync')
+  }
+  $syncLog = Join-Path $path 'sync-web.log'
+  $syncCode = Invoke-NativeProcess -FilePath $npmCmd.Source -ArgumentList $syncArgs -WorkingDirectory $path -LogPath $syncLog
+  if ($syncCode -ne 0) {
+    Write-UiLine "  $RED   Duendee-app sync başarısız (exit $syncCode). Log: $syncLog$RST"
+    return
+  }
 
   if ($wantDesktop) {
     Write-UiLine "  $GRN   Masaüstü app (Electron) açılıyor...$RST"
