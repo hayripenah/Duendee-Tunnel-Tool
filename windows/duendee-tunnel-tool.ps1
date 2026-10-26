@@ -2434,63 +2434,51 @@ function Ensure-AndroidSdkEnv {
   return @{ JavaHome = $javaHome; SdkRoot = $sdkRoot }
 }
 
+function Write-NativeProcessLine([string]$Line) {
+  if ([string]::IsNullOrWhiteSpace($Line)) { return }
+  # Deprecation notes are warnings — never surface as PowerShell NativeCommandError.
+  if ($Line -match '^(Note:|WARNING:)') {
+    Write-UiLine ("  {0}{1}{2}" -f $DIM, $Line, $RST)
+  } elseif ($Line -match '(?i)(error:|FAILED|What went wrong|Execution failed)') {
+    Write-UiLine ("  {0}{1}{2}" -f $RED, $Line, $RST)
+  } else {
+    Write-UiLine $Line
+  }
+}
+
 function Invoke-NativeProcess([string]$FilePath, [string[]]$ArgumentList, [string]$WorkingDirectory, [string]$LogPath) {
-  # Reliable exit code on Windows PowerShell 5.1 (avoids $LASTEXITCODE / *>&1 ErrorRecord traps).
-  $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = $FilePath
-  if ($ArgumentList -and $ArgumentList.Count -gt 0) {
-    $psi.Arguments = ($ArgumentList | ForEach-Object {
-        $a = "$_"
-        if ($a -match '[\s"]') { '"' + ($a -replace '"', '\"') + '"' } else { $a }
-      }) -join ' '
+  # Reliable exit code on Windows PowerShell 5.1 (no *>&1 ErrorRecord / GetNewClosure).
+  $outTemp = Join-Path $env:TEMP ("duendee-out-" + [guid]::NewGuid().ToString('n') + ".log")
+  $errTemp = Join-Path $env:TEMP ("duendee-err-" + [guid]::NewGuid().ToString('n') + ".log")
+  $argList = @()
+  if ($ArgumentList) { $argList = @($ArgumentList) }
+  $prevEa = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $proc = Start-Process -FilePath $FilePath -ArgumentList $argList -WorkingDirectory $WorkingDirectory `
+      -Wait -PassThru -NoNewWindow `
+      -RedirectStandardOutput $outTemp -RedirectStandardError $errTemp
+    $code = 0
+    if ($null -ne $proc) { $code = [int]$proc.ExitCode }
+  } finally {
+    $ErrorActionPreference = $prevEa
   }
-  $psi.WorkingDirectory = $WorkingDirectory
-  $psi.UseShellExecute = $false
-  $psi.RedirectStandardOutput = $true
-  $psi.RedirectStandardError = $true
-  $psi.CreateNoWindow = $true
-  $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
-  $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
-  $proc = New-Object System.Diagnostics.Process
-  $proc.StartInfo = $psi
-  $stdout = New-Object System.Text.StringBuilder
-  $stderr = New-Object System.Text.StringBuilder
-  # Capture ANSI locals — event handlers do not see function scope.
-  $dim = $DIM; $rst = $RST; $red = $RED
-  $outHandler = ([System.Diagnostics.DataReceivedEventHandler] {
-    if (-not [string]::IsNullOrEmpty($EventArgs.Data)) {
-      [void]$stdout.AppendLine($EventArgs.Data)
-      # Deprecation notes are not failures — print dim, never as NativeCommandError.
-      if ($EventArgs.Data -match '^(Note:|WARNING:)') {
-        [Console]::WriteLine(("  {0}{1}{2}" -f $dim, $EventArgs.Data, $rst))
-      } else {
-        [Console]::WriteLine($EventArgs.Data)
-      }
-    }
-  }).GetNewClosure()
-  $errHandler = ([System.Diagnostics.DataReceivedEventHandler] {
-    if (-not [string]::IsNullOrEmpty($EventArgs.Data)) {
-      [void]$stderr.AppendLine($EventArgs.Data)
-      if ($EventArgs.Data -match '^(Note:|WARNING:)') {
-        [Console]::WriteLine(("  {0}{1}{2}" -f $dim, $EventArgs.Data, $rst))
-      } elseif ($EventArgs.Data -match '(?i)(error:|FAILED|What went wrong|Execution failed)') {
-        [Console]::WriteLine(("  {0}{1}{2}" -f $red, $EventArgs.Data, $rst))
-      } else {
-        [Console]::WriteLine($EventArgs.Data)
-      }
-    }
-  }).GetNewClosure()
-  $proc.add_OutputDataReceived($outHandler)
-  $proc.add_ErrorDataReceived($errHandler)
-  [void]$proc.Start()
-  $proc.BeginOutputReadLine()
-  $proc.BeginErrorReadLine()
-  $proc.WaitForExit()
-  $code = $proc.ExitCode
+  $outText = ''
+  $errText = ''
+  if (Test-Path -LiteralPath $outTemp) {
+    $outText = Get-Content -LiteralPath $outTemp -Raw -ErrorAction SilentlyContinue
+    if ($null -eq $outText) { $outText = '' }
+  }
+  if (Test-Path -LiteralPath $errTemp) {
+    $errText = Get-Content -LiteralPath $errTemp -Raw -ErrorAction SilentlyContinue
+    if ($null -eq $errText) { $errText = '' }
+  }
+  foreach ($line in ($outText -split '\r?\n')) { Write-NativeProcessLine $line }
+  foreach ($line in ($errText -split '\r?\n')) { Write-NativeProcessLine $line }
   if ($LogPath) {
-    $combined = ($stdout.ToString() + $stderr.ToString())
-    Set-Content -LiteralPath $LogPath -Value $combined -Encoding UTF8
+    Set-Content -LiteralPath $LogPath -Value ($outText + $errText) -Encoding UTF8
   }
+  Remove-Item -LiteralPath $outTemp, $errTemp -Force -ErrorAction SilentlyContinue
   return $code
 }
 
