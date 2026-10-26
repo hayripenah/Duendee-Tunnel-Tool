@@ -2447,13 +2447,25 @@ function Build-DuendeeAndroidApk([string]$AppDir, [hashtable]$Sdk) {
   Write-UiLine "  $DIM   Capacitor android sync + DuendeeFM ikonları...$RST"
   Push-Location $AppDir
   try {
-    & npx --yes cap sync android *>&1 | Out-Host
-    if ($LASTEXITCODE -ne 0) {
-      Write-UiLine "  $RED   cap sync android başarısız.$RST"
-      return $null
+    $prevEa = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $prevNative = $null
+    if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+      $prevNative = $PSNativeCommandUseErrorActionPreference
+      $PSNativeCommandUseErrorActionPreference = $false
     }
-    if (Test-Path -LiteralPath (Join-Path $AppDir 'scripts\sync-native-branding.mjs')) {
-      & node (Join-Path $AppDir 'scripts\sync-native-branding.mjs') *>&1 | Out-Host
+    try {
+      & npx --yes cap sync android
+      if ($LASTEXITCODE -ne 0) {
+        Write-UiLine "  $RED   cap sync android başarısız.$RST"
+        return $null
+      }
+      if (Test-Path -LiteralPath (Join-Path $AppDir 'scripts\sync-native-branding.mjs')) {
+        & node (Join-Path $AppDir 'scripts\sync-native-branding.mjs')
+      }
+    } finally {
+      $ErrorActionPreference = $prevEa
+      if ($null -ne $prevNative) { $PSNativeCommandUseErrorActionPreference = $prevNative }
     }
   } finally { Pop-Location }
   Write-UiLine "  $DIM   APK derleniyor (assembleDebug)...$RST"
@@ -2463,10 +2475,22 @@ function Build-DuendeeAndroidApk([string]$AppDir, [hashtable]$Sdk) {
   $env:Path = "$(Join-Path $Sdk.JavaHome 'bin');$(Join-Path $Sdk.SdkRoot 'platform-tools');$env:Path"
   Push-Location $androidDir
   try {
-    & cmd.exe /c "`"$gradlew`" assembleDebug --no-daemon" *>&1 | Out-Host
-    if ($LASTEXITCODE -ne 0) {
-      Write-UiLine "  $RED   Gradle assembleDebug başarısız.$RST"
-      return $null
+    $prevEa = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $prevNative = $null
+    if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+      $prevNative = $PSNativeCommandUseErrorActionPreference
+      $PSNativeCommandUseErrorActionPreference = $false
+    }
+    try {
+      & cmd.exe /c "`"$gradlew`" assembleDebug --no-daemon"
+      if ($LASTEXITCODE -ne 0) {
+        Write-UiLine "  $RED   Gradle assembleDebug başarısız.$RST"
+        return $null
+      }
+    } finally {
+      $ErrorActionPreference = $prevEa
+      if ($null -ne $prevNative) { $PSNativeCommandUseErrorActionPreference = $prevNative }
     }
   } finally { Pop-Location }
   $apkDir = Join-Path $androidDir 'app\build\outputs\apk\debug'
