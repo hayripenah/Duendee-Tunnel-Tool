@@ -1230,6 +1230,32 @@ desktop_app_desktop_file() {
   printf '%s\n' "$(desktop_dir)/DuendeeFM.desktop"
 }
 
+desktop_app_wanted_file() {
+  printf '%s\n' "${STATE}/desktop-app-wanted"
+}
+
+desktop_app_wanted() {
+  local f
+  f="$(desktop_app_wanted_file)"
+  if [[ -f "$f" ]]; then
+    [[ "$(tr -d '[:space:]' <"$f" | head -n1)" != "0" ]]
+    return
+  fi
+  desktop_app_autostart_on
+}
+
+set_desktop_app_wanted() {
+  local enable="$1" f
+  f="$(desktop_app_wanted_file)"
+  mkdir -p "$STATE"
+  if [[ "$enable" == "1" ]]; then
+    printf '1\n' >"$f"
+  else
+    rm -f "$f"
+    set_desktop_app_autostart 0 || true
+  fi
+}
+
 desktop_app_autostart_on() {
   [[ -f "$(desktop_app_autostart_file)" ]]
 }
@@ -1298,13 +1324,13 @@ install_duendee_desktop_app() {
     echo -e "  ${RED}   Kurulum sonrası DuendeeFM bulunamadı.${RST}" >&2
     return 1
   }
-  write_duendeefm_desktop_entry "$exe" "$(desktop_app_desktop_file)" 0
-  echo -e "  ${GRN}   Masaüstü kısayolu: $(desktop_app_desktop_file)${RST}" >&2
-  if desktop_app_autostart_on; then
-    write_duendeefm_desktop_entry "$exe" "$(desktop_app_autostart_file)" 1
-  fi
   mkdir -p "${HOME}/.local/share/applications"
   write_duendeefm_desktop_entry "$exe" "${HOME}/.local/share/applications/duendeefm.desktop" 0
+  if desktop_app_wanted; then
+    write_duendeefm_desktop_entry "$exe" "$(desktop_app_desktop_file)" 0
+    echo -e "  ${GRN}   Masaüstü kısayolu: $(desktop_app_desktop_file)${RST}" >&2
+    write_duendeefm_desktop_entry "$exe" "$(desktop_app_autostart_file)" 1
+  fi
   echo -e "  ${GRN}   DuendeeFM kuruldu: ${exe}${RST}" >&2
   printf '%s\n' "$exe"
 }
@@ -1320,8 +1346,24 @@ set_desktop_app_autostart() {
 }
 
 start_duendee_desktop_app() {
-  local app_dir="$1" url="${2:-}" exe
-  exe="$(install_duendee_desktop_app "$app_dir")" || exe=""
+  local app_dir="$1" url="${2:-}" exe force=0 existing src
+  if existing="$(desktop_app_exe 2>/dev/null)"; then
+    for src in \
+      "${app_dir}/www/sync-meta.json" \
+      "${app_dir}/electron/main.cjs" \
+      "${app_dir}/package.json"; do
+      [[ -f "$src" ]] || continue
+      if [[ "$src" -nt "$existing" ]]; then
+        force=1
+        break
+      fi
+    done
+  fi
+  exe="$(install_duendee_desktop_app "$app_dir" "$force")" || exe=""
+  if [[ -n "$exe" && -x "$exe" ]] && desktop_app_wanted; then
+    write_duendeefm_desktop_entry "$exe" "$(desktop_app_desktop_file)" 0
+    set_desktop_app_autostart 1 || true
+  fi
   if [[ -n "$exe" && -x "$exe" ]]; then
     echo -e "  ${GRN}   Masaüstü app (DuendeeFM) açılıyor...${RST}"
     if command -v setsid >/dev/null 2>&1; then
@@ -2600,7 +2642,7 @@ disable_autostart() {
 }
 
 do_autostart() {
-  local ans="" choices="TSAD1234X" launch="" app_auto=0 app_path=""
+  local ans="" choices="TSA1234X" launch="" app_wanted=0 app_path=""
   clear
   echo
   echo -e "${C5}   --- Cihaz Açılışında Otomatik Başlat ---${RST}"
@@ -2611,9 +2653,9 @@ do_autostart() {
     tunnel) echo -e "  ${DIM}   Tool:${RST} ${GRN}${BOLD}[TOOL+TÜNEL]${RST}" ;;
     *) echo -e "  ${DIM}   Tool:${RST} ${RED}${BOLD}[KAPALI]${RST}" ;;
   esac
-  if desktop_app_autostart_on; then
-    app_auto=1
-    echo -e "  ${DIM}   Masaüstü App:${RST} ${GRN}${BOLD}[BAŞLANGIÇTA]${RST}"
+  if desktop_app_wanted; then
+    app_wanted=1
+    echo -e "  ${DIM}   Masaüstü App:${RST} ${GRN}${BOLD}[BAŞLANGIÇTA+KISAYOL]${RST}"
   else
     echo -e "  ${DIM}   Masaüstü App:${RST} ${RED}${BOLD}[KAPALI]${RST}"
   fi
@@ -2622,8 +2664,12 @@ do_autostart() {
   echo
   echo "  [T]  Yalnızca tool'u otomatik başlat"
   echo "  [S]  Tool'u ve tünel servisini otomatik başlat"
-  echo "  [A]  Masaüstü App (DuendeeFM) başlangıç uygulamalarına ekle/çıkar"
-  echo "  [D]  Masaüstü App'i kalıcı derle + masaüstü kısayolu"
+  if [[ "$app_wanted" -eq 1 ]]; then
+    echo -e "  [A]  Masaüstü App: kalıcı kurulum + masaüstü kısayolu + başlangıç  ${GRN}[AÇIK]${RST}"
+  else
+    echo "  [A]  Masaüstü App: kalıcı kurulum + masaüstü kısayolu + başlangıç"
+  fi
+  echo -e "  ${DIM}       (Derleme [1] tünel açılınca yapılır)${RST}"
   echo
   echo -e "  ${DIM}--- Derleme/Başlatma Tipi ---${RST}"
   if [[ "$launch" == "browser" ]]; then
@@ -2646,9 +2692,9 @@ do_autostart() {
   else
     echo "  [4]  Hepsi"
   fi
-  if [[ "$AUTOMODE" != "off" || "$app_auto" -eq 1 ]]; then
+  if [[ "$AUTOMODE" != "off" || "$app_wanted" -eq 1 ]]; then
     echo "  [K]  Tool otomatik başlatmayı kapat"
-    choices="TSAD1234KX"
+    choices="TSA1234KX"
   fi
   echo -e "  ${DIM}${BOLD}[X]${RST}  ${DIM}Geri dön${RST}"
   echo
@@ -2676,35 +2722,18 @@ do_autostart() {
         echo -e "  ${RED}${BOLD}[HATA]${RST} Ayar kaydedilemedi."
       fi
       ;;
-    D)
-      app_path="$(resolve_duendee_app_path "${APP_PATH:-}" 2>/dev/null || true)"
-      if [[ -z "$app_path" ]]; then
-        echo -e "  ${YEL}   Duendee-app bulunamadı.${RST}"
-      else
-        APP_PATH="$app_path"
-        update_git_repo_safe "$app_path" "Duendee-app" || true
-        if install_duendee_desktop_app "$app_path" 1 >/dev/null; then
-          echo -e "  ${GRN}   Kalıcı DuendeeFM hazır. Masaüstü kısayolu güncellendi.${RST}"
-        fi
-      fi
-      ;;
     A)
-      if desktop_app_autostart_on; then
-        set_desktop_app_autostart 0
-        echo -e "  ${RED}   DuendeeFM başlangıç uygulamalarından çıkarıldı.${RST}"
+      if desktop_app_wanted; then
+        set_desktop_app_wanted 0
+        echo -e "  ${RED}   DuendeeFM başlangıç/kısayol tercihi kapatıldı.${RST}"
+        echo -e "  ${DIM}   (Mevcut masaüstü kısayolu duruyor; başlangıç kaydı silindi.)${RST}"
       else
-        app_path="$(resolve_duendee_app_path "${APP_PATH:-}" 2>/dev/null || true)"
-        if [[ -z "$app_path" ]]; then
-          echo -e "  ${YEL}   Duendee-app bulunamadı.${RST}"
-        else
-          APP_PATH="$app_path"
-          update_git_repo_safe "$app_path" "Duendee-app" || true
-          if install_duendee_desktop_app "$app_path" >/dev/null && set_desktop_app_autostart 1; then
-            echo -e "  ${GRN}   DuendeeFM başlangıç uygulamalarına eklendi.${RST}"
-            echo -e "  ${DIM}   Kayıt: $(desktop_app_autostart_file)${RST}"
-          else
-            echo -e "  ${RED}${BOLD}[HATA]${RST} Başlangıç kaydı yazılamadı."
-          fi
+        set_desktop_app_wanted 1
+        echo -e "  ${GRN}   DuendeeFM: tünel [1] açılınca kalıcı derlenecek, kısayol + başlangıç eklenecek.${RST}"
+        if exe="$(desktop_app_exe 2>/dev/null)"; then
+          write_duendeefm_desktop_entry "$exe" "$(desktop_app_desktop_file)" 0
+          set_desktop_app_autostart 1 || true
+          echo -e "  ${DIM}   Mevcut kurulum bulundu; kısayol ve başlangıç şimdi güncellendi.${RST}"
         fi
       fi
       ;;
@@ -2723,11 +2752,7 @@ do_autostart() {
         echo -e "  ${GRN}   Derleme/Başlatma Tipi: $(launch_type_label "$next")${RST}"
         echo -e "  ${DIM}   Tünel her başlatıldığında bu seçim uygulanacak.${RST}"
         if [[ "$next" == "desktop" || "$next" == "all" ]]; then
-          app_path="$(resolve_duendee_app_path "${APP_PATH:-}" 2>/dev/null || true)"
-          if [[ -n "$app_path" ]]; then
-            APP_PATH="$app_path"
-            install_duendee_desktop_app "$app_path" >/dev/null || true
-          fi
+          echo -e "  ${DIM}   Kalıcı app derlemesi tünel [1] açılınca yapılır.${RST}"
         fi
       fi
       ;;

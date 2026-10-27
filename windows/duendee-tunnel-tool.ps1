@@ -2613,6 +2613,33 @@ function Get-DesktopAppDesktopShortcutPath {
   Join-Path (Get-UserDesktopPath) 'DuendeeFM.lnk'
 }
 
+function Get-DesktopAppWantedPath {
+  Join-Path $StateDir 'desktop-app-wanted'
+}
+
+function Test-DesktopAppWanted {
+  $p = Get-DesktopAppWantedPath
+  if (Test-Path -LiteralPath $p) {
+    $raw = ("$(Get-Content -LiteralPath $p -TotalCount 1 -ErrorAction SilentlyContinue)").Trim()
+    if ($raw -eq '0') { return $false }
+    return $true
+  }
+  return (Test-Path -LiteralPath (Get-DesktopAppStartupShortcutPath))
+}
+
+function Set-DesktopAppWanted([bool]$Enable) {
+  $p = Get-DesktopAppWantedPath
+  if (-not (Test-Path -LiteralPath $StateDir)) {
+    New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+  }
+  if ($Enable) {
+    Set-Content -LiteralPath $p -Value '1' -Encoding Ascii
+  } else {
+    Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+    [void](Set-DesktopAppAutostart $false)
+  }
+}
+
 function Test-DesktopAppAutostart {
   Test-Path -LiteralPath (Get-DesktopAppStartupShortcutPath)
 }
@@ -2691,13 +2718,13 @@ function Install-DuendeeDesktopApp([string]$AppDir, [switch]$ForceRebuild) {
     Write-UiLine "  $RED   Kurulum sonrası DuendeeFM.exe bulunamadı.$RST"
     return $null
   }
-  $deskLnk = Get-DesktopAppDesktopShortcutPath
-  if (Set-DesktopAppShortcut -ExePath $exe -LnkPath $deskLnk) {
-    Write-UiLine "  $GRN   Masaüstü kısayolu: $deskLnk$RST"
-  } else {
-    Write-UiLine "  $YEL   Masaüstü kısayolu oluşturulamadı.$RST"
-  }
-  if (Test-DesktopAppAutostart) {
+  if (Test-DesktopAppWanted) {
+    $deskLnk = Get-DesktopAppDesktopShortcutPath
+    if (Set-DesktopAppShortcut -ExePath $exe -LnkPath $deskLnk) {
+      Write-UiLine "  $GRN   Masaüstü kısayolu: $deskLnk$RST"
+    } else {
+      Write-UiLine "  $YEL   Masaüstü kısayolu oluşturulamadı.$RST"
+    }
     [void](Set-DesktopAppAutostart $true)
   }
   Write-UiLine "  $GRN   DuendeeFM kuruldu: $exe$RST"
@@ -2705,7 +2732,29 @@ function Install-DuendeeDesktopApp([string]$AppDir, [switch]$ForceRebuild) {
 }
 
 function Start-DuendeeDesktopApp([string]$AppDir, [string]$TunnelUrl) {
-  $exe = Install-DuendeeDesktopApp -AppDir $AppDir
+  # Pack after tunnel is up (not from [5] menu). Rebuild when missing or sources newer.
+  $force = $false
+  $existing = Get-DesktopAppExe
+  if ($existing) {
+    foreach ($src in @(
+        (Join-Path $AppDir 'www\sync-meta.json'),
+        (Join-Path $AppDir 'electron\main.cjs'),
+        (Join-Path $AppDir 'package.json')
+      )) {
+      if (-not (Test-Path -LiteralPath $src)) { continue }
+      try {
+        if ((Get-Item -LiteralPath $src).LastWriteTimeUtc -gt (Get-Item -LiteralPath $existing).LastWriteTimeUtc) {
+          $force = $true
+          break
+        }
+      } catch {}
+    }
+  }
+  $exe = Install-DuendeeDesktopApp -AppDir $AppDir -ForceRebuild:$force
+  if ($exe -and (Test-DesktopAppWanted)) {
+    [void](Set-DesktopAppShortcut -ExePath $exe -LnkPath (Get-DesktopAppDesktopShortcutPath))
+    [void](Set-DesktopAppAutostart $true)
+  }
   if ($exe) {
     Write-UiLine "  $GRN   Masaüstü app (DuendeeFM) açılıyor...$RST"
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -2816,9 +2865,9 @@ function Invoke-Autostart {
     'tunnel' { Write-UiLine "  $DIM   Tool:$RST $GRN$BOLD[TOOL+TÜNEL]$RST" }
     default { Write-UiLine "  $DIM   Tool:$RST $RED$BOLD[KAPALI]$RST" }
   }
-  $appAuto = Test-DesktopAppAutostart
-  if ($appAuto) {
-    Write-UiLine "  $DIM   Masaüstü App:$RST $GRN$BOLD[BAŞLANGIÇTA]$RST"
+  $appWanted = Test-DesktopAppWanted
+  if ($appWanted) {
+    Write-UiLine "  $DIM   Masaüstü App:$RST $GRN$BOLD[BAŞLANGIÇTA+KISAYOL]$RST"
   } else {
     Write-UiLine "  $DIM   Masaüstü App:$RST $RED$BOLD[KAPALI]$RST"
   }
@@ -2827,74 +2876,38 @@ function Invoke-Autostart {
   Write-UiLine ''
   Write-UiLine "  [T]  Yalnızca tool'u otomatik başlat"
   Write-UiLine "  [S]  Tool'u ve tünel servisini otomatik başlat"
-  Write-UiLine "  [A]  Masaüstü App (DuendeeFM) başlangıç uygulamalarına ekle/çıkar"
-  Write-UiLine "  [D]  Masaüstü App'i kalıcı derle + masaüstü kısayolu"
+  Write-UiLine "  [A]  Masaüstü App: kalıcı kurulum + masaüstü kısayolu + başlangıç$(if ($appWanted) { "  $GRN[AÇIK]$RST" } else { '' })"
+  Write-UiLine "  $DIM       (Derleme [1] tünel açılınca yapılır)$RST"
   Write-UiLine ''
   Write-UiLine "  $DIM--- Derleme/Başlatma Tipi ---$RST"
   Write-UiLine "  [1]  Tarayıcı$(if ($launch -eq 'browser') { "  $GRN[SEÇİLİ]$RST" } else { '' })"
   Write-UiLine "  [2]  Masaüstü App$(if ($launch -eq 'desktop') { "  $GRN[SEÇİLİ]$RST" } else { '' })"
   Write-UiLine "  [3]  Mobil App$(if ($launch -eq 'mobile') { "  $GRN[SEÇİLİ]$RST" } else { '' })"
   Write-UiLine "  [4]  Hepsi$(if ($launch -eq 'all') { "  $GRN[SEÇİLİ]$RST" } else { '' })"
-  if ($mode -ne 'off' -or $appAuto) {
+  if ($mode -ne 'off' -or $appWanted) {
     Write-UiLine "  [K]  Tool otomatik başlatmayı kapat"
   }
   Write-UiLine "  $DIM$BOLD[X]$RST  ${DIM}Geri dön$RST"
   Write-UiLine ''
-  $choices = if ($mode -ne 'off' -or $appAuto) { 'TSAD1234KX' } else { 'TSAD1234X' }
+  $choices = if ($mode -ne 'off' -or $appWanted) { 'TSA1234KX' } else { 'TSA1234X' }
   Write-Ui "$DIM   Seçim: $RST"
   $c = Get-Choice $choices
   Write-UiLine ''
   if ($c -eq 'X') { return }
-  if ($c -eq 'D') {
-    $appPath = $AppPath
-    if ([string]::IsNullOrWhiteSpace($appPath) -or -not (Test-LooksLikeDuendeeApp $appPath)) {
-      $appPath = Resolve-DuendeeAppPath -Preferred $AppPath -Project $Project
-    }
-    if (-not (Test-LooksLikeDuendeeApp $appPath)) {
-      Write-UiLine "  $YEL   Duendee-app bulunamadı.$RST"
-      Complete-Action
-      return
-    }
-    $script:AppPath = $appPath
-    [void](Update-GitRepoSafe $appPath 'Duendee-app')
-    $exe = Install-DuendeeDesktopApp -AppDir $appPath -ForceRebuild
-    if ($exe) {
-      Write-UiLine "  $GRN   Kalıcı DuendeeFM hazır. Masaüstü kısayolu güncellendi.$RST"
-    }
-    Complete-Action
-    return
-  }
   if ($c -eq 'A') {
-    if ($appAuto) {
-      if (Set-DesktopAppAutostart $false) {
-        Write-UiLine "  $RED   DuendeeFM başlangıç uygulamalarından çıkarıldı.$RST"
-      } else {
-        Write-UiLine "  $RED$BOLD[HATA]$RST Başlangıç kaydı kaldırılamadı."
-      }
-      Complete-Action
-      return
-    }
-    $appPath = $AppPath
-    if ([string]::IsNullOrWhiteSpace($appPath) -or -not (Test-LooksLikeDuendeeApp $appPath)) {
-      $appPath = Resolve-DuendeeAppPath -Preferred $AppPath -Project $Project
-    }
-    if (-not (Test-LooksLikeDuendeeApp $appPath)) {
-      Write-UiLine "  $YEL   Duendee-app bulunamadı.$RST"
-      Complete-Action
-      return
-    }
-    $script:AppPath = $appPath
-    [void](Update-GitRepoSafe $appPath 'Duendee-app')
-    $exe = Install-DuendeeDesktopApp -AppDir $appPath
-    if (-not $exe) {
-      Complete-Action
-      return
-    }
-    if (Set-DesktopAppAutostart $true) {
-      Write-UiLine "  $GRN   DuendeeFM başlangıç uygulamalarına eklendi.$RST"
-      Write-UiLine "  $DIM   Kayıt: $(Get-DesktopAppStartupShortcutPath)$RST"
+    if ($appWanted) {
+      Set-DesktopAppWanted $false
+      Write-UiLine "  $RED   DuendeeFM başlangıç/kısayol tercihi kapatıldı.$RST"
+      Write-UiLine "  $DIM   (Mevcut masaüstü kısayolu duruyor; başlangıç kaydı silindi.)$RST"
     } else {
-      Write-UiLine "  $RED$BOLD[HATA]$RST Başlangıç kaydı yazılamadı."
+      Set-DesktopAppWanted $true
+      Write-UiLine "  $GRN   DuendeeFM: tünel [1] açılınca kalıcı derlenecek, kısayol + başlangıç eklenecek.$RST"
+      if (Get-DesktopAppExe) {
+        $exe = Get-DesktopAppExe
+        [void](Set-DesktopAppShortcut -ExePath $exe -LnkPath (Get-DesktopAppDesktopShortcutPath))
+        [void](Set-DesktopAppAutostart $true)
+        Write-UiLine "  $DIM   Mevcut kurulum bulundu; kısayol ve başlangıç şimdi güncellendi.$RST"
+      }
     }
     Complete-Action
     return
@@ -2913,14 +2926,7 @@ function Invoke-Autostart {
       Write-UiLine "  $GRN   Derleme/Başlatma Tipi: $(Get-LaunchTypeLabel $next)$RST"
       Write-UiLine "  $DIM   Tünel her başlatıldığında bu seçim uygulanacak.$RST"
       if ($next -eq 'desktop' -or $next -eq 'all') {
-        $appPath = $AppPath
-        if ([string]::IsNullOrWhiteSpace($appPath) -or -not (Test-LooksLikeDuendeeApp $appPath)) {
-          $appPath = Resolve-DuendeeAppPath -Preferred $AppPath -Project $Project
-        }
-        if (Test-LooksLikeDuendeeApp $appPath) {
-          $script:AppPath = $appPath
-          [void](Install-DuendeeDesktopApp -AppDir $appPath)
-        }
+        Write-UiLine "  $DIM   Kalıcı app derlemesi tünel [1] açılınca yapılır.$RST"
       }
     }
     Complete-Action
