@@ -618,6 +618,7 @@ $UrlFile = Join-Path $StateDir 'tunnel.url'
 $LogFile = Join-Path $StateDir 'tunnel.log'
 $OutLogFile = Join-Path $StateDir 'tunnel.out.log'
 $ServerPidFile = Join-Path $StateDir 'server.pid'
+$DesktopAppPidFile = Join-Path $StateDir 'desktop-app.pid'
 if (-not $script:UninstallCli -and -not (Test-Path -LiteralPath $StateDir)) {
   New-Item -ItemType Directory -Path $StateDir | Out-Null
 }
@@ -989,6 +990,45 @@ function Start-HiddenDetached([string]$CommandLine) {
   $line = 'CreateObject("Wscript.Shell").Run "' + $escaped + '", 0, False'
   [System.IO.File]::WriteAllText($vbs, $line)
   return Start-DetachedCommand -CommandLine "wscript.exe //B //Nologo `"$vbs`""
+}
+
+function Start-DetachedGuiWithEnv([string]$FileName, [string]$WorkingDirectory, [hashtable]$Environment) {
+  # Same breakaway path as cloudflared: survive tool terminal close; [4] stops it.
+  if ([string]::IsNullOrWhiteSpace($FileName) -or -not (Test-Path -LiteralPath $FileName)) { return $null }
+  $wd = if ($WorkingDirectory) { $WorkingDirectory } else { Split-Path -Parent $FileName }
+  $parts = New-Object System.Collections.Generic.List[string]
+  if ($Environment) {
+    foreach ($key in $Environment.Keys) {
+      $val = [string]$Environment[$key]
+      $val = $val.Replace("'", "''")
+      [void]$parts.Add("`$env:$key='$val'")
+    }
+  }
+  $exeLit = $FileName.Replace("'", "''")
+  $wdLit = $wd.Replace("'", "''")
+  [void]$parts.Add("Start-Process -FilePath '$exeLit' -WorkingDirectory '$wdLit'")
+  $script = ($parts -join '; ')
+  $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
+  $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  $launcher = Start-HiddenCmd "`"$ps`" -NoProfile -WindowStyle Hidden -EncodedCommand $b64"
+  $deadline = [datetime]::UtcNow.AddSeconds(8)
+  $leaf = [IO.Path]::GetFileNameWithoutExtension($FileName)
+  while ([datetime]::UtcNow -lt $deadline) {
+    Start-Sleep -Milliseconds 250
+    $hit = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+      Where-Object {
+        $ep = [string]$_.ExecutablePath
+        if ($ep -and ($ep -ieq $FileName)) { return $true }
+        $n = [string]$_.Name
+        return ($n -ieq "$leaf.exe")
+      } |
+      Select-Object -First 1
+    if ($hit -and $hit.ProcessId) {
+      return [int]$hit.ProcessId
+    }
+  }
+  if ($launcher -and $launcher.Id) { return [int]$launcher.Id }
+  return $null
 }
 
 $script:ToolJobHandle = [IntPtr]::Zero
@@ -1621,6 +1661,7 @@ function Stop-TunnelAndDevServer {
     Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue
   }
   Stop-DevServer
+  Remove-DuendeeDesktopAppInstall
 }
 
 function Stop-AllToolProcesses {
@@ -1636,6 +1677,7 @@ function Stop-AllToolProcesses {
   }
   Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object { Stop-ProcessTree $_.Id }
   Stop-DevServer
+  Remove-DuendeeDesktopAppInstall
   Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue
   Get-Process PhotosApp -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath (Join-Path $env:TEMP 'duendee-whatsapp-qr.png') -Force -ErrorAction SilentlyContinue
@@ -2288,6 +2330,7 @@ function Invoke-Cancel {
   Set-Content -LiteralPath (Join-Path $StateDir 'manual-stop') -Value '1' -Encoding Ascii
   Stop-TunnelOnly
   Stop-DevServer
+  Remove-DuendeeDesktopAppInstall
   $fleetRole = "$(Invoke-Fleet role)".Trim()
   if ($fleetRole -eq 'other') {
     Write-UiLine "  ${RED}   Aktif tünel kapatılıyor...$RST"
@@ -2731,6 +2774,68 @@ function Install-DuendeeDesktopApp([string]$AppDir, [switch]$ForceRebuild) {
   return $exe
 }
 
+function Write-DesktopAppPid([int]$ProcessId) {
+  if ($ProcessId -le 0) { return }
+  if (-not (Test-Path -LiteralPath $StateDir)) {
+    New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+  }
+  Set-Content -LiteralPath $DesktopAppPidFile -Value $ProcessId -Encoding Ascii
+}
+
+function Read-DesktopAppPid {
+  if (-not (Test-Path -LiteralPath $DesktopAppPidFile)) { return $null }
+  $raw = ("$(Get-Content -LiteralPath $DesktopAppPidFile -TotalCount 1 -ErrorAction SilentlyContinue)").Trim()
+  $n = 0
+  if ([int]::TryParse($raw, [ref]$n) -and $n -gt 0) { return $n }
+  return $null
+}
+
+function Stop-DuendeeDesktopAppProcesses {
+  $stopped = $false
+  $pidSaved = Read-DesktopAppPid
+  if ($pidSaved -and (Test-PidAlive $pidSaved)) {
+    Stop-ProcessTree $pidSaved
+    $stopped = $true
+  }
+  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $n = [string]$_.Name
+    $ep = [string]$_.ExecutablePath
+    ($n -ieq 'DuendeeFM.exe') -or ($ep -match '(?i)\\DuendeeFM(\\|$)') -or ($ep -match '(?i)\\DuendeeFM\.exe$')
+  } | ForEach-Object {
+    if ($_.ProcessId) {
+      Stop-ProcessTree ([int]$_.ProcessId)
+      $stopped = $true
+    }
+  }
+  # Dev fallback: electron launched from Duendee-app for tunnel mode
+  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $cmd = [string]$_.CommandLine
+    $cmd -match '(?i)electron' -and $cmd -match '(?i)Duendee-app' -and $cmd -match '(?i)electron:(tunnel|local|dev)?'
+  } | ForEach-Object {
+    if ($_.ProcessId) {
+      Stop-ProcessTree ([int]$_.ProcessId)
+      $stopped = $true
+    }
+  }
+  Remove-Item -LiteralPath $DesktopAppPidFile -Force -ErrorAction SilentlyContinue
+  return $stopped
+}
+
+function Remove-DuendeeDesktopAppInstall {
+  # Tunnel cancel [4]: close app and delete permanent install + shortcuts (like stopping the tunnel).
+  $had = Stop-DuendeeDesktopAppProcesses
+  $dest = Get-DesktopAppInstallDir
+  if (Test-Path -LiteralPath $dest) {
+    Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue
+    $had = $true
+  }
+  Remove-Item -LiteralPath (Get-DesktopAppDesktopShortcutPath) -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath (Get-DesktopAppStartupShortcutPath) -Force -ErrorAction SilentlyContinue
+  if ($had) {
+    Write-UiLine "  $DIM   DuendeeFM masaüstü app kapatıldı ve kurulum silindi.$RST"
+  }
+}
+
 function Start-DuendeeDesktopApp([string]$AppDir, [string]$TunnelUrl) {
   # Pack after tunnel is up (not from [5] menu). Rebuild when missing or sources newer.
   $force = $false
@@ -2756,40 +2861,48 @@ function Start-DuendeeDesktopApp([string]$AppDir, [string]$TunnelUrl) {
     [void](Set-DesktopAppAutostart $true)
   }
   if ($exe) {
-    Write-UiLine "  $GRN   Masaüstü app (DuendeeFM) açılıyor...$RST"
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $exe
-    $psi.WorkingDirectory = (Split-Path -Parent $exe)
-    $psi.UseShellExecute = $false
-    try {
-      if ($TunnelUrl) {
-        $psi.EnvironmentVariables['DUENDEE_TUNNEL_URL'] = $TunnelUrl
-        $psi.EnvironmentVariables['DUENDEE_START_MODE'] = 'tunnel'
-      } else {
-        $psi.EnvironmentVariables['DUENDEE_START_MODE'] = 'local'
-      }
-      [void][System.Diagnostics.Process]::Start($psi)
-      return $true
-    } catch {
-      Write-UiLine "  $RED   DuendeeFM başlatılamadı: $($_.Exception.Message)$RST"
+    Write-UiLine "  $GRN   Masaüstü app (DuendeeFM) açılıyor (tool terminalinden bağımsız)...$RST"
+    $envMap = @{ DUENDEE_START_MODE = 'local' }
+    if ($TunnelUrl) {
+      $envMap['DUENDEE_TUNNEL_URL'] = $TunnelUrl
+      $envMap['DUENDEE_START_MODE'] = 'tunnel'
     }
+    $appPid = Start-DetachedGuiWithEnv -FileName $exe -WorkingDirectory (Split-Path -Parent $exe) -Environment $envMap
+    if ($appPid) {
+      Write-DesktopAppPid $appPid
+      return $true
+    }
+    Write-UiLine "  $RED   DuendeeFM başlatılamadı (detached).$RST"
   }
   Write-UiLine "  $YEL   Kalıcı paket yok/başarısız; geliştirme Electron deneniyor...$RST"
-  $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = 'cmd.exe'
-  $psi.Arguments = '/c npm run electron:tunnel'
-  $psi.WorkingDirectory = $AppDir
-  $psi.UseShellExecute = $false
-  $psi.CreateNoWindow = $false
-  try {
-    $psi.EnvironmentVariables['DUENDEE_TUNNEL_URL'] = $TunnelUrl
-    $psi.EnvironmentVariables['DUENDEE_START_MODE'] = 'tunnel'
-    [void][System.Diagnostics.Process]::Start($psi)
-    return $true
-  } catch {
-    Write-UiLine "  $RED   Electron başlatılamadı: $($_.Exception.Message)$RST"
+  $npmCmd = (Get-Command npm.cmd -ErrorAction SilentlyContinue)
+  if (-not $npmCmd) { $npmCmd = Get-Command npm -ErrorAction SilentlyContinue }
+  if (-not $npmCmd) {
+    Write-UiLine "  $RED   npm bulunamadı.$RST"
     return $false
   }
+  $envMap = @{
+    DUENDEE_TUNNEL_URL = "$TunnelUrl"
+    DUENDEE_START_MODE = 'tunnel'
+  }
+  $parts = New-Object System.Collections.Generic.List[string]
+  foreach ($key in $envMap.Keys) {
+    $val = ([string]$envMap[$key]).Replace("'", "''")
+    [void]$parts.Add("`$env:$key='$val'")
+  }
+  $wdLit = $AppDir.Replace("'", "''")
+  [void]$parts.Add("Set-Location -LiteralPath '$wdLit'")
+  [void]$parts.Add("npm run electron:tunnel")
+  $script = ($parts -join '; ')
+  $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
+  $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  $launcher = Start-HiddenCmd "`"$ps`" -NoProfile -WindowStyle Hidden -EncodedCommand $b64"
+  if ($launcher -and $launcher.Id) {
+    Write-DesktopAppPid ([int]$launcher.Id)
+    return $true
+  }
+  Write-UiLine "  $RED   Electron başlatılamadı.$RST"
+  return $false
 }
 
 function Start-CompanionApps([string]$TunnelUrl) {

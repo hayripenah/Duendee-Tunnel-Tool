@@ -15,6 +15,7 @@ URL_FILE="${STATE}/tunnel.url"
 LOG="${STATE}/tunnel.log"
 OUT_LOG="${STATE}/tunnel.out.log"
 SERVER_PID="${STATE}/server.pid"
+DESKTOP_APP_PID="${STATE}/desktop-app.pid"
 WHATSAPP_JS="${ROOT}/scripts/send-whatsapp.js"
 # XDG autostart mirrors Windows HKCU\...\Run (opens tool on graphical login).
 AUTO_DESKTOP_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
@@ -1345,8 +1346,43 @@ set_desktop_app_autostart() {
   write_duendeefm_desktop_entry "$exe" "$(desktop_app_autostart_file)" 1
 }
 
+stop_duendee_desktop_app_processes() {
+  local pid="" stopped=0
+  if [[ -f "$DESKTOP_APP_PID" ]]; then
+    pid="$(tr -d '[:space:]' <"$DESKTOP_APP_PID" || true)"
+  fi
+  if [[ -n "$pid" ]] && pid_alive "$pid"; then
+    kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    sleep 0.2
+    kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    stopped=1
+  fi
+  pkill -f '/DuendeeFM( |$)' 2>/dev/null && stopped=1 || true
+  pkill -f 'DuendeeFM$' 2>/dev/null && stopped=1 || true
+  # Dev electron fallback from Duendee-app
+  pkill -f 'electron:tunnel' 2>/dev/null && stopped=1 || true
+  rm -f "$DESKTOP_APP_PID"
+  return 0
+}
+
+remove_duendee_desktop_app_install() {
+  # Tunnel cancel [4]: close app and delete permanent install + shortcuts.
+  local dest had=0
+  stop_duendee_desktop_app_processes
+  dest="$(desktop_app_install_dir)"
+  if [[ -d "$dest" ]]; then
+    rm -rf "$dest"
+    had=1
+  fi
+  rm -f "$(desktop_app_desktop_file)" "$(desktop_app_autostart_file)" \
+    "${HOME}/.local/share/applications/duendeefm.desktop" 2>/dev/null || true
+  if [[ "$had" -eq 1 ]]; then
+    echo -e "  ${DIM}   DuendeeFM masaüstü app kapatıldı ve kurulum silindi.${RST}"
+  fi
+}
+
 start_duendee_desktop_app() {
-  local app_dir="$1" url="${2:-}" exe force=0 existing src
+  local app_dir="$1" url="${2:-}" exe force=0 existing src app_pid=""
   if existing="$(desktop_app_exe 2>/dev/null)"; then
     for src in \
       "${app_dir}/www/sync-meta.json" \
@@ -1364,8 +1400,9 @@ start_duendee_desktop_app() {
     write_duendeefm_desktop_entry "$exe" "$(desktop_app_desktop_file)" 0
     set_desktop_app_autostart 1 || true
   fi
+  mkdir -p "$STATE"
   if [[ -n "$exe" && -x "$exe" ]]; then
-    echo -e "  ${GRN}   Masaüstü app (DuendeeFM) açılıyor...${RST}"
+    echo -e "  ${GRN}   Masaüstü app (DuendeeFM) açılıyor (tool terminalinden bağımsız)...${RST}"
     if command -v setsid >/dev/null 2>&1; then
       setsid nohup env DUENDEE_TUNNEL_URL="$url" DUENDEE_START_MODE=tunnel \
         "$exe" >>"${STATE}/app-desktop.log" 2>&1 </dev/null &
@@ -1373,7 +1410,9 @@ start_duendee_desktop_app() {
       nohup env DUENDEE_TUNNEL_URL="$url" DUENDEE_START_MODE=tunnel \
         "$exe" >>"${STATE}/app-desktop.log" 2>&1 </dev/null &
     fi
-    disown $! 2>/dev/null || true
+    app_pid=$!
+    echo "$app_pid" >"$DESKTOP_APP_PID"
+    disown "$app_pid" 2>/dev/null || true
     return 0
   fi
   echo -e "  ${YEL}   Kalıcı paket yok/başarısız; geliştirme Electron deneniyor...${RST}"
@@ -1384,7 +1423,9 @@ start_duendee_desktop_app() {
     nohup env DUENDEE_TUNNEL_URL="$url" DUENDEE_START_MODE=tunnel \
       npm --prefix "$app_dir" run electron:tunnel >>"${STATE}/app-desktop.log" 2>&1 </dev/null &
   fi
-  disown $! 2>/dev/null || true
+  app_pid=$!
+  echo "$app_pid" >"$DESKTOP_APP_PID"
+  disown "$app_pid" 2>/dev/null || true
 }
 
 start_companion_apps() {
@@ -1678,6 +1719,7 @@ kill_tunnel_and_server() {
     rm -f "$PID_FILE" "$URL_FILE"
   fi
   kill_dev_server
+  remove_duendee_desktop_app_install
 }
 
 kill_all() {
@@ -1698,6 +1740,7 @@ kill_all() {
   pkill -f "cloudflared tunnel --url" 2>/dev/null || true
   killall cloudflared 2>/dev/null || true
   kill_dev_server
+  remove_duendee_desktop_app_install
   rm -f "$PID_FILE" "$URL_FILE" "${TMPDIR:-/tmp}/duendee-whatsapp-qr.png"
 }
 
@@ -2503,6 +2546,7 @@ do_cancel() {
   printf '1\n' >"${STATE}/manual-stop"
   kill_tunnel
   kill_dev_server
+  remove_duendee_desktop_app_install
   local fleet_role="none"
   fleet_role="$(fleet_node role --root "$ROOT" 2>/dev/null || echo none)"
   if [[ "$fleet_role" == "other" ]]; then
