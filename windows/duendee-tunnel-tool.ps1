@@ -2479,8 +2479,8 @@ function Ensure-AndroidSdkEnv {
 
 function Write-NativeProcessLine([string]$Line) {
   if ([string]::IsNullOrWhiteSpace($Line)) { return }
-  # Deprecation notes are warnings — never surface as PowerShell NativeCommandError.
-  if ($Line -match '^(Note:|WARNING:)') {
+  # Deprecation notes / electron-builder progress are info — not failures (pack exitCode=0).
+  if ($Line -match '^(Note:|WARNING:)' -or $Line -match '^\s*[•·]' -or $Line -match '(?i)electron-builder|author is missed|duplicate dependency|no code signing|packaging\s+platform|downloaded\s+') {
     Write-UiLine ("  {0}{1}{2}" -f $DIM, $Line, $RST)
   } elseif ($Line -match '(?i)(error:|FAILED|What went wrong|Execution failed)') {
     Write-UiLine ("  {0}{1}{2}" -f $RED, $Line, $RST)
@@ -2862,10 +2862,10 @@ function Start-DuendeeDesktopApp([string]$AppDir, [string]$TunnelUrl) {
   }
   if ($exe) {
     Write-UiLine "  $GRN   Masaüstü app (DuendeeFM) açılıyor (tool terminalinden bağımsız)...$RST"
+    # Local packaged UI — tunnel URL as start page rendered empty/black in Electron.
     $envMap = @{ DUENDEE_START_MODE = 'local' }
     if ($TunnelUrl) {
       $envMap['DUENDEE_TUNNEL_URL'] = $TunnelUrl
-      $envMap['DUENDEE_START_MODE'] = 'tunnel'
     }
     $appPid = Start-DetachedGuiWithEnv -FileName $exe -WorkingDirectory (Split-Path -Parent $exe) -Environment $envMap
     if ($appPid) {
@@ -2883,7 +2883,7 @@ function Start-DuendeeDesktopApp([string]$AppDir, [string]$TunnelUrl) {
   }
   $envMap = @{
     DUENDEE_TUNNEL_URL = "$TunnelUrl"
-    DUENDEE_START_MODE = 'tunnel'
+    DUENDEE_START_MODE = 'local'
   }
   $parts = New-Object System.Collections.Generic.List[string]
   foreach ($key in $envMap.Keys) {
@@ -2892,7 +2892,7 @@ function Start-DuendeeDesktopApp([string]$AppDir, [string]$TunnelUrl) {
   }
   $wdLit = $AppDir.Replace("'", "''")
   [void]$parts.Add("Set-Location -LiteralPath '$wdLit'")
-  [void]$parts.Add("npm run electron:tunnel")
+  [void]$parts.Add("npm run electron:local")
   $script = ($parts -join '; ')
   $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
   $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'

@@ -1403,11 +1403,12 @@ start_duendee_desktop_app() {
   mkdir -p "$STATE"
   if [[ -n "$exe" && -x "$exe" ]]; then
     echo -e "  ${GRN}   Masaüstü app (DuendeeFM) açılıyor (tool terminalinden bağımsız)...${RST}"
+    # Local packaged UI — tunnel URL as start page renders empty/black in Electron.
     if command -v setsid >/dev/null 2>&1; then
-      setsid nohup env DUENDEE_TUNNEL_URL="$url" DUENDEE_START_MODE=tunnel \
+      setsid nohup env DUENDEE_TUNNEL_URL="$url" DUENDEE_START_MODE=local \
         "$exe" >>"${STATE}/app-desktop.log" 2>&1 </dev/null &
     else
-      nohup env DUENDEE_TUNNEL_URL="$url" DUENDEE_START_MODE=tunnel \
+      nohup env DUENDEE_TUNNEL_URL="$url" DUENDEE_START_MODE=local \
         "$exe" >>"${STATE}/app-desktop.log" 2>&1 </dev/null &
     fi
     app_pid=$!
@@ -1417,11 +1418,11 @@ start_duendee_desktop_app() {
   fi
   echo -e "  ${YEL}   Kalıcı paket yok/başarısız; geliştirme Electron deneniyor...${RST}"
   if command -v setsid >/dev/null 2>&1; then
-    setsid nohup env DUENDEE_TUNNEL_URL="$url" DUENDEE_START_MODE=tunnel \
-      npm --prefix "$app_dir" run electron:tunnel >>"${STATE}/app-desktop.log" 2>&1 </dev/null &
+    setsid nohup env DUENDEE_TUNNEL_URL="$url" DUENDEE_START_MODE=local \
+      npm --prefix "$app_dir" run electron:local >>"${STATE}/app-desktop.log" 2>&1 </dev/null &
   else
-    nohup env DUENDEE_TUNNEL_URL="$url" DUENDEE_START_MODE=tunnel \
-      npm --prefix "$app_dir" run electron:tunnel >>"${STATE}/app-desktop.log" 2>&1 </dev/null &
+    nohup env DUENDEE_TUNNEL_URL="$url" DUENDEE_START_MODE=local \
+      npm --prefix "$app_dir" run electron:local >>"${STATE}/app-desktop.log" 2>&1 </dev/null &
   fi
   app_pid=$!
   echo "$app_pid" >"$DESKTOP_APP_PID"
