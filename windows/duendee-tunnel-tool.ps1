@@ -996,6 +996,15 @@ function Format-ProductTunnelLine([string]$Url) {
   return "$name tüneli: $Url"
 }
 
+function Write-StatusRow([string]$Label, [string]$StatusColored, [string]$Extra = '') {
+  $pad = $Label.PadRight(16, '.')
+  if ([string]::IsNullOrWhiteSpace($Extra)) {
+    Write-UiLine ("  {0} {1}" -f $pad, $StatusColored)
+  } else {
+    Write-UiLine ("  {0} {1}  {2}" -f $pad, $StatusColored, $Extra)
+  }
+}
+
 function Send-TunnelWhatsApp([string]$PublicUrl) {
   $waJs = Join-Path $Root 'scripts\send-whatsapp.js'
   $waCfg = Join-Path $Root 'scripts\whatsapp-config.json'
@@ -1892,24 +1901,33 @@ function Stop-TunnelAndDevServer {
     Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue
   }
   Stop-DevServer
-  Remove-DuendeeDesktopAppInstall
+  # Desktop app belongs to DuendeeFM only — never tear it down from Duendee (main).
+  if ($script:ActiveProduct -eq 'fm') {
+    Remove-DuendeeDesktopAppInstall
+  }
+}
+
+function Stop-ProductRuntime {
+  # Stop only the currently bound product (state dir / port / project).
+  Stop-TunnelWatchdog
+  Stop-ProductCloudflared
+  Stop-DevServer
+  Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue
+  if ($script:ActiveProduct -eq 'fm') {
+    Remove-DuendeeDesktopAppInstall
+  }
 }
 
 function Stop-AllToolProcesses {
-  Stop-TunnelWatchdog
-  $tpid = Read-TunnelPid
-  if ($tpid -and (Test-PidAlive $tpid)) {
-    Stop-ProcessTree $tpid
-    Write-UiLine "  $RED   Tünel servisi durduruldu - PID $tpid.$RST"
-  } elseif ($tpid) {
-    Write-UiLine "  $DIM   PID $tpid zaten çalışmıyor.$RST"
-  } else {
-    Write-UiLine "  $DIM   Tanımlı çalışan tünel servisi yok.$RST"
+  # Uninstall / full shutdown: tear down BOTH products, without relying on unbound cloudflared kills mid-menu.
+  $prev = $script:ActiveProduct
+  foreach ($prod in @('fm', 'duendee')) {
+    try {
+      Bind-ProductState $prod
+      Stop-ProductRuntime
+    } catch {}
   }
-  Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object { Stop-ProcessTree $_.Id }
-  Stop-DevServer
-  Remove-DuendeeDesktopAppInstall
-  Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue
+  if ($prev) { Bind-ProductState $prev } else { Bind-ProductState 'fm' }
   Get-Process PhotosApp -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath (Join-Path $env:TEMP 'duendee-whatsapp-qr.png') -Force -ErrorAction SilentlyContinue
 }
@@ -2027,10 +2045,13 @@ function Invoke-Status {
   Write-UiLine ''
   Write-UiLine "$C2   --- Servis Durumu ---$RST"
   Write-UiLine ''
+  $productName = Get-ProductDisplayName
+  Write-StatusRow 'Ürün' $productName
+  Write-UiLine ''
   if (Test-PortListening $Port) {
-    Write-UiLine "  Dev Server ........ ${GRN}ÇALIŞIYOR$RST  -  http://localhost:$Port"
+    Write-StatusRow 'Dev Server' "${GRN}ÇALIŞIYOR$RST" "${BLUE}http://localhost:$Port$RST"
   } else {
-    Write-UiLine "  Dev Server ........ ${RED}KAPALI$RST"
+    Write-StatusRow 'Dev Server' "${RED}KAPALI$RST"
   }
   $running = Test-TunnelRunning
   if ($running) { Sync-CloudflaredPid }
@@ -2039,41 +2060,44 @@ function Invoke-Status {
   if (-not $localUrl -and $running) { $localUrl = Get-TunnelUrl }
   $publicOk = $false
   if ($localUrl) { $publicOk = Test-PublicUrlLive $localUrl }
-  if ($publicOk -and $script:ActiveProduct -ne 'duendee') {
+  # Fleet is DuendeeFM-only — never touch it from the Duendee (main) product menu.
+  if ($publicOk -and $script:ActiveProduct -eq 'fm') {
     $env:DT_FLEET_QUIET = '1'
     [void](Invoke-Fleet publish --url "$localUrl")
     Remove-Item Env:DT_FLEET_QUIET -ErrorAction SilentlyContinue
     Start-FleetHeartbeat
   }
   $fleetUrl = ''
-  if (-not $publicOk -and $script:ActiveProduct -ne 'duendee') {
+  if (-not $publicOk -and $script:ActiveProduct -eq 'fm') {
     $fleetUrl = "$(Invoke-Fleet show)".Trim()
     if ($script:FleetExit -ne 0) { $fleetUrl = '' }
   }
-  $url = if ($publicOk) { $localUrl } else { $fleetUrl }
-  $productName = Get-ProductDisplayName
-  Write-UiLine "  Ürün ............... $productName"
-  if ($running -and $localUrl) {
-    Write-UiLine "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR$RST"
-    Write-UiLine "  Yayın Linki ......... $(Format-ProductTunnelLine $localUrl)"
-    if (-not $publicOk) {
-      Write-UiLine "  $RED   Adres henüz dışarıdan yanıt vermiyor.$RST"
-    }
-  } elseif ($publicOk -or $fleetUrl) {
-    Write-UiLine "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR$RST"
-    Write-UiLine "  Yayın Linki ......... $(Format-ProductTunnelLine $url)"
-  } elseif ($running) {
-    Write-UiLine "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR$RST"
-    Write-UiLine "  $RED   Yayın linki okunamadı.$RST"
+  $url = if ($publicOk) { $localUrl } elseif ($fleetUrl) { $fleetUrl } else { $localUrl }
+  if ($running -or $publicOk -or $fleetUrl) {
+    Write-StatusRow 'Tünel Servisi' "${GRN}ÇALIŞIYOR$RST"
   } else {
-    Write-UiLine "  Tünel Servisi ..... ${RED}KAPALI$RST"
+    Write-StatusRow 'Tünel Servisi' "${RED}KAPALI$RST"
   }
   if ($running) {
     if (Test-TunnelWatchdogAlive) {
-      Write-UiLine "  Tünel Gözcüsü ..... ${GRN}ÇALIŞIYOR$RST"
+      Write-StatusRow 'Tünel Gözcüsü' "${GRN}ÇALIŞIYOR$RST"
     } else {
-      Write-UiLine "  Tünel Gözcüsü ..... ${RED}KAPALI$RST"
+      Write-StatusRow 'Tünel Gözcüsü' "${RED}KAPALI$RST"
     }
+  }
+  Write-UiLine ''
+  if ($url) {
+    Write-UiLine "  Yayın Linki"
+    Write-UiLine "  ${BLUE}$(Format-ProductTunnelLine $url)$RST"
+    if ($running -and $localUrl -and -not $publicOk -and -not $fleetUrl) {
+      Write-UiLine "  $RED   Adres henüz dışarıdan yanıt vermiyor.$RST"
+    }
+  } elseif ($running) {
+    Write-UiLine "  Yayın Linki"
+    Write-UiLine "  $RED   Yayın linki okunamadı.$RST"
+  } else {
+    Write-UiLine "  Yayın Linki"
+    Write-UiLine "  $DIM   (yok)$RST"
   }
   if (Test-Path -LiteralPath $LogFile) { Show-LogTail -Brief }
   Complete-Action
@@ -2323,10 +2347,11 @@ function Start-TunnelWatchdog {
   $cf = Find-Cloudflared
   if (-not $cf) { return }
   if (-not (Test-Path -LiteralPath $StateDir)) { New-Item -ItemType Directory -Force -Path $StateDir | Out-Null }
-  $cmd = "`"$node`" `"$js`" --root `"$Root`" --port $Port --cloudflared `"$cf`" --project `"$Project`""
+  $prod = if ($script:ActiveProduct) { $script:ActiveProduct } else { 'fm' }
+  $cmd = "`"$node`" `"$js`" --root `"$Root`" --state `"$StateDir`" --product $prod --port $Port --cloudflared `"$cf`" --project `"$Project`""
   if (Start-HiddenDetached -CommandLine $cmd) { return }
   Start-Process -FilePath $node -WindowStyle Hidden -ArgumentList @(
-    $js, '--root', $Root, '--port', "$Port", '--cloudflared', $cf, '--project', $Project
+    $js, '--root', $Root, '--state', $StateDir, '--product', $prod, '--port', "$Port", '--cloudflared', $cf, '--project', $Project
   ) | Out-Null
 }
 
@@ -2793,7 +2818,7 @@ function Invoke-Start {
     if (-not (Start-AppOrigin)) {
       Write-UiLine "  $RED   Uygulama açılamadı. Tünel duruyor ama sayfa erişilemeyebilir.$RST"
     }
-    $cfProc = @(Get-CloudflaredProcesses) | Select-Object -First 1
+    $cfProc = @(Get-ProductCloudflaredProcesses) | Select-Object -First 1
     if ($cfProc -and $cfProc.ProcessId) {
       Set-Content -LiteralPath $PidFile -Value $cfProc.ProcessId -Encoding Ascii
     }
@@ -2944,13 +2969,15 @@ function Invoke-Cancel {
   Set-Content -LiteralPath (Join-Path $StateDir 'manual-stop') -Value '1' -Encoding Ascii
   Stop-TunnelOnly
   Stop-DevServer
-  Remove-DuendeeDesktopAppInstall
-  $fleetRole = "$(Invoke-Fleet role)".Trim()
-  if ($fleetRole -eq 'other') {
-    Write-UiLine "  ${RED}   Aktif tünel kapatılıyor...$RST"
-    [void](Invoke-Fleet stop)
+  if ($script:ActiveProduct -eq 'fm') {
+    Remove-DuendeeDesktopAppInstall
+    $fleetRole = "$(Invoke-Fleet role)".Trim()
+    if ($fleetRole -eq 'other') {
+      Write-UiLine "  ${RED}   Aktif tünel kapatılıyor...$RST"
+      [void](Invoke-Fleet stop)
+    }
+    [void](Invoke-Fleet clear)
   }
-  [void](Invoke-Fleet clear)
   Invoke-RetractWhatsApp
   Write-UiLine "  $RED   Tünel kapatıldı.$RST"
   Complete-Action

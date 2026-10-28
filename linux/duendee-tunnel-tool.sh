@@ -8,14 +8,22 @@ export LC_ALL="${LC_ALL:-C.UTF-8}"
 OS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${OS_DIR}/.." && pwd)"
 TOOL="$OS_DIR"
-# Shared runtime (config, state, WhatsApp) lives at repo root.
-STATE="${ROOT}/.tunnelstate"
+# Shared WhatsApp lives at repo root; each product has its own tunnel state.
+STATE_FM="${ROOT}/.tunnelstate"
+STATE_DUENDEE="${ROOT}/.tunnelstate-duendee"
+STATE="${STATE_FM}"
 PID_FILE="${STATE}/tunnel.pid"
 URL_FILE="${STATE}/tunnel.url"
 LOG="${STATE}/tunnel.log"
 OUT_LOG="${STATE}/tunnel.out.log"
 SERVER_PID="${STATE}/server.pid"
 DESKTOP_APP_PID="${STATE}/desktop-app.pid"
+ACTIVE_PRODUCT=fm
+PRODUCT_NAME=DuendeeFM
+FM_PROJECT=""
+FM_PORT=8080
+DUENDEE_PROJECT=""
+DUENDEE_PORT=8081
 WHATSAPP_JS="${ROOT}/scripts/send-whatsapp.js"
 # XDG autostart mirrors Windows HKCU\...\Run (opens tool on graphical login).
 AUTO_DESKTOP_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
@@ -44,7 +52,32 @@ C4=$'\033[38;2;251;146;60m'
 C5=$'\033[38;2;167;139;250m'
 C6=$'\033[38;2;251;113;133m'
 
-mkdir -p "$STATE"
+mkdir -p "$STATE_FM" "$STATE_DUENDEE"
+
+bind_product_state() {
+  local product="${1:-fm}"
+  ACTIVE_PRODUCT="$product"
+  if [[ "$product" == "duendee" ]]; then
+    PRODUCT_NAME=Duendee
+    PROJECT="${DUENDEE_PROJECT:-$PROJECT}"
+    PORT="${DUENDEE_PORT:-8081}"
+    STATE="$STATE_DUENDEE"
+    APP_PATH=""
+  else
+    PRODUCT_NAME=DuendeeFM
+    PROJECT="${FM_PROJECT:-$PROJECT}"
+    PORT="${FM_PORT:-8080}"
+    STATE="$STATE_FM"
+  fi
+  PID_FILE="${STATE}/tunnel.pid"
+  URL_FILE="${STATE}/tunnel.url"
+  LOG="${STATE}/tunnel.log"
+  OUT_LOG="${STATE}/tunnel.out.log"
+  SERVER_PID="${STATE}/server.pid"
+  DESKTOP_APP_PID="${STATE}/desktop-app.pid"
+  mkdir -p "$STATE"
+  export PROJECT PORT STATE PID_FILE URL_FILE LOG OUT_LOG SERVER_PID DT_PRODUCT="$product"
+}
 
 die() {
   echo -e "  ${RED}${BOLD}[HATA]${RST} $*"
@@ -85,13 +118,20 @@ read_config_fields() {
     PROJECT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get("projectPath",""))' "$cfg")"
     PORT="$(python3 -c 'import json,sys; c=json.load(open(sys.argv[1],encoding="utf-8")); print(c.get("port") or 8080)' "$cfg")"
     APP_PATH="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get("appPath",""))' "$cfg")"
+    DUENDEE_PROJECT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get("duendeeProjectPath",""))' "$cfg")"
+    DUENDEE_PORT="$(python3 -c 'import json,sys; c=json.load(open(sys.argv[1],encoding="utf-8")); print(c.get("duendeePort") or 8081)' "$cfg")"
   elif command -v node >/dev/null 2>&1; then
     PROJECT="$(node -e 'const c=require(process.argv[1]); process.stdout.write(String(c.projectPath||""))' "$cfg")"
     PORT="$(node -e 'const c=require(process.argv[1]); process.stdout.write(String(c.port||8080))' "$cfg")"
     APP_PATH="$(node -e 'const c=require(process.argv[1]); process.stdout.write(String(c.appPath||""))' "$cfg")"
+    DUENDEE_PROJECT="$(node -e 'const c=require(process.argv[1]); process.stdout.write(String(c.duendeeProjectPath||""))' "$cfg")"
+    DUENDEE_PORT="$(node -e 'const c=require(process.argv[1]); process.stdout.write(String(c.duendeePort||8081))' "$cfg")"
   else
     die "config.json okumak için python3 veya node gerekli."
   fi
+  FM_PROJECT="$PROJECT"
+  FM_PORT="${PORT:-8080}"
+  DUENDEE_PORT="${DUENDEE_PORT:-8081}"
 }
 
 desktop_dir() {
@@ -616,9 +656,15 @@ load_config() {
   fi
   [[ -d "$PROJECT" ]] || die "projectPath bulunamadı: $PROJECT"
   PORT="${PORT:-8080}"
+  FM_PROJECT="$PROJECT"
+  FM_PORT="$PORT"
   if [[ -z "${APP_PATH:-}" || ! -d "${APP_PATH}" ]]; then
     APP_PATH="$(resolve_duendee_app_path "" 2>/dev/null || true)"
   fi
+  if [[ -n "${DT_NEO_DUENDEE_DIR:-}" && -d "${DT_NEO_DUENDEE_DIR}" ]]; then
+    DUENDEE_PROJECT="$(cd "${DT_NEO_DUENDEE_DIR}" && pwd)"
+  fi
+  bind_product_state fm
 }
 
 ensure_whatsapp_deps() {
@@ -1528,7 +1574,7 @@ start_tunnel_watchdog() {
   find_cloudflared >/dev/null 2>&1 || return 0
   [[ -n "${CF:-}" ]] || return 0
   mkdir -p "$STATE"
-  local args=("$js" --root "$ROOT" --port "$PORT" --cloudflared "$CF" --project "${PROJECT:-}")
+  local args=("$js" --root "$ROOT" --state "$STATE" --product "${ACTIVE_PRODUCT:-fm}" --port "$PORT" --cloudflared "$CF" --project "${PROJECT:-}")
   if command -v setsid >/dev/null 2>&1; then
     setsid nohup node "${args[@]}" >>"${STATE}/watchdog.out.log" 2>&1 </dev/null &
   else
@@ -1545,7 +1591,7 @@ pid_is_cloudflared() {
   [[ "$comm" == "cloudflared" ]]
 }
 
-cloudflared_pids() {
+cloudflared_pids_all() {
   local piddir pid comm argv0
   for piddir in /proc/[0-9]*; do
     pid="${piddir#/proc/}"
@@ -1560,6 +1606,26 @@ cloudflared_pids() {
       *cloudflared*) printf '%s\n' "$pid" ;;
     esac
   done
+}
+
+cloudflared_belongs_to_product() {
+  local pid="$1" cmd=""
+  cmd="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
+  [[ -n "$cmd" ]] || return 1
+  [[ "$cmd" == *"127.0.0.1:${PORT}"* ]] && return 0
+  [[ -n "$STATE" && "$cmd" == *"$STATE"* ]] && return 0
+  [[ -n "$LOG" && "$cmd" == *"$LOG"* ]] && return 0
+  [[ -n "$OUT_LOG" && "$cmd" == *"$OUT_LOG"* ]] && return 0
+  return 1
+}
+
+cloudflared_pids() {
+  # Product-scoped: only this menu's port / state dir.
+  local pid
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    cloudflared_belongs_to_product "$pid" && printf '%s\n' "$pid"
+  done < <(cloudflared_pids_all)
 }
 
 cloudflared_alive() {
@@ -1631,6 +1697,7 @@ link_already_sent() {
 }
 
 kill_tunnel() {
+  # Only this product's cloudflared — never killall (other product stays up).
   stop_tunnel_watchdog
   read_pid
   if [[ -n "${TPID:-}" ]]; then
@@ -1641,8 +1708,6 @@ kill_tunnel() {
       echo -e "  ${DIM}   Tünel durduruldu - PID ${TPID}.${RST}"
     fi
   fi
-  pkill -f "cloudflared tunnel --url" 2>/dev/null || true
-  killall cloudflared 2>/dev/null || true
   local cpid
   while IFS= read -r cpid; do
     [[ -n "$cpid" ]] || continue
@@ -1715,34 +1780,28 @@ kill_tunnel_and_server() {
     kill_tunnel
   else
     echo -e "  ${DIM}   Aktif tünel servisi yok.${RST}"
-    pkill -f "cloudflared tunnel --url" 2>/dev/null || true
-    killall cloudflared 2>/dev/null || true
-    rm -f "$PID_FILE" "$URL_FILE"
+    kill_tunnel
   fi
   kill_dev_server
-  remove_duendee_desktop_app_install
+  if [[ "$ACTIVE_PRODUCT" == "fm" ]]; then
+    remove_duendee_desktop_app_install
+  fi
 }
 
 kill_all() {
-  stop_tunnel_watchdog
-  read_pid
-  if [[ -n "${TPID:-}" ]]; then
-    if pid_alive "$TPID"; then
-      kill -TERM "-$TPID" 2>/dev/null || kill -TERM "$TPID" 2>/dev/null || true
-      sleep 0.3
-      kill -KILL "-$TPID" 2>/dev/null || kill -KILL "$TPID" 2>/dev/null || true
-      echo -e "  ${RED}   Tünel servisi durduruldu - PID ${TPID}.${RST}"
-    else
-      echo -e "  ${DIM}   PID ${TPID} zaten çalışmıyor.${RST}"
-    fi
-  else
-    echo -e "  ${DIM}   Tanımlı çalışan tünel servisi yok.${RST}"
-  fi
-  pkill -f "cloudflared tunnel --url" 2>/dev/null || true
-  killall cloudflared 2>/dev/null || true
+  # Uninstall: stop both products independently, then leftover cloudflared.
+  local prev="$ACTIVE_PRODUCT"
+  bind_product_state fm
+  kill_tunnel
   kill_dev_server
   remove_duendee_desktop_app_install
-  rm -f "$PID_FILE" "$URL_FILE" "${TMPDIR:-/tmp}/duendee-whatsapp-qr.png"
+  bind_product_state duendee
+  kill_tunnel
+  kill_dev_server
+  bind_product_state "${prev:-fm}"
+  pkill -f "cloudflared tunnel --url" 2>/dev/null || true
+  killall cloudflared 2>/dev/null || true
+  rm -f "${TMPDIR:-/tmp}/duendee-whatsapp-qr.png"
 }
 
 # Closing the tool terminal leaves the tunnel, the app origin, and the link message.
@@ -1829,7 +1888,12 @@ show_duendee_menu() {
   echo -e "${DIM}   ───────────────────────────────────────────────────────────${RST}"
   echo
   echo -e "  ${PURPLE}${BOLD}  Duendee${RST}  ${DIM}(Duendee-main · ayrı tünel)${RST}"
-  echo -e "  ${DIM}   Tam izole test tüneli Windows tool'da: [2] Duendee (otomatik branch)${RST}"
+  local path_label="${DUENDEE_PROJECT:-'(otomatik bulunamadı)'}"
+  echo -e "  ${DIM}   ${path_label}${RST}"
+  echo -e "  ${DIM}   port ${PORT}  ·  state .tunnelstate-duendee${RST}"
+  echo
+  echo "  [3]  Servis Durumunu Kontrol Et"
+  echo -e "  ${DIM}   (Başlat/iptal: Windows tool ile tam; Linux'ta durum bu ürüne özel)${RST}"
   echo
   echo -e "  ${DIM}${BOLD}[B]${RST}  ${DIM}Ürün menüsüne dön${RST}"
   echo
@@ -2474,17 +2538,31 @@ do_start() {
   wait_key
 }
 
+status_row() {
+  local label="$1" status="$2" extra="${3:-}"
+  local pad
+  pad="$(printf '%-16s' "${label}")"
+  pad="${pad// /.}"
+  if [[ -n "$extra" ]]; then
+    echo -e "  ${pad} ${status}  ${extra}"
+  else
+    echo -e "  ${pad} ${status}"
+  fi
+}
+
 do_status() {
   clear
   echo
   echo -e "${C2}   --- Servis Durumu ---${RST}"
   echo
+  status_row "Ürün" "${PRODUCT_NAME:-DuendeeFM}"
+  echo
   if port_listening "$PORT"; then
-    echo -e "  Dev Server ........ ${GRN}ÇALIŞIYOR${RST}  -  http://localhost:${PORT}"
+    status_row "Dev Server" "${GRN}ÇALIŞIYOR${RST}" "${BLUE}http://localhost:${PORT}${RST}"
   else
-    echo -e "  Dev Server ........ ${RED}KAPALI${RST}"
+    status_row "Dev Server" "${RED}KAPALI${RST}"
   fi
-  local fleet_url="" local_url="" running=0 public_ok=0 pub="000"
+  local fleet_url="" local_url="" running=0 public_ok=0 pub="000" show_url=""
   if tunnel_running; then
     running=1
     remember_cloudflared_pid
@@ -2498,37 +2576,46 @@ do_status() {
       fi
     fi
   fi
-  if [[ "$public_ok" -eq 1 ]]; then
-    DT_FLEET_QUIET=1 fleet_node publish --root "$ROOT" --url "$local_url" >/dev/null 2>&1 || true
-    start_fleet_heartbeat
-  else
-    fleet_url="$(fleet_node show --root "$ROOT" 2>/dev/null || true)"
-  fi
-  if [[ "$public_ok" -eq 1 || -n "$fleet_url" ]]; then
-    URL="${local_url:-$fleet_url}"
-    if [[ "$public_ok" -ne 1 ]]; then
-      URL="$fleet_url"
-    fi
-    echo -e "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR${RST}"
-    echo -e "  Yayın Linki ......... ${URL}"
-  elif [[ "$running" -eq 1 ]]; then
-    echo -e "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR${RST}"
-    if [[ -n "$local_url" ]]; then
-      echo -e "  Yayın Linki ......... ${local_url}"
-      echo -e "  ${RED}   Adres henüz dışarıdan yanıt vermiyor.${RST}"
+  # Fleet is DuendeeFM-only.
+  if [[ "$ACTIVE_PRODUCT" == "fm" ]]; then
+    if [[ "$public_ok" -eq 1 ]]; then
+      DT_FLEET_QUIET=1 fleet_node publish --root "$ROOT" --url "$local_url" >/dev/null 2>&1 || true
+      start_fleet_heartbeat
     else
-      echo -e "  ${RED}   Yayın linki okunamadı.${RST}"
+      fleet_url="$(fleet_node show --root "$ROOT" 2>/dev/null || true)"
     fi
+  fi
+  if [[ "$public_ok" -eq 1 ]]; then
+    show_url="$local_url"
+  elif [[ -n "$fleet_url" ]]; then
+    show_url="$fleet_url"
   else
-    echo -e "  Tünel Servisi ..... ${RED}KAPALI${RST}"
+    show_url="$local_url"
+  fi
+  if [[ "$running" -eq 1 || "$public_ok" -eq 1 || -n "$fleet_url" ]]; then
+    status_row "Tünel Servisi" "${GRN}ÇALIŞIYOR${RST}"
+  else
+    status_row "Tünel Servisi" "${RED}KAPALI${RST}"
   fi
   if [[ "$running" -eq 1 ]]; then
     watchdog_alive || start_tunnel_watchdog
     if watchdog_alive; then
-      echo -e "  Tünel Gözcüsü ..... ${GRN}ÇALIŞIYOR${RST}"
+      status_row "Tünel Gözcüsü" "${GRN}ÇALIŞIYOR${RST}"
     else
-      echo -e "  Tünel Gözcüsü ..... ${RED}KAPALI${RST}"
+      status_row "Tünel Gözcüsü" "${RED}KAPALI${RST}"
     fi
+  fi
+  echo
+  echo "  Yayın Linki"
+  if [[ -n "$show_url" ]]; then
+    echo -e "  ${BLUE}${PRODUCT_NAME} tüneli: ${show_url}${RST}"
+    if [[ "$running" -eq 1 && -n "$local_url" && "$public_ok" -ne 1 && -z "$fleet_url" ]]; then
+      echo -e "  ${RED}   Adres henüz dışarıdan yanıt vermiyor.${RST}"
+    fi
+  elif [[ "$running" -eq 1 ]]; then
+    echo -e "  ${RED}   Yayın linki okunamadı.${RST}"
+  else
+    echo -e "  ${DIM}   (yok)${RST}"
   fi
   if [[ -f "$LOG" ]]; then
     logtail brief
@@ -2593,14 +2680,16 @@ do_cancel() {
   printf '1\n' >"${STATE}/manual-stop"
   kill_tunnel
   kill_dev_server
-  remove_duendee_desktop_app_install
-  local fleet_role="none"
-  fleet_role="$(fleet_node role --root "$ROOT" 2>/dev/null || echo none)"
-  if [[ "$fleet_role" == "other" ]]; then
-    echo -e "  ${RED}   Aktif tünel kapatılıyor...${RST}"
-    fleet_node stop --root "$ROOT" >/dev/null 2>&1 || true
+  if [[ "$ACTIVE_PRODUCT" == "fm" ]]; then
+    remove_duendee_desktop_app_install
+    local fleet_role="none"
+    fleet_role="$(fleet_node role --root "$ROOT" 2>/dev/null || echo none)"
+    if [[ "$fleet_role" == "other" ]]; then
+      echo -e "  ${RED}   Aktif tünel kapatılıyor...${RST}"
+      fleet_node stop --root "$ROOT" >/dev/null 2>&1 || true
+    fi
+    fleet_node clear --root "$ROOT" >/dev/null 2>&1 || true
   fi
-  fleet_node clear --root "$ROOT" >/dev/null 2>&1 || true
   URL=""
   TUNNEL_URL=""
   PREV=""
@@ -3192,6 +3281,7 @@ while true; do
   case "$product" in
     [xX]) exit 0 ;;
     1)
+      bind_product_state fm
       while true; do
         show_menu
         read -r -n 1 choice
@@ -3209,12 +3299,14 @@ while true; do
       done
       ;;
     2)
+      bind_product_state duendee
       while true; do
         show_duendee_menu
         read -r -n 1 choice
         echo
         case "$choice" in
           [bB]) break ;;
+          3) do_status ;;
           *) ;;
         esac
       done

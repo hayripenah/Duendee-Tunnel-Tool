@@ -16,7 +16,8 @@
  *
  * Usage:
  *   node scripts/tunnel-watchdog.js --root <toolRoot> [--port 8080]
- *        [--cloudflared <path>] [--project <path>]
+ *        [--state <stateDir>] [--cloudflared <path>] [--project <path>]
+ *        [--product fm|duendee]
  *   node scripts/tunnel-watchdog.js --root <toolRoot> --check
  */
 
@@ -41,7 +42,12 @@ function flag(name) {
 }
 
 const toolRoot = path.resolve(arg('--root') || path.join(__dirname, '..'))
-const STATE = path.join(toolRoot, '.tunnelstate')
+const product = String(arg('--product') || process.env.DT_PRODUCT || 'fm').toLowerCase()
+const defaultState =
+  product === 'duendee'
+    ? path.join(toolRoot, '.tunnelstate-duendee')
+    : path.join(toolRoot, '.tunnelstate')
+const STATE = path.resolve(arg('--state') || defaultState)
 const URL_FILE = path.join(STATE, 'tunnel.url')
 const PID_FILE = path.join(STATE, 'tunnel.pid')
 const SERVER_PID_FILE = path.join(STATE, 'server.pid')
@@ -52,6 +58,7 @@ const RECOVER_LOCK = path.join(STATE, 'recover.lock')
 const TUNNEL_LOG = path.join(STATE, 'tunnel.log')
 const TUNNEL_OUT_LOG = path.join(STATE, 'tunnel.out.log')
 const WA_LOG = path.join(STATE, 'wa-watchdog.log')
+const FLEET_ENABLED = product !== 'duendee'
 
 // Last address written to the fleet record. Kept at module level so the
 // recovery path and the main loop share the same state.
@@ -446,6 +453,7 @@ function fleetRun(args, env = {}) {
 }
 
 function publishToFleet(url) {
+  if (!FLEET_ENABLED) return true
   const res = fleetRun(['publish', '--url', url], { DT_FLEET_QUIET: '1' })
   if (res.code === 0) {
     log('filo kaydı güncellendi');
