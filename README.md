@@ -62,9 +62,11 @@ The Windows tool opens with a product picker:
 | Key | Section | Purpose |
 |-----|---------|---------|
 | **1** | **DuendeeFM** | Existing publish/tunnel/app tools for **Duendee-fm** (unchanged options 1–6) |
-| **2** | **Duendee** | neo-3d test tunnel for **Duendee-main** / `Duendee.git` (port **8081** by default, branch **neo-3d**) |
+| **2** | **Duendee** | Isolated test tunnel for **Duendee-main** (port **8081**, purple banner, state `.tunnelstate-duendee`) |
 
-DuendeeFM and Duendee use separate state dirs (`.tunnelstate` vs `.tunnelstate-duendee`) so links/PIDs do not overwrite each other.
+DuendeeFM and Duendee use **separate** ports, state dirs, and cloudflared processes so starting/stopping one does not kill the other.
+
+**Duendee** auto-detects `Duendee-main`, fetches origin, and publishes the **newest remote branch** (by committer date). There is no manual path/port/branch menu.
 
 ### First-run projectPath (DuendeeFM)
 

@@ -1814,11 +1814,23 @@ show_menu() {
 
 show_duendee_menu() {
   clear
-  show_logo_banner
-  echo -e "  ${C5:-$CYN}${BOLD}  Duendee${RST}  ${DIM}(neo-3d test)${RST}"
-  echo -e "  ${DIM}   Windows tool has full neo-3d tunnel; Linux: set DT_NEO_DUENDEE_DIR and use FM-style start after pointing config.${RST}"
+  # Purple banner for Duendee-main section
+  local PURPLE="${C5:-$CYN}"
   echo
-  echo "  [1]  Test notu: Windows Tunnel Tool → [2] Duendee kullanın"
+  echo -e "${PURPLE}${BOLD}  ██████╗ ██╗   ██╗███████╗███╗   ██╗██████╗ ███████╗███████╗${RST}"
+  echo -e "${PURPLE}${BOLD}  ██╔══██╗██║   ██║██╔════╝████╗  ██║██╔══██╗██╔════╝██╔════╝${RST}"
+  echo -e "${PURPLE}${BOLD}  ██║  ██║██║   ██║█████╗  ██╔██╗ ██║██║  ██║█████╗  █████╗  ${RST}"
+  echo -e "${PURPLE}${BOLD}  ██║  ██║██║   ██║██╔══╝  ██║╚██╗██║██║  ██║██╔══╝  ██╔══╝  ${RST}"
+  echo -e "${PURPLE}${BOLD}  ██████╔╝╚██████╔╝███████╗██║ ╚████║██████╔╝███████╗███████╗${RST}"
+  echo -e "${PURPLE}${BOLD}  ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═══╝╚═════╝ ╚══════╝╚══════╝${RST}"
+  echo
+  echo -e "${DIM}   ───────────────────────────────────────────────────────────${RST}"
+  echo -e "${PURPLE}${BOLD}          D U E N D E E   T U N N E L   T O O L${RST}"
+  echo -e "${DIM}   ───────────────────────────────────────────────────────────${RST}"
+  echo
+  echo -e "  ${PURPLE}${BOLD}  Duendee${RST}  ${DIM}(Duendee-main · ayrı tünel)${RST}"
+  echo -e "  ${DIM}   Tam izole test tüneli Windows tool'da: [2] Duendee (otomatik branch)${RST}"
+  echo
   echo -e "  ${DIM}${BOLD}[B]${RST}  ${DIM}Ürün menüsüne dön${RST}"
   echo
   printf "%b" "${DIM}   Seçim: ${RST}"

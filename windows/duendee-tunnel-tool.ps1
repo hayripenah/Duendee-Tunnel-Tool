@@ -55,8 +55,10 @@ $Esc = [char]27
 $RST = "$Esc[0m"; $BOLD = "$Esc[1m"; $DIM = "$Esc[2m"
 $CYN = "$Esc[96m"; $YEL = "$Esc[93m"; $GRN = "$Esc[92m"; $RED = "$Esc[91m"
 $BLUE = "$Esc[38;2;59;130;246m"; $SKY = "$Esc[38;2;147;197;253m"
-# Claude Code–style warm salmon for the DUENDEE banner
+# Claude Code–style warm salmon for DuendeeFM / root banner
 $SALMON = "$Esc[38;2;232;113;90m"
+# Purple for Duendee (Duendee-main / neo) banner
+$PURPLE = "$Esc[38;2;167;139;250m"
 # One hue per menu action. Detail stays dim. Red is only for errors.
 $C1 = "$Esc[96m"
 $C2 = "$Esc[38;2;96;165;250m"
@@ -1460,13 +1462,44 @@ function Get-CloudflaredProcesses {
   return $list
 }
 
+function Test-CloudflaredBelongsToProduct([string]$CommandLine) {
+  if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $false }
+  $portNeedle = "127.0.0.1:$Port"
+  if ($CommandLine.IndexOf($portNeedle, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+  if ($StateDir -and $CommandLine.IndexOf($StateDir, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+  if ($LogFile -and $CommandLine.IndexOf($LogFile, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+  if ($OutLogFile -and $CommandLine.IndexOf($OutLogFile, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+  return $false
+}
+
+function Get-ProductCloudflaredProcesses {
+  $list = New-Object System.Collections.Generic.List[object]
+  foreach ($proc in @(Get-CloudflaredProcesses)) {
+    $cmd = [string]$proc.CommandLine
+    $parentLine = ''
+    if ($proc.ParentProcessId) {
+      $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($proc.ParentProcessId)" -ErrorAction SilentlyContinue
+      if ($parent) { $parentLine = [string]$parent.CommandLine }
+    }
+    $blob = $cmd + ' ' + $parentLine
+    if (Test-CloudflaredBelongsToProduct $blob) { [void]$list.Add($proc) }
+  }
+  return $list
+}
+
 function Test-CloudflaredAlive {
-  $found = @(Get-CloudflaredProcesses)
-  return ($found.Count -gt 0)
+  $found = @(Get-ProductCloudflaredProcesses)
+  if ($found.Count -gt 0) { return $true }
+  $tpid = Read-TunnelPid
+  if ($tpid -and (Test-PidAlive $tpid)) {
+    $name = (Get-Process -Id $tpid -ErrorAction SilentlyContinue).ProcessName
+    if ($name -eq 'cloudflared') { return $true }
+  }
+  return $false
 }
 
 function Sync-CloudflaredPid {
-  $proc = @(Get-CloudflaredProcesses) | Select-Object -First 1
+  $proc = @(Get-ProductCloudflaredProcesses) | Select-Object -First 1
   if ($proc -and $proc.ProcessId) {
     Set-Content -LiteralPath $PidFile -Value $proc.ProcessId -Encoding Ascii
   }
@@ -1480,7 +1513,7 @@ function Read-TryCloudflareUrl([string]$Text) {
 }
 
 function Recover-TunnelUrl {
-  foreach ($proc in @(Get-CloudflaredProcesses)) {
+  foreach ($proc in @(Get-ProductCloudflaredProcesses)) {
     $parentLine = ''
     if ($proc.ParentProcessId) {
       $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($proc.ParentProcessId)" -ErrorAction SilentlyContinue
@@ -1709,8 +1742,17 @@ function Test-TunnelDnsResolverFailed {
   return [bool](Select-String -LiteralPath $LogFile -Pattern 'Failed to initialize DNS local resolver|lookup region\d+\.v2\.argotunnel\.com: i/o timeout' -Quiet)
 }
 
+function Stop-ProductCloudflared {
+  $tpid = Read-TunnelPid
+  if ($tpid -and (Test-PidAlive $tpid)) { Stop-ProcessTree $tpid }
+  foreach ($proc in @(Get-ProductCloudflaredProcesses)) {
+    if ($proc.ProcessId) { Stop-ProcessTree $proc.ProcessId }
+  }
+}
+
 function Start-QuickTunnelOnce([string]$Cloudflared) {
-  Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  # Only stop this product's tunnel — never kill the other product's cloudflared.
+  Stop-ProductCloudflared
   Remove-Item -LiteralPath $UrlFile, $LogFile, $OutLogFile -Force -ErrorAction SilentlyContinue
   $target = "http://127.0.0.1:$Port"
   $argList = Get-CloudflaredTunnelArgs -Target $target
@@ -1790,20 +1832,19 @@ function Stop-TunnelOnly {
     Stop-ProcessTree $tpid
     Write-UiLine "  $DIM   Tünel durduruldu - PID $tpid.$RST"
   }
-  foreach ($proc in @(Get-CloudflaredProcesses)) {
+  foreach ($proc in @(Get-ProductCloudflaredProcesses)) {
     if ($proc.ProcessId) { Stop-ProcessTree $proc.ProcessId }
   }
-  Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object { Stop-ProcessTree $_.Id }
   Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue
 }
 
 function Stop-TunnelAndDevServer {
-  # Used by [4] cancel — stop tunnel + the tool-started dev server
+  # Used by [4] cancel — stop this product's tunnel + the tool-started dev server
   if (Test-TunnelRunning) {
     Stop-TunnelOnly
   } else {
     Write-UiLine "  $DIM   Aktif tünel servisi yok.$RST"
-    Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object { Stop-ProcessTree $_.Id }
+    Stop-ProductCloudflared
     Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue
   }
   Stop-DevServer
@@ -1829,8 +1870,14 @@ function Stop-AllToolProcesses {
   Remove-Item -LiteralPath (Join-Path $env:TEMP 'duendee-whatsapp-qr.png') -Force -ErrorAction SilentlyContinue
 }
 
+function Get-BannerColor {
+  if ($script:ActiveProduct -eq 'duendee') { return $PURPLE }
+  return $SALMON
+}
+
 function Show-Logo {
   # FIGlet "ANSI Shadow" — same layered block style as Claude Code
+  $hue = Get-BannerColor
   $rows = @(
     '██████╗ ██╗   ██╗███████╗███╗   ██╗██████╗ ███████╗███████╗',
     '██╔══██╗██║   ██║██╔════╝████╗  ██║██╔══██╗██╔════╝██╔════╝',
@@ -1841,11 +1888,11 @@ function Show-Logo {
   )
   Write-UiLine ''
   foreach ($r in $rows) {
-    Write-UiLine ("$SALMON$BOLD  $r$RST")
+    Write-UiLine ("$hue$BOLD  $r$RST")
   }
   Write-UiLine ''
   Write-UiLine "$DIM   ───────────────────────────────────────────────────────────$RST"
-  Write-UiLine "$SALMON$BOLD          D U E N D E E   T U N N E L   T O O L$RST"
+  Write-UiLine "$hue$BOLD          D U E N D E E   T U N N E L   T O O L$RST"
   Write-UiLine "$DIM   ───────────────────────────────────────────────────────────$RST"
   Write-UiLine ''
 }
@@ -1853,14 +1900,15 @@ function Show-Logo {
 function Show-RootMenu {
   Initialize-Utf8Console
   Clear-Host
+  $script:ActiveProduct = 'fm'
   Show-Logo
   Write-UiLine "  $BOLD  Ürün seçin$RST"
   Write-UiLine ''
   Write-UiLine "  [1]  DuendeeFM"
-  Write-UiLine "       $DIM   Mevcut yayın / tünel / app araçları (Duendee-fm)$RST"
+  Write-UiLine "       $DIM   Yayın / tünel / app (Duendee-fm · port $($script:FmPort))$RST"
   Write-UiLine ''
   Write-UiLine "  [2]  Duendee"
-  Write-UiLine "       $DIM   neo-3d test tüneli (Duendee-main)$RST"
+  Write-UiLine "       $DIM   Test tüneli (Duendee-main · port $($script:DuendeePort) · ayrı servis)$RST"
   Write-UiLine ''
   Write-UiLine "  $DIM$BOLD[X]$RST  ${DIM}Çıkış$RST"
   Write-UiLine ''
@@ -1875,6 +1923,7 @@ function Show-Menu {
   Show-Logo
   Write-UiLine "  $SALMON$BOLD  DuendeeFM$RST"
   Write-UiLine "  $DIM   $($script:FmProject)$RST"
+  Write-UiLine "  $DIM   port $($script:FmPort)  ·  state .tunnelstate$RST"
   Write-UiLine ''
   Write-UiLine "  [1]  Tünel Servisi Başlat"
   Write-UiLine "  [2]  Servis Durumunu Kontrol Et"
@@ -1901,17 +1950,17 @@ function Show-Menu {
 function Show-DuendeeMenu {
   Initialize-Utf8Console
   Clear-Host
+  [void](Ensure-NeoDuendeeAutoDetect)
   Show-Logo
-  Write-UiLine "  $C5$BOLD  Duendee$RST  $DIM(neo-3d test)$RST"
-  $pathLabel = if ($script:DuendeeProject) { $script:DuendeeProject } else { '(yol ayarlanmadı)' }
+  Write-UiLine "  $PURPLE$BOLD  Duendee$RST  $DIM(Duendee-main)$RST"
+  $pathLabel = if ($script:DuendeeProject) { $script:DuendeeProject } else { '(otomatik bulunamadı)' }
   Write-UiLine "  $DIM   $pathLabel$RST"
-  Write-UiLine "  $DIM   port $($script:DuendeePort)  ·  branch $($script:DuendeeBranch)$RST"
+  Write-UiLine "  $DIM   port $($script:DuendeePort)  ·  branch $($script:DuendeeBranch)  ·  state .tunnelstate-duendee$RST"
   Write-UiLine ''
   Write-UiLine "  [1]  Test Tüneli Başlat"
   Write-UiLine "  [2]  Servis Durumunu Kontrol Et"
   Write-UiLine "  [3]  Yayın Linkini Kopyala"
   Write-UiLine "  [4]  Test Tünelini İptal Et"
-  Write-UiLine "  [5]  Proje yolu / port / branch"
   Write-UiLine "  $DIM$BOLD[B]$RST  ${DIM}Ürün menüsüne dön$RST"
   Write-UiLine ''
   Write-Ui "$DIM   Seçim: $RST"
@@ -1941,14 +1990,14 @@ function Invoke-Status {
   if (-not $localUrl -and $running) { $localUrl = Get-TunnelUrl }
   $publicOk = $false
   if ($localUrl) { $publicOk = Test-PublicUrlLive $localUrl }
-  if ($publicOk) {
+  if ($publicOk -and $script:ActiveProduct -ne 'duendee') {
     $env:DT_FLEET_QUIET = '1'
     [void](Invoke-Fleet publish --url "$localUrl")
     Remove-Item Env:DT_FLEET_QUIET -ErrorAction SilentlyContinue
     Start-FleetHeartbeat
   }
   $fleetUrl = ''
-  if (-not $publicOk) {
+  if (-not $publicOk -and $script:ActiveProduct -ne 'duendee') {
     $fleetUrl = "$(Invoke-Fleet show)".Trim()
     if ($script:FleetExit -ne 0) { $fleetUrl = '' }
   }
@@ -1990,7 +2039,7 @@ function Invoke-CopyLink {
     Write-UiLine "  $YEL   Tünel adresi dışarıdan yanıt vermiyor. Gözcü yeni adres açıyor...$RST"
     Start-TunnelWatchdog
   }
-  if (-not $url) {
+  if (-not $url -and $script:ActiveProduct -ne 'duendee') {
     $remote = Invoke-Fleet show
     if ($script:FleetExit -eq 0) { $url = "$remote".Trim() }
   }
@@ -2299,13 +2348,35 @@ function Sync-DuendeeForPublish {
   return $true
 }
 
+function Resolve-NewestNeoDuendeeBranch([string]$Path) {
+  if (-not (Test-Path -LiteralPath (Join-Path $Path '.git'))) { return '' }
+  if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return '' }
+  $env:GIT_TERMINAL_PROMPT = '0'
+  try {
+    & git -C $Path fetch origin --prune 2>$null | Out-Null
+  } catch {}
+  try {
+    $refs = @(& git -C $Path for-each-ref --sort=-committerdate --format='%(refname:short)' refs/remotes/origin 2>$null)
+    foreach ($ref in $refs) {
+      $name = "$ref".Trim() -replace '^origin/', ''
+      if ([string]::IsNullOrWhiteSpace($name)) { continue }
+      if ($name -eq 'HEAD' -or $name -match 'HEAD') { continue }
+      return $name
+    }
+  } catch {}
+  try {
+    $cur = (& git -C $Path branch --show-current 2>$null)
+    if ($cur) { return "$cur".Trim() }
+  } catch {}
+  return 'main'
+}
+
 function Update-NeoDuendeeBranch([string]$Path, [string]$Branch) {
   if (-not (Test-Path -LiteralPath (Join-Path $Path '.git'))) { return $false }
   if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return $false }
   $env:GIT_TERMINAL_PROMPT = '0'
   try {
     & git -C $Path fetch origin --prune 2>$null | Out-Null
-    $local = (& git -C $Path rev-parse --verify $Branch 2>$null)
     $remote = (& git -C $Path rev-parse --verify "origin/$Branch" 2>$null)
     if ($remote) {
       & git -C $Path checkout $Branch 2>$null | Out-Null
@@ -2315,11 +2386,11 @@ function Update-NeoDuendeeBranch([string]$Path, [string]$Branch) {
       & git -C $Path pull --ff-only origin $Branch 2>$null | Out-Null
       return $true
     }
+    $local = (& git -C $Path rev-parse --verify $Branch 2>$null)
     if ($local) {
       & git -C $Path checkout $Branch 2>$null | Out-Null
       return ($LASTEXITCODE -eq 0)
     }
-    # Local-only neo-3d (not pushed yet): stay on it if already checked out
     $cur = (& git -C $Path branch --show-current 2>$null)
     if ($cur -eq $Branch) { return $true }
     & git -C $Path checkout $Branch 2>$null | Out-Null
@@ -2329,13 +2400,34 @@ function Update-NeoDuendeeBranch([string]$Path, [string]$Branch) {
   }
 }
 
+function Ensure-NeoDuendeeAutoDetect {
+  $script:DuendeePort = 8081
+  $found = @(Find-LocalNeoDuendeeRepos)
+  if ($found.Count -gt 0) {
+    $script:DuendeeProject = $found[0]
+  } elseif ($env:DT_NEO_DUENDEE_DIR -and (Test-Path -LiteralPath $env:DT_NEO_DUENDEE_DIR)) {
+    $script:DuendeeProject = (Resolve-Path -LiteralPath $env:DT_NEO_DUENDEE_DIR).Path
+  }
+  if ([string]::IsNullOrWhiteSpace($script:DuendeeProject) -or -not (Test-Path -LiteralPath $script:DuendeeProject)) {
+    $script:DuendeeBranch = '(bulunamadı)'
+    return $false
+  }
+  $newest = Resolve-NewestNeoDuendeeBranch $script:DuendeeProject
+  if ($newest) { $script:DuendeeBranch = $newest }
+  elseif (-not $script:DuendeeBranch) { $script:DuendeeBranch = 'main' }
+  Save-ToolConfig -ProjectPath $script:FmProject -PortNum $script:FmPort -AppPath $script:FmAppPath `
+    -DuendeeProjectPath $script:DuendeeProject -DuendeePortNum $script:DuendeePort -DuendeeBranch $script:DuendeeBranch
+  if ($script:ActiveProduct -eq 'duendee') { Bind-ProductState 'duendee' }
+  return $true
+}
+
 function Sync-NeoDuendeeForTest {
-  if ([string]::IsNullOrWhiteSpace($Project) -or -not (Test-Path -LiteralPath $Project)) {
-    Write-UiLine "  $RED$BOLD[HATA]$RST Duendee projectPath ayarlı değil. Menüden [5] ile yol seçin."
+  if (-not (Ensure-NeoDuendeeAutoDetect)) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST Duendee-main bulunamadı. Klasörü YEK\Cursor\Duendee-main olarak tutun."
     return $false
   }
   if (-not (Test-LooksLikeNeoDuendeeRepo $Project)) {
-    Write-UiLine "  $RED$BOLD[HATA]$RST Klasör Duendee (neo-3d) deposu değil: $Project"
+    Write-UiLine "  $RED$BOLD[HATA]$RST Klasör Duendee-main deposu değil: $Project"
     return $false
   }
   Stop-DevServer
@@ -2345,8 +2437,8 @@ function Sync-NeoDuendeeForTest {
     Write-UiLine "  $RED$BOLD[HATA]$RST $Port portu boşaltılamadı."
     return $false
   }
-  $branch = if ($script:DuendeeBranch) { $script:DuendeeBranch } else { 'neo-3d' }
-  Write-UiLine "  $DIM   Duendee neo branch hazırlanıyor ($branch)...$RST"
+  $branch = if ($script:DuendeeBranch) { $script:DuendeeBranch } else { 'main' }
+  Write-UiLine "  $DIM   En güncel Duendee branch hazırlanıyor ($branch)...$RST"
   $before = Get-DuendeeDepStamp $Project
   if (-not (Update-NeoDuendeeBranch -Path $Project -Branch $branch)) {
     Write-UiLine "  $YEL   Branch checkout/pull atlandı veya başarısız; mevcut working tree ile devam.$RST"
@@ -2369,61 +2461,64 @@ function Sync-NeoDuendeeForTest {
   return $true
 }
 
-function Invoke-ConfigureDuendeePath {
-  Clear-Host
-  Initialize-Utf8Console
-  Write-UiLine ''
-  Write-UiLine "$C5   --- Duendee (neo-3d) proje yolu ---$RST"
-  Write-UiLine ''
-  $found = @(Find-LocalNeoDuendeeRepos)
-  if ($found.Count -gt 0) {
-    for ($i = 0; $i -lt $found.Count; $i++) {
-      Write-UiLine ("  $DIM   [{0}] {1}$RST" -f ($i + 1), $found[$i])
-    }
-    Write-UiLine "  $DIM   Enter=[1]  numara  C=özel yol  B=klasör seç$RST"
-  } else {
-    Write-UiLine "  $YEL   Yerel Duendee-main bulunamadı.$RST"
-    Write-UiLine "  $DIM   C=özel yol  B=klasör seç$RST"
-  }
-  Write-Ui '  seçim> '
-  $choice = (Read-Host).Trim()
-  $picked = ''
-  if ([string]::IsNullOrWhiteSpace($choice) -and $found.Count -gt 0) {
-    $picked = $found[0]
-  } elseif ($choice -match '^\d+$' -and $found.Count -gt 0) {
-    $idx = [int]$choice - 1
-    if ($idx -ge 0 -and $idx -lt $found.Count) { $picked = $found[$idx] }
-  } elseif ($choice -match '^(?i)b$') {
-    $picked = Select-FolderBrowser 'Duendee (neo-3d) proje klasörünü seçin'
-  } elseif ($choice -match '^(?i)c$' -or $choice.Length -gt 1) {
-    if ($choice -match '^(?i)c$') {
-      Write-Ui '  yol> '
-      $picked = (Read-Host).Trim().Trim('"')
-    } else {
-      $picked = $choice.Trim('"')
-    }
-  }
-  if (-not $picked -or -not (Test-Path -LiteralPath $picked -PathType Container)) {
-    Write-UiLine "  $RED   Geçerli klasör seçilmedi.$RST"
+function Invoke-StartDuendeeIsolated {
+  # Separate from DuendeeFM fleet — own port, state dir, and cloudflared process.
+  $cf = Find-Cloudflared
+  if (-not $cf) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST cloudflared bulunamadı."
     Complete-Action
     return
   }
-  if (-not (Test-LooksLikeNeoDuendeeRepo $picked)) {
-    Write-UiLine "  $RED   Bu klasör Duendee neo deposu gibi görünmüyor.$RST"
+  Write-UiLine "  ${C5}[1]$RST cloudflared: $cf  $DIM(Duendee · port $Port)$RST"
+  $env:CF = $cf
+
+  if (Test-TunnelRunning) {
+    $existing = Recover-TunnelUrl
+    if (-not $existing) { $existing = Get-TunnelUrl }
+    if ($existing -and (Test-PublicUrlLive $existing)) {
+      Write-UiLine "  $GRN   Duendee test tüneli zaten çalışıyor.$RST"
+      Write-UiLine "  ${C5}[2]$RST En güncel Duendee-main yayına alınıyor..."
+      if (-not (Sync-NeoDuendeeForTest)) { Complete-Action; return }
+      if (-not (Start-AppOrigin)) {
+        Write-UiLine "  $RED   Uygulama açılamadı. Tünel duruyor ama sayfa erişilemeyebilir.$RST"
+      }
+      Set-Clipboard -Value $existing
+      Write-UiLine "       $existing"
+      try { Start-Process $existing | Out-Null } catch {}
+      Complete-Action
+      return
+    }
+    Write-UiLine "  $YEL   Eski Duendee tüneli yanıt vermiyor, yenisi açılıyor...$RST"
+    Stop-TunnelOnly
+  }
+
+  Write-UiLine "  ${C5}[2]$RST En güncel Duendee-main yayına alınıyor..."
+  if (-not (Sync-NeoDuendeeForTest)) { Complete-Action; return }
+  Write-UiLine "  ${C5}[3]$RST Uygulama başlatılıyor (port $Port)..."
+  if (-not (Start-AppOrigin)) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST Uygulama $Port portunda açılamadı."
+    Write-UiLine "  $DIM   Ayrıntı: $(Join-Path $StateDir 'server.out.log')$RST"
     Complete-Action
     return
   }
-  $script:DuendeeProject = (Resolve-Path -LiteralPath $picked).Path
-  Write-Ui ("  port [{0}]> " -f $script:DuendeePort)
-  $portIn = (Read-Host).Trim()
-  if ($portIn -match '^\d+$') { $script:DuendeePort = [int]$portIn }
-  Write-Ui ("  branch [{0}]> " -f $script:DuendeeBranch)
-  $brIn = (Read-Host).Trim()
-  if (-not [string]::IsNullOrWhiteSpace($brIn)) { $script:DuendeeBranch = $brIn }
-  Save-ToolConfig -ProjectPath $script:FmProject -PortNum $script:FmPort -AppPath $script:FmAppPath `
-    -DuendeeProjectPath $script:DuendeeProject -DuendeePortNum $script:DuendeePort -DuendeeBranch $script:DuendeeBranch
-  Bind-ProductState 'duendee'
-  Write-UiLine "  $GRN   Kaydedildi: $($script:DuendeeProject) :$($script:DuendeePort) [$($script:DuendeeBranch)]$RST"
+  Write-UiLine "  $DIM   Uygulama http://127.0.0.1:$Port hazır.$RST"
+  Write-UiLine "  ${C5}[4]$RST Duendee test tüneli açılıyor..."
+  $url = Start-QuickTunnelWithRetry -Cloudflared $cf -Attempts 3
+  if (-not $url -or (-not (Test-CloudflaredAlive) -and -not (Test-TunnelRegistered))) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST Tünel açılmadı."
+    Complete-Action
+    return
+  }
+  if ($url) {
+    $dir = Split-Path -Parent $UrlFile
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    [IO.File]::WriteAllText($UrlFile, $url)
+    Set-Clipboard -Value $url
+    Write-UiLine "       $url"
+    Write-UiLine "  $GRN   Link panoya kopyalandı.$RST"
+    try { Start-Process $url | Out-Null } catch {}
+  }
+  Start-TunnelWatchdog
   Complete-Action
 }
 
@@ -2434,6 +2529,12 @@ function Invoke-Start {
   Clear-Host
   Initialize-Utf8Console
   Write-UiLine ''
+  if ($script:ActiveProduct -eq 'duendee') {
+    Write-UiLine "$C5   --- Duendee test tüneli başlatılıyor ---$RST"
+    Write-UiLine ''
+    Invoke-StartDuendeeIsolated
+    return
+  }
   Write-UiLine "$C1   --- Tünel servisi başlatılıyor ---$RST"
   Write-UiLine ''
 
@@ -3881,15 +3982,17 @@ try {
     }
     if ($product -eq '2') {
       Bind-ProductState 'duendee'
+      [void](Ensure-NeoDuendeeAutoDetect)
+      Bind-ProductState 'duendee'
       if ([string]::IsNullOrWhiteSpace($script:DuendeeProject) -or -not (Test-Path -LiteralPath $script:DuendeeProject)) {
-        Write-UiLine "  $YEL   Duendee yolu henüz ayarlı değil — kurulum.$RST"
-        Write-UiLine ''
-        Invoke-ConfigureDuendeePath
-        Bind-ProductState 'duendee'
+        Write-UiLine "  $RED$BOLD[HATA]$RST Duendee-main otomatik bulunamadı."
+        Write-UiLine "  $DIM   Beklenen yol: ...\YEK\Cursor\Duendee-main (veya DT_NEO_DUENDEE_DIR)$RST"
+        Complete-Action
+        continue
       }
       while ($true) {
         Show-DuendeeMenu
-        $choice = Get-Choice '12345B'
+        $choice = Get-Choice '1234B'
         Write-UiLine ''
         if ($choice -eq 'B') { break }
         try {
@@ -3898,7 +4001,6 @@ try {
             '2' { Invoke-Status }
             '3' { Invoke-CopyLink }
             '4' { Invoke-Cancel }
-            '5' { Invoke-ConfigureDuendeePath }
           }
         } catch {
           Write-UiLine "  $RED$BOLD[HATA]$RST $($_.Exception.Message)"

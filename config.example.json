@@ -4,5 +4,5 @@
   "port": 8080,
   "duendeeProjectPath": "C:\\path\\to\\Duendee-main",
   "duendeePort": 8081,
-  "duendeeBranch": "neo-3d"
+  "duendeeBranch": "auto"
 }
