@@ -2755,8 +2755,40 @@ function Install-DuendeeDesktopApp([string]$AppDir, [switch]$ForceRebuild) {
     Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue
   }
   New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null
-  Copy-Item -LiteralPath $unpacked -Destination $dest -Recurse -Force
+  # Robocopy tolerates MAX_PATH and skips non-essential Capacitor android
+  # build junk that Copy-Item fails on (StatusBarInfo.class deep trees).
+  $robolog = Join-Path $env:TEMP 'duendee-desktop-copy.log'
+  $roboArgs = @(
+    $unpacked, $dest, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/nc', '/ns', '/np',
+    '/R:1', '/W:1',
+    '/XD', 'android', 'build', '.gradle', 'intermediates'
+  )
+  $robo = Start-Process -FilePath 'robocopy.exe' -ArgumentList $roboArgs -Wait -PassThru -NoNewWindow `
+    -RedirectStandardOutput $robolog
+  # robocopy exit 0–7 = success / extra files; >=8 = failure
+  if ($robo.ExitCode -ge 8) {
+    Write-UiLine "  $YEL   Robocopy uyarı/hata (exit $($robo.ExitCode)); exe varlığı kontrol ediliyor...$RST"
+  }
   $exe = Get-DesktopAppExe
+  if (-not $exe) {
+    # Fallback: shallow copy of essentials only (exe + resources asar)
+    try {
+      New-Item -ItemType Directory -Force -Path $dest | Out-Null
+      Copy-Item -LiteralPath (Join-Path $unpacked 'DuendeeFM.exe') -Destination (Join-Path $dest 'DuendeeFM.exe') -Force
+      $resSrc = Join-Path $unpacked 'resources'
+      $resDst = Join-Path $dest 'resources'
+      if (Test-Path -LiteralPath $resSrc) {
+        New-Item -ItemType Directory -Force -Path $resDst | Out-Null
+        Get-ChildItem -LiteralPath $resSrc -Force | ForEach-Object {
+          if ($_.Name -eq 'app.asar.unpacked') { return }
+          Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $resDst $_.Name) -Recurse -Force -ErrorAction SilentlyContinue
+        }
+      }
+      $exe = Get-DesktopAppExe
+    } catch {
+      Write-UiLine "  $RED   Kurulum kopyası başarısız: $($_.Exception.Message)$RST"
+    }
+  }
   if (-not $exe) {
     Write-UiLine "  $RED   Kurulum sonrası DuendeeFM.exe bulunamadı.$RST"
     return $null
