@@ -1050,10 +1050,11 @@ function Send-TunnelWhatsApp([string]$PublicUrl) {
     # Avoid PowerShell mangling leading '+' on phone; pass via env instead
     $env:DT_WA_PHONE = $phone
     $env:DT_WA_URL = $PublicUrl
-    $env:DT_WA_PRODUCT = if ($script:ActiveProduct -eq 'duendee') { 'duendee' } else { 'fm' }
+    $prod = if ($script:ActiveProduct -eq 'duendee') { 'duendee' } else { 'fm' }
+    $env:DT_WA_PRODUCT = $prod
     $env:DT_WA_TEMPLATE = Get-ProductWaTemplate
     $env:DT_WA_URL_FILE = $UrlFile
-    & $node $waJs $PublicUrl $phone
+    & $node $waJs $PublicUrl $phone --product $prod
     $ec = $LASTEXITCODE
     if ($ec -ne 0) {
       Write-UiLine "  $YEL   WhatsApp gönderimi başarısız (çıkış $ec).$RST"
@@ -1094,10 +1095,11 @@ function Invoke-RetractWhatsApp {
   }
   try {
     $env:DT_WA_ACTION = 'retract'
-    $env:DT_WA_PRODUCT = if ($script:ActiveProduct -eq 'duendee') { 'duendee' } else { 'fm' }
+    $prod = if ($script:ActiveProduct -eq 'duendee') { 'duendee' } else { 'fm' }
+    $env:DT_WA_PRODUCT = $prod
     $env:DT_WA_URL_FILE = $UrlFile
     if (-not $env:DT_WA_TIMEOUT_MS) { $env:DT_WA_TIMEOUT_MS = '90000' }
-    & $node $waJs
+    & $node $waJs --retract --product $prod
     if ($LASTEXITCODE -ne 0) {
       Write-UiLine "  $YEL   Eski WhatsApp $productName mesaji kaldirilamadi (çıkış $LASTEXITCODE).$RST"
     } else {
@@ -1383,7 +1385,15 @@ function Start-DetachedRetract {
   }
   $node = Find-NodeExe
   if (-not $node) { return }
-  [void](Start-HiddenDetached -CommandLine "`"$node`" `"$waJs`" --retract")
+  # VBS detach does not inherit PS env — pass product on the command line.
+  $prod = if ($script:ActiveProduct -eq 'duendee') { 'duendee' } else { 'fm' }
+  $urlFileLit = $UrlFile.Replace("'", "''")
+  $nodeLit = $node.Replace("'", "''")
+  $waLit = $waJs.Replace("'", "''")
+  $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  $inner = "`$env:DT_WA_ACTION='retract';`$env:DT_WA_PRODUCT='$prod';`$env:DT_WA_URL_FILE='$urlFileLit';& '$nodeLit' '$waLit' --retract --product $prod"
+  $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
+  [void](Start-HiddenDetached -CommandLine "`"$ps`" -NoProfile -WindowStyle Hidden -EncodedCommand $b64")
 }
 
 function Start-ToolWatcher {
@@ -1515,13 +1525,35 @@ function Get-CloudflaredProcesses {
   return $list
 }
 
+function Test-BlobContainsPathBoundary([string]$Blob, [string]$PathValue) {
+  # Require a path boundary after the match so ".tunnelstate" does NOT match
+  # inside ".tunnelstate-duendee" (that bug killed the other product's tunnel).
+  if ([string]::IsNullOrWhiteSpace($Blob) -or [string]::IsNullOrWhiteSpace($PathValue)) { return $false }
+  $needle = $PathValue.TrimEnd('\', '/')
+  if ([string]::IsNullOrWhiteSpace($needle)) { return $false }
+  $start = 0
+  while ($start -lt $Blob.Length) {
+    $idx = $Blob.IndexOf($needle, $start, [StringComparison]::OrdinalIgnoreCase)
+    if ($idx -lt 0) { return $false }
+    $after = $idx + $needle.Length
+    if ($after -ge $Blob.Length) { return $true }
+    $ch = $Blob[$after]
+    if ($ch -eq '\' -or $ch -eq '/' -or $ch -eq '"' -or $ch -eq "'" -or [char]::IsWhiteSpace($ch)) {
+      return $true
+    }
+    $start = $idx + 1
+  }
+  return $false
+}
+
 function Test-CloudflaredBelongsToProduct([string]$CommandLine) {
   if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $false }
+  # Port is the strongest product key (FM 8080 vs Duendee 8081 by default).
   $portNeedle = "127.0.0.1:$Port"
   if ($CommandLine.IndexOf($portNeedle, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
-  if ($StateDir -and $CommandLine.IndexOf($StateDir, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
-  if ($LogFile -and $CommandLine.IndexOf($LogFile, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
-  if ($OutLogFile -and $CommandLine.IndexOf($OutLogFile, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+  if (Test-BlobContainsPathBoundary $CommandLine $StateDir) { return $true }
+  if (Test-BlobContainsPathBoundary $CommandLine $LogFile) { return $true }
+  if (Test-BlobContainsPathBoundary $CommandLine $OutLogFile) { return $true }
   return $false
 }
 
@@ -3261,10 +3293,11 @@ function Send-WhatsAppApk([string]$ApkPath, [string]$PublicUrl) {
   try {
     $env:DT_WA_APK = $ApkPath
     $env:DT_WA_APK_ONLY = '1'
-    $env:DT_WA_PRODUCT = if ($script:ActiveProduct -eq 'duendee') { 'duendee' } else { 'fm' }
+    $prod = if ($script:ActiveProduct -eq 'duendee') { 'duendee' } else { 'fm' }
+    $env:DT_WA_PRODUCT = $prod
     $env:DT_WA_URL_FILE = $UrlFile
     if ($PublicUrl) { $env:DT_WA_URL = $PublicUrl }
-    & $node $waJs $(if ($PublicUrl) { $PublicUrl } else { 'apk' })
+    & $node $waJs $(if ($PublicUrl) { $PublicUrl } else { 'apk' }) --product $prod
     if ($LASTEXITCODE -ne 0) {
       Write-UiLine "  $YEL   WhatsApp APK gönderimi başarısız (çıkış $LASTEXITCODE).$RST"
     } else {

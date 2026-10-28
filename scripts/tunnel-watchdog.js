@@ -472,19 +472,26 @@ function notifyNewLink(url) {
   } catch {
     /* ignore */
   }
-  const child = spawn(process.execPath, [script, url], {
+  const waProduct = product === 'duendee' ? 'duendee' : 'fm'
+  const defaultTpl =
+    waProduct === 'duendee'
+      ? 'Duendee tüneli yenilendi (main)\n{url}'
+      : 'DuendeeFM tüneli yenilendi\n{url}'
+  const child = spawn(process.execPath, [script, url, '--product', waProduct], {
     detached: true,
     windowsHide: true,
     stdio: ['ignore', fd === null ? 'ignore' : fd, fd === null ? 'ignore' : fd],
     env: {
       ...process.env,
-      DT_WA_TEMPLATE: process.env.DT_WA_RECOVER_TEMPLATE || 'Tünel zaman aşımına uğradı, yeni tünel linki: {url}',
+      DT_WA_PRODUCT: waProduct,
+      DT_WA_URL_FILE: URL_FILE,
+      DT_WA_TEMPLATE: process.env.DT_WA_RECOVER_TEMPLATE || defaultTpl,
       DT_WA_TIMEOUT_MS: process.env.DT_WA_TIMEOUT_MS || '120000'
     }
   })
   child.on('error', (err) => log(`WhatsApp bildirimi başlatılamadı: ${err.message}`))
   child.unref()
-  log('WhatsApp için yeni link gönderiliyor')
+  log(`WhatsApp için yeni ${waProduct} linki gönderiliyor`)
 }
 
 function findNpm() {

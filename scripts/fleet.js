@@ -234,22 +234,113 @@ function pidIsCloudflared(pid) {
   }
 }
 
-function cloudflaredAlive() {
+function fmPort(root) {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'))
+    const port = Number(cfg.port)
+    if (Number.isInteger(port) && port > 0) return port
+  } catch {
+    /* ignore */
+  }
+  return 8080
+}
+
+function pathBoundaryMatch(blob, needle) {
+  if (!blob || !needle) return false
+  const n = String(needle).replace(/[\\/]+$/, '')
+  if (!n) return false
+  const lower = String(blob)
+  let start = 0
+  const hay = lower
+  const want = n
+  while (start < hay.length) {
+    const idx = hay.toLowerCase().indexOf(want.toLowerCase(), start)
+    if (idx < 0) return false
+    const after = idx + want.length
+    if (after >= hay.length) return true
+    const ch = hay[after]
+    if (ch === '\\' || ch === '/' || ch === '"' || ch === "'" || /\s/.test(ch)) return true
+    // Reject ".tunnelstate" matching inside ".tunnelstate-duendee"
+    start = idx + 1
+  }
+  return false
+}
+
+function cmdlineForPid(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return ''
+  if (process.platform === 'win32') {
+    try {
+      const out = spawnSync(
+        'powershell.exe',
+        ['-NoProfile', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`],
+        { encoding: 'utf8', windowsHide: true }
+      )
+      return String(out.stdout || '').trim()
+    } catch {
+      return ''
+    }
+  }
+  try {
+    return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ')
+  } catch {
+    return ''
+  }
+}
+
+function listCloudflaredPids() {
+  const pids = []
   if (process.platform === 'win32') {
     const text = tasklistText(['/FI', 'IMAGENAME eq cloudflared.exe', '/NH'])
-    return /cloudflared\.exe/i.test(text)
+    for (const line of String(text || '').split(/\r?\n/)) {
+      const m = line.match(/cloudflared\.exe\s+(\d+)/i)
+      if (m) pids.push(Number(m[1]))
+    }
+    return pids
   }
-  const out = spawnSync('pgrep', ['-x', 'cloudflared'], { encoding: 'utf8' })
-  return out.status === 0 && String(out.stdout || '').trim() !== ''
+  try {
+    for (const ent of fs.readdirSync('/proc')) {
+      if (!/^\d+$/.test(ent)) continue
+      try {
+        const comm = fs.readFileSync(`/proc/${ent}/comm`, 'utf8').replace(/\0/g, '').trim()
+        if (comm === 'cloudflared') pids.push(Number(ent))
+      } catch {
+        /* ignore */
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return pids
+}
+
+function cloudflaredBelongsToFm(root, pid) {
+  const cmd = cmdlineForPid(pid)
+  if (!cmd) return false
+  const port = fmPort(root)
+  if (cmd.includes(`127.0.0.1:${port}`)) return true
+  const dir = stateDir(root)
+  if (pathBoundaryMatch(cmd, dir)) return true
+  if (pathBoundaryMatch(cmd, path.join(dir, 'tunnel.log'))) return true
+  if (pathBoundaryMatch(cmd, path.join(dir, 'tunnel.out.log'))) return true
+  return false
 }
 
 function tunnelProcAlive(dir) {
   const pidFile = path.join(dir, 'tunnel.pid')
   if (fs.existsSync(pidFile)) {
     const pid = Number(fs.readFileSync(pidFile, 'utf8').trim())
-    if (pidIsCloudflared(pid)) return true
+    if (Number.isInteger(pid) && pid > 0) {
+      try {
+        process.kill(pid, 0)
+        return true
+      } catch (err) {
+        if (err && err.code === 'EPERM') return true
+      }
+      if (pidIsCloudflared(pid)) return true
+    }
   }
-  return cloudflaredAlive()
+  // Never treat Duendee (main) cloudflared as the FM fleet tunnel.
+  return false
 }
 
 function killPid(pid) {
@@ -263,8 +354,10 @@ function killPid(pid) {
 }
 
 function stopLocalTunnel(root) {
+  // Fleet is DuendeeFM-only. Never taskkill/pkill every cloudflared — that
+  // used to tear down a concurrent Duendee (main) tunnel on the same machine.
   const dir = stateDir(root)
-  for (const name of ['tunnel.pid', 'server.pid']) {
+  for (const name of ['tunnel.pid', 'server.pid', 'watchdog.pid']) {
     const file = path.join(dir, name)
     if (!fs.existsSync(file)) continue
     const pid = Number(fs.readFileSync(file, 'utf8').trim())
@@ -272,10 +365,8 @@ function stopLocalTunnel(root) {
     fs.rmSync(file, { force: true })
   }
   fs.rmSync(path.join(dir, 'tunnel.url'), { force: true })
-  if (process.platform === 'win32') {
-    spawnSync('taskkill', ['/IM', 'cloudflared.exe', '/T', '/F'], { stdio: 'ignore' })
-  } else {
-    spawnSync('pkill', ['-f', 'cloudflared tunnel --url'], { stdio: 'ignore' })
+  for (const pid of listCloudflaredPids()) {
+    if (cloudflaredBelongsToFm(root, pid)) killPid(pid)
   }
 }
 
@@ -780,7 +871,14 @@ async function updateFromArchive(root) {
     .filter((ent) => ent.isDirectory())
     .map((ent) => path.join(tmp, ent.name))[0]
   if (!extracted) return
-  const keep = new Set(['config.json', '.whatsapp-session', '.tunnelstate', 'node_modules', '.git'])
+  const keep = new Set([
+    'config.json',
+    '.whatsapp-session',
+    '.tunnelstate',
+    '.tunnelstate-duendee',
+    'node_modules',
+    '.git',
+  ])
   const oldLock = path.join(root, 'package-lock.json')
   const newLock = path.join(extracted, 'package-lock.json')
   const oldHash = fs.existsSync(oldLock) ? fs.readFileSync(oldLock) : Buffer.alloc(0)

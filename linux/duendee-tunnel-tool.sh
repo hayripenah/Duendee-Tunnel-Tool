@@ -714,16 +714,25 @@ print(",".join(out))' "$wa_cfg" 2>/dev/null || true)"
   local wa_label="${phone:-5315162429}"
   if [[ "$phone" == *,* ]]; then wa_label="alici: ${phone}"; fi
   echo "  WhatsApp baglantisi kontrol ediliyor (${wa_label})..."
-  echo "  WhatsApp'a link gönderiliyor..."
+  echo "  WhatsApp'a ${PRODUCT_NAME:-DuendeeFM} linki gönderiliyor..."
   local ec=0
   export DT_WA_URL="$public_url"
   export DT_WA_PHONE="$phone"
-  if [[ -n "$phone" ]]; then
-    node "$WHATSAPP_JS" "$public_url" "$phone" || ec=$?
+  export DT_WA_PRODUCT="${ACTIVE_PRODUCT:-fm}"
+  export DT_WA_URL_FILE="$URL_FILE"
+  export DT_WA_TEMPLATE
+  if [[ "${ACTIVE_PRODUCT:-fm}" == "duendee" ]]; then
+    DT_WA_TEMPLATE="Duendee tüneli (main)"$'\n'"{url}"
   else
-    node "$WHATSAPP_JS" "$public_url" || ec=$?
+    DT_WA_TEMPLATE="DuendeeFM tüneli"$'\n'"{url}"
   fi
-  unset DT_WA_URL DT_WA_PHONE
+  local wa_prod="${ACTIVE_PRODUCT:-fm}"
+  if [[ -n "$phone" ]]; then
+    node "$WHATSAPP_JS" "$public_url" "$phone" --product "$wa_prod" || ec=$?
+  else
+    node "$WHATSAPP_JS" "$public_url" --product "$wa_prod" || ec=$?
+  fi
+  unset DT_WA_URL DT_WA_PHONE DT_WA_PRODUCT DT_WA_URL_FILE DT_WA_TEMPLATE
   if (( ec != 0 )); then
     echo -e "  ${YEL}   WhatsApp gönderimi başarısız (çıkış ${ec}).${RST}"
     echo -e "  ${DIM}   QR tarayin veya: rm -rf \"$(wa_session_dir)\" sonra tekrar.${RST}"
@@ -743,10 +752,13 @@ spawn_retract_detached() {
   local log="${STATE}/wa-retract.log"
   [[ -f "$wa_js" && -f "$creds" ]] || return 0
   command -v node >/dev/null 2>&1 || return 0
+  local wa_prod="${ACTIVE_PRODUCT:-fm}"
   if command -v setsid >/dev/null 2>&1; then
-    setsid nohup env DT_WA_ACTION=retract DT_WA_TIMEOUT_MS=90000 node "$wa_js" --retract >>"$log" 2>&1 </dev/null &
+    setsid nohup env DT_WA_ACTION=retract DT_WA_PRODUCT="$wa_prod" DT_WA_URL_FILE="$URL_FILE" DT_WA_TIMEOUT_MS=90000 \
+      node "$wa_js" --retract --product "$wa_prod" >>"$log" 2>&1 </dev/null &
   else
-    nohup env DT_WA_ACTION=retract DT_WA_TIMEOUT_MS=90000 node "$wa_js" --retract >>"$log" 2>&1 </dev/null &
+    nohup env DT_WA_ACTION=retract DT_WA_PRODUCT="$wa_prod" DT_WA_URL_FILE="$URL_FILE" DT_WA_TIMEOUT_MS=90000 \
+      node "$wa_js" --retract --product "$wa_prod" >>"$log" 2>&1 </dev/null &
   fi
 }
 
@@ -756,13 +768,15 @@ retract_tunnel_whatsapp() {
   [[ -f "$wa_js" && -f "$creds" ]] || return 0
   command -v node >/dev/null 2>&1 || return 0
   ensure_whatsapp_deps || return 0
-  echo "  Eski tunnel / APK WhatsApp mesajlari kaldiriliyor..."
+  echo "  Eski ${PRODUCT_NAME:-DuendeeFM} tunnel / APK WhatsApp mesajlari kaldiriliyor..."
   local ec=0
-  DT_WA_ACTION=retract DT_WA_TIMEOUT_MS="${DT_WA_TIMEOUT_MS:-90000}" node "$wa_js" || ec=$?
+  local wa_prod="${ACTIVE_PRODUCT:-fm}"
+  DT_WA_ACTION=retract DT_WA_PRODUCT="$wa_prod" DT_WA_URL_FILE="$URL_FILE" \
+    DT_WA_TIMEOUT_MS="${DT_WA_TIMEOUT_MS:-90000}" node "$wa_js" --retract --product "$wa_prod" || ec=$?
   if (( ec != 0 )); then
-    echo -e "  ${YEL}   Eski WhatsApp tunnel/APK mesaji kaldirilamadi (çıkış ${ec}).${RST}"
+    echo -e "  ${YEL}   Eski WhatsApp ${PRODUCT_NAME:-DuendeeFM} mesaji kaldirilamadi (çıkış ${ec}).${RST}"
   else
-    echo -e "  ${GRN}   Gecersiz tunnel / APK mesaji kaldirildi.${RST}"
+    echo -e "  ${GRN}   Gecersiz ${PRODUCT_NAME:-DuendeeFM} tunnel / APK mesaji kaldirildi.${RST}"
   fi
 }
 
@@ -1608,14 +1622,36 @@ cloudflared_pids_all() {
   done
 }
 
+path_boundary_match() {
+  # "$STATE" must not match inside ".tunnelstate-duendee" (prefix trap).
+  local blob="$1" needle="$2" rest ch
+  [[ -n "$blob" && -n "$needle" ]] || return 1
+  needle="${needle%/}"
+  [[ "$blob" == *"$needle"* ]] || return 1
+  rest="${blob#*"$needle"}"
+  if [[ "$rest" == "$blob" ]]; then
+    return 1
+  fi
+  if [[ -z "$rest" ]]; then
+    return 0
+  fi
+  ch="${rest:0:1}"
+  case "$ch" in
+    /|' '|\"|"'"|$'\t') return 0 ;;
+    -) return 1 ;; # .tunnelstate-duendee
+    [A-Za-z0-9_]) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 cloudflared_belongs_to_product() {
   local pid="$1" cmd=""
   cmd="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
   [[ -n "$cmd" ]] || return 1
   [[ "$cmd" == *"127.0.0.1:${PORT}"* ]] && return 0
-  [[ -n "$STATE" && "$cmd" == *"$STATE"* ]] && return 0
-  [[ -n "$LOG" && "$cmd" == *"$LOG"* ]] && return 0
-  [[ -n "$OUT_LOG" && "$cmd" == *"$OUT_LOG"* ]] && return 0
+  path_boundary_match "$cmd" "$STATE" && return 0
+  path_boundary_match "$cmd" "$LOG" && return 0
+  path_boundary_match "$cmd" "$OUT_LOG" && return 0
   return 1
 }
 
@@ -2260,8 +2296,8 @@ wait_public_ready() {
 
 launch_cloudflared() {
   local target="http://127.0.0.1:${PORT}"
-  pkill -f "cloudflared tunnel --url" 2>/dev/null || true
-  killall cloudflared 2>/dev/null || true
+  # Never killall — only this product's tunnel (port / state-bound PIDs).
+  kill_tunnel
   rm -f "$URL_FILE" "$LOG" "$OUT_LOG" "$PID_FILE"
   URL=""
   TUNNEL_URL=""

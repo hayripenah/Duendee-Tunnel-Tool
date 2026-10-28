@@ -41,8 +41,16 @@ if (!fs.existsSync(configPath)) {
 }
 
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-const waProduct =
-  String(process.env.DT_WA_PRODUCT || '').trim().toLowerCase() === 'duendee' ? 'duendee' : 'fm';
+function resolveWaProduct() {
+  const fromArg = (() => {
+    const i = process.argv.indexOf('--product');
+    if (i >= 0 && i + 1 < process.argv.length) return String(process.argv[i + 1] || '').trim().toLowerCase();
+    return '';
+  })();
+  const raw = fromArg || String(process.env.DT_WA_PRODUCT || '').trim().toLowerCase();
+  return raw === 'duendee' ? 'duendee' : 'fm';
+}
+const waProduct = resolveWaProduct();
 const productLabel = waProduct === 'duendee' ? 'Duendee' : 'DuendeeFM';
 const urlFile =
   String(process.env.DT_WA_URL_FILE || '').trim() ||
@@ -77,10 +85,22 @@ function defaultMessageTemplate() {
   return config.messageTemplate || config.messageTemplateFm || 'DuendeeFM tüneli\n{url}';
 }
 
+function inferProductFromText(text) {
+  const t = String(text || '');
+  if (/DuendeeFM/i.test(t)) return 'fm';
+  if (/Duendee tüneli/i.test(t) || /Duendee \(main\)/i.test(t) || /neo-3d/i.test(t)) {
+    return 'duendee';
+  }
+  if (/Duendee tüneli yenilendi/i.test(t) && !/DuendeeFM/i.test(t)) return 'duendee';
+  return '';
+}
+
 function rowMatchesProduct(row) {
   const p = String(row?.product || '').trim().toLowerCase();
   if (!p) {
-    // Legacy untagged rows belong to DuendeeFM only.
+    // Chat-scanned untagged messages must not be deleted by either product.
+    if (row?.source === 'chat') return false;
+    // Legacy sent-links.json rows without product belong to DuendeeFM only.
     return waProduct === 'fm';
   }
   return p === waProduct;
@@ -108,7 +128,13 @@ function normalizeRecipients(value) {
   return out;
 }
 
-const phoneArg = String(process.argv[3] || process.env.DT_WA_PHONE || '').trim();
+function argvPhone() {
+  // Positional phone is argv[3] when argv[2] is the URL. Skip flags like --product.
+  const raw = String(process.argv[3] || '').trim();
+  if (!raw || raw.startsWith('--')) return String(process.env.DT_WA_PHONE || '').trim();
+  return raw;
+}
+const phoneArg = argvPhone();
 const configRecipients = normalizeRecipients([
   ...(Array.isArray(config.targetPhones) ? config.targetPhones : []),
   config.targetPhone
@@ -494,6 +520,7 @@ async function scanTunnelMessages(sock) {
     let urls = trycloudflareUrls(text);
     if (text.includes('Tünel zaman aşımına uğradı') && urls.length === 0) urls = ['notice'];
     const stamp = messageStampMs(msg);
+    const product = inferProductFromText(text);
     for (const url of urls) {
       const key = id + '\n' + jid;
       const prev = found.get(key);
@@ -501,6 +528,8 @@ async function scanTunnelMessages(sock) {
         id,
         jid,
         url,
+        product: product || prev?.product || '',
+        source: 'chat',
         stamp: stamp || prev?.stamp || 0,
         key: msg.key || prev?.key
       });
@@ -516,6 +545,8 @@ async function scanTunnelMessages(sock) {
           id: row.id,
           jid: row.jid,
           url,
+          product: row.product || '',
+          source: 'store',
           stamp: Date.parse(row.at || '') || 0
         });
       }
@@ -733,7 +764,11 @@ function rememberHistory(msg) {
   if (msg) historyMessages.push(msg);
 }
 
-const retractLock = path.join(toolRoot, '.tunnelstate', 'wa-retract.lock');
+const retractLock = path.join(
+  toolRoot,
+  waProduct === 'duendee' ? '.tunnelstate-duendee' : '.tunnelstate',
+  'wa-retract.lock'
+);
 
 async function claimRetractLock() {
   fs.mkdirSync(path.dirname(retractLock), { recursive: true });
