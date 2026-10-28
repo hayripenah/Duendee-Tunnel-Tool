@@ -74,6 +74,11 @@ Cancel/retract only removes that product’s messages.
 
 **Duendee** auto-detects `Duendee-main`, fetches origin, and publishes the **newest remote branch** (by committer date). There is no manual path/port/branch menu.
 
+Duendee menu splits local vs public:
+- **[1] Test Tüneli** — cloudflared + WhatsApp link  
+- **[2] Dev Server** — `http://localhost:8081` Vite HMR only (no tunnel)  
+- **[6]** stops the Dev Server without touching a live tunnel
+
 ### First-run projectPath (DuendeeFM)
 
 On first run the tool copies `config.example.json` → `config.json`, then resolves `projectPath` (FM):

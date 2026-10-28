@@ -2000,11 +2000,16 @@ function Show-DuendeeMenu {
   $pathLabel = if ($script:DuendeeProject) { $script:DuendeeProject } else { '(otomatik bulunamadı)' }
   Write-UiLine "  $DIM   $pathLabel$RST"
   Write-UiLine "  $DIM   port $($script:DuendeePort)  ·  branch $($script:DuendeeBranch)  ·  state .tunnelstate-duendee$RST"
+  $devOn = Test-PortListening $script:DuendeePort
+  $tunOn = Test-TunnelRunning
+  Write-UiLine ("  $DIM   Dev Server: {0}  ·  Tünel: {1}$RST" -f $(if ($devOn) { 'AÇIK' } else { 'kapalı' }), $(if ($tunOn) { 'AÇIK' } else { 'kapalı' }))
   Write-UiLine ''
   Write-UiLine "  [1]  Test Tüneli Başlat"
-  Write-UiLine "  [2]  Servis Durumunu Kontrol Et"
-  Write-UiLine "  [3]  Yayın Linkini Kopyala"
-  Write-UiLine "  [4]  Test Tünelini İptal Et"
+  Write-UiLine "  [2]  Dev Server Başlat  $DIM(localhost:$($script:DuendeePort) · anlık HMR)$RST"
+  Write-UiLine "  [3]  Servis Durumunu Kontrol Et"
+  Write-UiLine "  [4]  Yayın Linkini Kopyala"
+  Write-UiLine "  [5]  Test Tünelini İptal Et"
+  Write-UiLine "  [6]  Dev Server'ı Durdur"
   Write-UiLine "  $DIM$BOLD[B]$RST  ${DIM}Ürün menüsüne dön$RST"
   Write-UiLine ''
   Write-Ui "$DIM   Seçim: $RST"
@@ -2535,6 +2540,100 @@ function Sync-NeoDuendeeForTest {
   return $true
 }
 
+function Sync-NeoDuendeeCodeOnly {
+  # Update branch/deps without killing a running Vite HMR server unless deps changed.
+  if (-not (Ensure-NeoDuendeeAutoDetect)) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST Duendee-main bulunamadı."
+    return $false
+  }
+  if (-not (Test-LooksLikeNeoDuendeeRepo $Project)) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST Klasör Duendee-main deposu değil: $Project"
+    return $false
+  }
+  $branch = Resolve-NewestNeoDuendeeBranch -Path $Project -FetchRemote
+  if (-not $branch -or $branch -eq 'origin') { $branch = 'main' }
+  $script:DuendeeBranch = $branch
+  Write-UiLine "  $DIM   Branch güncelleniyor ($branch)...$RST"
+  $before = Get-DuendeeDepStamp $Project
+  if (-not (Update-NeoDuendeeBranch -Path $Project -Branch $branch)) {
+    Write-UiLine "  $YEL   Checkout/pull atlandı; mevcut tree ile devam.$RST"
+  } else {
+    Write-UiLine "  $DIM   Branch: $branch$RST"
+  }
+  Save-ToolConfig -ProjectPath $script:FmProject -PortNum $script:FmPort -AppPath $script:FmAppPath `
+    -DuendeeProjectPath $script:DuendeeProject -DuendeePortNum $script:DuendeePort -DuendeeBranch $script:DuendeeBranch
+  $after = Get-DuendeeDepStamp $Project
+  $needInstall = -not (Test-Path -LiteralPath (Join-Path $Project 'node_modules')) -or $before -ne $after
+  if ($needInstall) {
+    if (Test-PortListening $Port) {
+      Write-UiLine "  $DIM   Bağımlılık değişti — Dev Server yeniden başlatılacak.$RST"
+      Stop-DevServer
+      Stop-ListenersOnPort $Port
+      Start-Sleep -Milliseconds 300
+    }
+    Write-UiLine "  $DIM   Bağımlılıklar kuruluyor (npm install)...$RST"
+    Push-Location $Project
+    try {
+      & npm install *>&1 | Out-Host
+      $npmCode = $LASTEXITCODE
+    } finally { Pop-Location }
+    if ($npmCode -ne 0) {
+      Write-UiLine "  $RED$BOLD   [HATA]$RST npm install başarısız."
+      return $false
+    }
+  }
+  return $true
+}
+
+function Invoke-StartDuendeeDevServer {
+  Clear-Host
+  Initialize-Utf8Console
+  Write-UiLine ''
+  Write-UiLine "$C5   --- Duendee Dev Server (localhost:$Port) ---$RST"
+  Write-UiLine ''
+  if (-not (Sync-NeoDuendeeCodeOnly)) { Complete-Action; return }
+  if (Test-PortListening $Port) {
+    Write-UiLine "  $GRN   Dev Server zaten çalışıyor.$RST"
+    Write-UiLine "  $DIM   http://localhost:$Port  (HMR açık — kaydettikçe yenilenir)$RST"
+    try { Start-Process "http://localhost:$Port/" | Out-Null } catch {}
+    Complete-Action
+    return
+  }
+  Write-UiLine "  ${C5}[1]$RST Vite dev başlatılıyor (port $Port)..."
+  if (-not (Start-AppOrigin)) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST Dev Server $Port portunda açılamadı."
+    Write-UiLine "  $DIM   Ayrıntı: $(Join-Path $StateDir 'server.out.log')$RST"
+    Complete-Action
+    return
+  }
+  Write-UiLine "  $GRN   Dev Server hazır: http://localhost:$Port/$RST"
+  Write-UiLine "  $DIM   Tünel yok — sadece local. Tünel için [1].$RST"
+  try { Start-Process "http://localhost:$Port/" | Out-Null } catch {}
+  Complete-Action
+}
+
+function Invoke-StopDuendeeDevServer {
+  Clear-Host
+  Initialize-Utf8Console
+  Write-UiLine ''
+  Write-UiLine "$C5   --- Dev Server durduruluyor ---$RST"
+  Write-UiLine ''
+  if (-not (Test-PortListening $Port)) {
+    Write-UiLine "  $DIM   Dev Server zaten kapalı.$RST"
+    Complete-Action
+    return
+  }
+  Stop-DevServer
+  Stop-ListenersOnPort $Port
+  Start-Sleep -Milliseconds 300
+  if (Test-PortListening $Port) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST Port $Port boşaltılamadı."
+  } else {
+    Write-UiLine "  $GRN   Dev Server durduruldu.$RST"
+  }
+  Complete-Action
+}
+
 function Invoke-StartDuendeeIsolated {
   # Separate from DuendeeFM fleet — own port, state dir, and cloudflared process.
   $cf = Find-Cloudflared
@@ -2551,10 +2650,14 @@ function Invoke-StartDuendeeIsolated {
     if (-not $existing) { $existing = Get-TunnelUrl }
     if ($existing -and (Test-PublicUrlLive $existing)) {
       Write-UiLine "  $GRN   Duendee test tüneli zaten çalışıyor.$RST"
-      Write-UiLine "  ${C5}[2]$RST En güncel Duendee-main yayına alınıyor..."
-      if (-not (Sync-NeoDuendeeForTest)) { Complete-Action; return }
-      if (-not (Start-AppOrigin)) {
-        Write-UiLine "  $RED   Uygulama açılamadı. Tünel duruyor ama sayfa erişilemeyebilir.$RST"
+      Write-UiLine "  ${C5}[2]$RST Kod güncelleniyor..."
+      if (-not (Sync-NeoDuendeeCodeOnly)) { Complete-Action; return }
+      if (-not (Test-PortListening $Port)) {
+        if (-not (Start-AppOrigin)) {
+          Write-UiLine "  $RED   Uygulama açılamadı. Tünel duruyor ama sayfa erişilemeyebilir.$RST"
+        }
+      } else {
+        Write-UiLine "  $DIM   Mevcut Dev Server kullanılacak (HMR).$RST"
       }
       Set-Clipboard -Value $existing
       Write-UiLine ("  " + (Format-ProductTunnelLine $existing))
@@ -2567,14 +2670,18 @@ function Invoke-StartDuendeeIsolated {
     Stop-TunnelOnly
   }
 
-  Write-UiLine "  ${C5}[2]$RST En güncel Duendee-main yayına alınıyor..."
-  if (-not (Sync-NeoDuendeeForTest)) { Complete-Action; return }
-  Write-UiLine "  ${C5}[3]$RST Uygulama başlatılıyor (port $Port)..."
-  if (-not (Start-AppOrigin)) {
-    Write-UiLine "  $RED$BOLD[HATA]$RST Uygulama $Port portunda açılamadı."
-    Write-UiLine "  $DIM   Ayrıntı: $(Join-Path $StateDir 'server.out.log')$RST"
-    Complete-Action
-    return
+  Write-UiLine "  ${C5}[2]$RST En güncel Duendee-main hazırlanıyor..."
+  if (-not (Sync-NeoDuendeeCodeOnly)) { Complete-Action; return }
+  if (-not (Test-PortListening $Port)) {
+    Write-UiLine "  ${C5}[3]$RST Uygulama başlatılıyor (port $Port)..."
+    if (-not (Start-AppOrigin)) {
+      Write-UiLine "  $RED$BOLD[HATA]$RST Uygulama $Port portunda açılamadı."
+      Write-UiLine "  $DIM   Ayrıntı: $(Join-Path $StateDir 'server.out.log')$RST"
+      Complete-Action
+      return
+    }
+  } else {
+    Write-UiLine "  ${C5}[3]$RST Mevcut Dev Server kullanılacak (port $Port)."
   }
   Write-UiLine "  $DIM   Uygulama http://127.0.0.1:$Port hazır.$RST"
   Write-UiLine "  ${C5}[4]$RST Duendee test tüneli açılıyor..."
@@ -4072,15 +4179,17 @@ try {
       }
       while ($true) {
         Show-DuendeeMenu
-        $choice = Get-Choice '1234B'
+        $choice = Get-Choice '123456B'
         Write-UiLine ''
         if ($choice -eq 'B') { break }
         try {
           switch ($choice) {
             '1' { Invoke-Start }
-            '2' { Invoke-Status }
-            '3' { Invoke-CopyLink }
-            '4' { Invoke-Cancel }
+            '2' { Invoke-StartDuendeeDevServer }
+            '3' { Invoke-Status }
+            '4' { Invoke-CopyLink }
+            '5' { Invoke-Cancel }
+            '6' { Invoke-StopDuendeeDevServer }
           }
         } catch {
           Write-UiLine "  $RED$BOLD[HATA]$RST $($_.Exception.Message)"
