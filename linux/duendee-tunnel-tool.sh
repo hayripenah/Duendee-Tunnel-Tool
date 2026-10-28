@@ -1760,10 +1760,7 @@ wait_key() {
   read -r -p "Devam etmek için Enter..." _
 }
 
-show_menu() {
-  clear
-  autostate
-  # FIGlet "ANSI Shadow" — same layered block style as Claude Code
+show_logo_banner() {
   echo
   echo -e "${SALMON}${BOLD}  ██████╗ ██╗   ██╗███████╗███╗   ██╗██████╗ ███████╗███████╗${RST}"
   echo -e "${SALMON}${BOLD}  ██╔══██╗██║   ██║██╔════╝████╗  ██║██╔══██╗██╔════╝██╔════╝${RST}"
@@ -1776,6 +1773,30 @@ show_menu() {
   echo -e "${SALMON}${BOLD}          D U E N D E E   T U N N E L   T O O L${RST}"
   echo -e "${DIM}   ───────────────────────────────────────────────────────────${RST}"
   echo
+}
+
+show_root_menu() {
+  clear
+  show_logo_banner
+  echo -e "  ${BOLD}  Ürün seçin${RST}"
+  echo
+  echo "  [1]  DuendeeFM"
+  echo -e "       ${DIM}   Mevcut yayın / tünel / app araçları (Duendee-fm)${RST}"
+  echo
+  echo "  [2]  Duendee"
+  echo -e "       ${DIM}   neo-3d test — Windows menüsü tam; Linux'ta FM menüsü + DT_NEO_DUENDEE_DIR${RST}"
+  echo
+  echo -e "  ${DIM}${BOLD}[X]${RST}  ${DIM}Çıkış${RST}"
+  echo
+  printf "%b" "${DIM}   Seçim: ${RST}"
+}
+
+show_menu() {
+  clear
+  autostate
+  show_logo_banner
+  echo -e "  ${SALMON}${BOLD}  DuendeeFM${RST}"
+  echo
   echo "  [1]  Tünel Servisi Başlat"
   echo "  [2]  Servis Durumunu Kontrol Et"
   echo "  [3]  Yayın Linkini Kopyala"
@@ -1786,6 +1807,19 @@ show_menu() {
     *) echo -e "  [5]  Cihaz Açılışında Otomatik Başlat  ${RED}[KAPALI]${RST}  $(browser_mark)" ;;
   esac
   echo "  [6]  Aracı Cihazdan Kaldır"
+  echo -e "  ${DIM}${BOLD}[B]${RST}  ${DIM}Ürün menüsüne dön${RST}"
+  echo
+  printf "%b" "${DIM}   Seçim: ${RST}"
+}
+
+show_duendee_menu() {
+  clear
+  show_logo_banner
+  echo -e "  ${C5:-$CYN}${BOLD}  Duendee${RST}  ${DIM}(neo-3d test)${RST}"
+  echo -e "  ${DIM}   Windows tool has full neo-3d tunnel; Linux: set DT_NEO_DUENDEE_DIR and use FM-style start after pointing config.${RST}"
+  echo
+  echo "  [1]  Test notu: Windows Tunnel Tool → [2] Duendee kullanın"
+  echo -e "  ${DIM}${BOLD}[B]${RST}  ${DIM}Ürün menüsüne dön${RST}"
   echo
   printf "%b" "${DIM}   Seçim: ${RST}"
 }
@@ -3140,16 +3174,39 @@ elif [[ "${1:-}" != "" ]]; then
 fi
 
 while true; do
-  show_menu
-  read -r -n 1 choice
+  show_root_menu
+  read -r -n 1 product
   echo
-  case "$choice" in
-    1) do_start ;;
-    2) do_status ;;
-    3) do_copylink ;;
-    4) do_cancel ;;
-    5) do_autostart ;;
-    6) do_uninstall ;;
+  case "$product" in
+    [xX]) exit 0 ;;
+    1)
+      while true; do
+        show_menu
+        read -r -n 1 choice
+        echo
+        case "$choice" in
+          [bB]) break ;;
+          1) do_start ;;
+          2) do_status ;;
+          3) do_copylink ;;
+          4) do_cancel ;;
+          5) do_autostart ;;
+          6) do_uninstall ;;
+          *) ;;
+        esac
+      done
+      ;;
+    2)
+      while true; do
+        show_duendee_menu
+        read -r -n 1 choice
+        echo
+        case "$choice" in
+          [bB]) break ;;
+          *) ;;
+        esac
+      done
+      ;;
     *) ;;
   esac
 done

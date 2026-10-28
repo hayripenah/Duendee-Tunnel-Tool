@@ -1,5 +1,8 @@
 {
   "projectPath": "C:\\path\\to\\Duendee-fm",
   "appPath": "C:\\path\\to\\Duendee-app",
-  "port": 8080
+  "port": 8080,
+  "duendeeProjectPath": "C:\\path\\to\\Duendee-main",
+  "duendeePort": 8081,
+  "duendeeBranch": "neo-3d"
 }

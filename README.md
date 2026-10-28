@@ -55,16 +55,30 @@ curl -fsSL https://raw.githubusercontent.com/hayripenah/Duendee-Tunnel-Tool/main
 
 On Windows, keep using the PowerShell one-liner above.
 
-### First-run projectPath (Duendee-fm)
+### Product menu (Windows)
 
-On first run the tool copies `config.example.json` → `config.json`, then resolves `projectPath`:
+The Windows tool opens with a product picker:
 
-1. Searches common locations for a local **Duendee-fm** repo (Desktop, home, Documents, `YEK/Cursor`, git remotes matching `hayripenah/Duendee-FM`). **Duendee-main / Duendee.git are never used.**
-2. If found: offers that path (Enter accepts #1). Every tunnel start pulls that repo to the latest `origin/main` before publishing.
+| Key | Section | Purpose |
+|-----|---------|---------|
+| **1** | **DuendeeFM** | Existing publish/tunnel/app tools for **Duendee-fm** (unchanged options 1–6) |
+| **2** | **Duendee** | neo-3d test tunnel for **Duendee-main** / `Duendee.git` (port **8081** by default, branch **neo-3d**) |
+
+DuendeeFM and Duendee use separate state dirs (`.tunnelstate` vs `.tunnelstate-duendee`) so links/PIDs do not overwrite each other.
+
+### First-run projectPath (DuendeeFM)
+
+On first run the tool copies `config.example.json` → `config.json`, then resolves `projectPath` (FM):
+
+1. Searches common locations for a local **Duendee-fm** repo (Desktop, home, Documents, `YEK/Cursor`, git remotes matching `hayripenah/Duendee-FM`).
+2. If found: offers that path (Enter accepts #1). Every FM tunnel start pulls that repo to the latest `origin/main` before publishing.
 3. If not found: **Enter clones** `https://github.com/hayripenah/Duendee-FM.git` to **Desktop/`Duendee-fm`** by default.
 4. Always allows a custom directory (typed path; Windows folder browser; Linux `zenity`/`kdialog` when available).
 
-Override with env vars: `DT_DUENDEE_DIR`, `DT_DUENDEE_REPO_URL`, `DT_DUENDEE_CLONE_NAME`.
+`duendeeProjectPath` / `duendeePort` / `duendeeBranch` are resolved for the **Duendee** section (auto-detect `Duendee-main`, default port `8081`, branch `neo-3d`).
+
+Override FM with: `DT_DUENDEE_DIR`, `DT_DUENDEE_REPO_URL`, `DT_DUENDEE_CLONE_NAME`.  
+Override Duendee neo with: `DT_NEO_DUENDEE_DIR`.
 
 ## Run
 

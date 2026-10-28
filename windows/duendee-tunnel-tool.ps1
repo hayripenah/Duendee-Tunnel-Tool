@@ -72,16 +72,33 @@ $script:DuendeeRepoUrl = if ($env:DT_DUENDEE_REPO_URL) { $env:DT_DUENDEE_REPO_UR
 $script:DuendeeCloneName = if ($env:DT_DUENDEE_CLONE_NAME) { $env:DT_DUENDEE_CLONE_NAME } else { 'Duendee-fm' }
 $script:LastMobileApkSent = $false
 
-function Save-ToolConfig([string]$ProjectPath, [int]$PortNum, [string]$AppPath = '') {
+function Save-ToolConfig(
+  [string]$ProjectPath,
+  [int]$PortNum,
+  [string]$AppPath = '',
+  [string]$DuendeeProjectPath = '',
+  [int]$DuendeePortNum = 0,
+  [string]$DuendeeBranch = ''
+) {
+  $prev = $null
+  if (Test-Path -LiteralPath $configPath) {
+    try { $prev = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch {}
+  }
   $obj = [ordered]@{ projectPath = $ProjectPath; port = $PortNum }
   if (-not [string]::IsNullOrWhiteSpace($AppPath)) {
     $obj.appPath = $AppPath
-  } elseif (Test-Path -LiteralPath $configPath) {
-    try {
-      $prev = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
-      if ($prev.appPath) { $obj.appPath = [string]$prev.appPath }
-    } catch {}
+  } elseif ($prev -and $prev.appPath) {
+    $obj.appPath = [string]$prev.appPath
   }
+  $duoPath = if (-not [string]::IsNullOrWhiteSpace($DuendeeProjectPath)) { $DuendeeProjectPath }
+    elseif ($prev -and $prev.duendeeProjectPath) { [string]$prev.duendeeProjectPath } else { '' }
+  $duoPort = if ($DuendeePortNum -gt 0) { $DuendeePortNum }
+    elseif ($prev -and $prev.duendeePort) { [int]$prev.duendeePort } else { 8081 }
+  $duoBranch = if (-not [string]::IsNullOrWhiteSpace($DuendeeBranch)) { $DuendeeBranch }
+    elseif ($prev -and $prev.duendeeBranch) { [string]$prev.duendeeBranch } else { 'neo-3d' }
+  if (-not [string]::IsNullOrWhiteSpace($duoPath)) { $obj.duendeeProjectPath = $duoPath }
+  $obj.duendeePort = $duoPort
+  $obj.duendeeBranch = $duoBranch
   ($obj | ConvertTo-Json -Depth 4) + "`n" | Set-Content -LiteralPath $configPath -Encoding UTF8 -NoNewline
 }
 
@@ -102,9 +119,68 @@ function Test-IsDuendeeMainPath([string]$Path) {
   return ((Split-Path -Leaf $Path) -match '^(?i)duendee-main$')
 }
 
+function Test-LooksLikeNeoDuendeeRepo([string]$Path) {
+  if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Container)) { return $false }
+  $pkg = Join-Path $Path 'package.json'
+  if (-not (Test-Path -LiteralPath $pkg)) { return $false }
+  $leaf = Split-Path -Leaf $Path
+  $nameHit = $leaf -match '^(?i)duendee(-main)?$'
+  $pkgHit = $false
+  try {
+    $raw = Get-Content -LiteralPath $pkg -Raw -Encoding UTF8
+    if ($raw -match 'vite_react_shadcn' -or $raw -match 'dev:tunnel' -or
+        ($raw -match '"dev"\s*:\s*"vite"' -and $nameHit)) { $pkgHit = $true }
+  } catch {}
+  $remoteHit = $false
+  if (Test-Path -LiteralPath (Join-Path $Path '.git')) {
+    try {
+      $remote = (& git -C $Path remote get-url origin 2>$null)
+      # Duendee.git / Duendee-main — not Duendee-FM, not Tunnel-Tool.
+      if ($remote -and (
+          $remote -match '(?i)github\.com[:/].*hayripenah/Duendee(\.git)?/?$' -or
+          $remote -match '(?i)/Duendee-main(\.git)?/?$' -or
+          ($remote -match '(?i)/Duendee(\.git)?/?$' -and $remote -notmatch '(?i)(Duendee-FM|Tunnel-Tool|Duendee-app)')
+        )) {
+        $remoteHit = $true
+      }
+    } catch {}
+  }
+  return ($remoteHit -or (Test-IsDuendeeMainPath $Path -and $pkgHit) -or ($nameHit -and $pkgHit))
+}
+
+function Find-LocalNeoDuendeeRepos {
+  $desktop = Get-UserDesktopPath
+  $candidates = New-Object System.Collections.Generic.List[string]
+  $add = {
+    param([string]$p)
+    if (-not [string]::IsNullOrWhiteSpace($p) -and (Test-Path -LiteralPath $p -PathType Container)) {
+      try {
+        $full = (Resolve-Path -LiteralPath $p).Path
+        if (-not $candidates.Contains($full)) { [void]$candidates.Add($full) }
+      } catch {}
+    }
+  }
+  if ($env:DT_NEO_DUENDEE_DIR) { & $add $env:DT_NEO_DUENDEE_DIR }
+  & $add (Join-Path (Split-Path -Parent $Root) 'Duendee-main')
+  foreach ($base in @(
+      $desktop,
+      (Join-Path $desktop 'YEK\Cursor'),
+      (Join-Path $env:USERPROFILE 'YEK\Cursor'),
+      (Join-Path $env:USERPROFILE 'Desktop\YEK\Cursor')
+    )) {
+    if (-not $base) { continue }
+    foreach ($name in @('Duendee-main', 'Duendee')) { & $add (Join-Path $base $name) }
+  }
+  $hits = @()
+  foreach ($c in $candidates) {
+    if (Test-LooksLikeNeoDuendeeRepo $c) { $hits += $c }
+  }
+  return $hits
+}
+
 function Test-LooksLikeDuendeeRepo([string]$Path) {
   if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Container)) { return $false }
-  # Tunnel publishes Duendee-fm only. Never treat Duendee-main as the app tree.
+  # DuendeeFM section publishes Duendee-fm only. Never treat Duendee-main as the FM app tree.
   if (Test-IsDuendeeMainPath $Path) { return $false }
   $leaf = Split-Path -Leaf $Path
   $nameHit = $leaf -match '^(?i)duendee(-fm)?$'
@@ -593,7 +669,33 @@ function Ensure-ToolConfig {
     $appPath = Resolve-DuendeeAppPath -Preferred $appPath -Project $proj
   }
 
-  return @{ Project = $proj; Port = $portNum; AppPath = $appPath }
+  $duoProj = [string]$cfgLocal.duendeeProjectPath
+  $duoPort = if ($cfgLocal.duendeePort) { [int]$cfgLocal.duendeePort } else { 8081 }
+  $duoBranch = if ($cfgLocal.duendeeBranch) { [string]$cfgLocal.duendeeBranch } else { 'neo-3d' }
+  if ($env:DT_NEO_DUENDEE_DIR -and (Test-Path -LiteralPath $env:DT_NEO_DUENDEE_DIR -PathType Container)) {
+    $duoProj = (Resolve-Path -LiteralPath $env:DT_NEO_DUENDEE_DIR).Path
+  }
+  $duoPlaceholder = [string]::IsNullOrWhiteSpace($duoProj) -or
+    -not (Test-Path -LiteralPath $duoProj) -or
+    -not (Test-LooksLikeNeoDuendeeRepo $duoProj)
+  if ($duoPlaceholder) {
+    $foundNeo = @(Find-LocalNeoDuendeeRepos)
+    if ($foundNeo.Count -gt 0) {
+      $duoProj = $foundNeo[0]
+      Write-UiLine "  $GRN   Duendee (neo) projectPath = $duoProj$RST"
+    }
+  }
+  Save-ToolConfig -ProjectPath $proj -PortNum $portNum -AppPath $appPath `
+    -DuendeeProjectPath $duoProj -DuendeePortNum $duoPort -DuendeeBranch $duoBranch
+
+  return @{
+    Project = $proj
+    Port = $portNum
+    AppPath = $appPath
+    DuendeeProject = $duoProj
+    DuendeePort = $duoPort
+    DuendeeBranch = $duoBranch
+  }
 }
 
 function Test-UninstallAction([string]$Name) {
@@ -610,17 +712,67 @@ if ($script:UninstallCli) {
   $Project = [string]$boot.Project
   $Port = [int]$boot.Port
   $AppPath = [string]$boot.AppPath
+  $script:FmProject = $Project
+  $script:FmPort = $Port
+  $script:FmAppPath = $AppPath
+  $script:DuendeeProject = [string]$boot.DuendeeProject
+  $script:DuendeePort = [int]$boot.DuendeePort
+  $script:DuendeeBranch = if ($boot.DuendeeBranch) { [string]$boot.DuendeeBranch } else { 'neo-3d' }
 }
 
-$StateDir = Join-Path $Root '.tunnelstate'
-$PidFile = Join-Path $StateDir 'tunnel.pid'
-$UrlFile = Join-Path $StateDir 'tunnel.url'
-$LogFile = Join-Path $StateDir 'tunnel.log'
-$OutLogFile = Join-Path $StateDir 'tunnel.out.log'
-$ServerPidFile = Join-Path $StateDir 'server.pid'
-$DesktopAppPidFile = Join-Path $StateDir 'desktop-app.pid'
-if (-not $script:UninstallCli -and -not (Test-Path -LiteralPath $StateDir)) {
-  New-Item -ItemType Directory -Path $StateDir | Out-Null
+$script:ActiveProduct = 'fm'
+$script:FmStateDir = Join-Path $Root '.tunnelstate'
+$script:DuendeeStateDir = Join-Path $Root '.tunnelstate-duendee'
+
+function Bind-ProductState {
+  param([ValidateSet('fm', 'duendee')][string]$Product)
+  $script:ActiveProduct = $Product
+  if ($Product -eq 'duendee') {
+    $script:Project = $script:DuendeeProject
+    $script:Port = $script:DuendeePort
+    $script:AppPath = ''
+    $script:StateDir = $script:DuendeeStateDir
+  } else {
+    $script:Project = $script:FmProject
+    $script:Port = $script:FmPort
+    $script:AppPath = $script:FmAppPath
+    $script:StateDir = $script:FmStateDir
+  }
+  # Locals used throughout the script (not only $script:*)
+  $script:ProjectRef = $script:Project
+  Set-Variable -Name Project -Scope Script -Value $script:Project
+  Set-Variable -Name Port -Scope Script -Value $script:Port
+  Set-Variable -Name AppPath -Scope Script -Value $script:AppPath
+  Set-Variable -Name StateDir -Scope Script -Value $script:StateDir
+  Set-Variable -Name PidFile -Scope Script -Value (Join-Path $script:StateDir 'tunnel.pid')
+  Set-Variable -Name UrlFile -Scope Script -Value (Join-Path $script:StateDir 'tunnel.url')
+  Set-Variable -Name LogFile -Scope Script -Value (Join-Path $script:StateDir 'tunnel.log')
+  Set-Variable -Name OutLogFile -Scope Script -Value (Join-Path $script:StateDir 'tunnel.out.log')
+  Set-Variable -Name ServerPidFile -Scope Script -Value (Join-Path $script:StateDir 'server.pid')
+  Set-Variable -Name DesktopAppPidFile -Scope Script -Value (Join-Path $script:StateDir 'desktop-app.pid')
+  if (-not $script:UninstallCli -and -not (Test-Path -LiteralPath $script:StateDir)) {
+    New-Item -ItemType Directory -Path $script:StateDir | Out-Null
+  }
+  $env:PROJECT = $script:Project
+  $env:SERVER_PID = (Join-Path $script:StateDir 'server.pid')
+  $env:PID_FILE = (Join-Path $script:StateDir 'tunnel.pid')
+  $env:URL_FILE = (Join-Path $script:StateDir 'tunnel.url')
+  $env:LOG = (Join-Path $script:StateDir 'tunnel.log')
+  $env:OUT_LOG = (Join-Path $script:StateDir 'tunnel.out.log')
+  $env:DT_PRODUCT = $Product
+}
+
+# Default: DuendeeFM context (autostart / CLI actions stay on FM)
+if ($script:UninstallCli) {
+  $StateDir = $script:FmStateDir
+  $PidFile = Join-Path $StateDir 'tunnel.pid'
+  $UrlFile = Join-Path $StateDir 'tunnel.url'
+  $LogFile = Join-Path $StateDir 'tunnel.log'
+  $OutLogFile = Join-Path $StateDir 'tunnel.out.log'
+  $ServerPidFile = Join-Path $StateDir 'server.pid'
+  $DesktopAppPidFile = Join-Path $StateDir 'desktop-app.pid'
+} else {
+  Bind-ProductState 'fm'
 }
 
 $script:BootTunnel = ($Action -eq 'boot-tunnel')
@@ -630,12 +782,6 @@ if ($script:RecoverTunnel) {
   $env:DT_WA_TEMPLATE = 'Tünel zaman aşımına uğradı, yeni tünel linki: {url}'
   $env:DT_RECOVER = '1'
 }
-$env:PROJECT = $Project
-$env:SERVER_PID = $ServerPidFile
-$env:PID_FILE = $PidFile
-$env:URL_FILE = $UrlFile
-$env:LOG = $LogFile
-$env:OUT_LOG = $OutLogFile
 
 function Get-AutoRunCommand {
   $prop = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'DuendeeTunnelTool' -ErrorAction SilentlyContinue
@@ -1704,11 +1850,32 @@ function Show-Logo {
   Write-UiLine ''
 }
 
+function Show-RootMenu {
+  Initialize-Utf8Console
+  Clear-Host
+  Show-Logo
+  Write-UiLine "  $BOLD  Ürün seçin$RST"
+  Write-UiLine ''
+  Write-UiLine "  [1]  DuendeeFM"
+  Write-UiLine "       $DIM   Mevcut yayın / tünel / app araçları (Duendee-fm)$RST"
+  Write-UiLine ''
+  Write-UiLine "  [2]  Duendee"
+  Write-UiLine "       $DIM   neo-3d test tüneli (Duendee-main)$RST"
+  Write-UiLine ''
+  Write-UiLine "  $DIM$BOLD[X]$RST  ${DIM}Çıkış$RST"
+  Write-UiLine ''
+  Write-Ui "$DIM   Seçim: $RST"
+}
+
 function Show-Menu {
+  # DuendeeFM submenu — existing options preserved
   Initialize-Utf8Console
   Clear-Host
   $autoMode = Get-AutoMode
   Show-Logo
+  Write-UiLine "  $SALMON$BOLD  DuendeeFM$RST"
+  Write-UiLine "  $DIM   $($script:FmProject)$RST"
+  Write-UiLine ''
   Write-UiLine "  [1]  Tünel Servisi Başlat"
   Write-UiLine "  [2]  Servis Durumunu Kontrol Et"
   Write-UiLine "  [3]  Yayın Linkini Kopyala"
@@ -1726,6 +1893,26 @@ function Show-Menu {
   }
   Write-UiLine "  [5]  Cihaz Açılışında Otomatik Başlat  $autoLabel  $launchLabel"
   Write-UiLine "  [6]  Aracı Cihazdan Kaldır"
+  Write-UiLine "  $DIM$BOLD[B]$RST  ${DIM}Ürün menüsüne dön$RST"
+  Write-UiLine ''
+  Write-Ui "$DIM   Seçim: $RST"
+}
+
+function Show-DuendeeMenu {
+  Initialize-Utf8Console
+  Clear-Host
+  Show-Logo
+  Write-UiLine "  $C5$BOLD  Duendee$RST  $DIM(neo-3d test)$RST"
+  $pathLabel = if ($script:DuendeeProject) { $script:DuendeeProject } else { '(yol ayarlanmadı)' }
+  Write-UiLine "  $DIM   $pathLabel$RST"
+  Write-UiLine "  $DIM   port $($script:DuendeePort)  ·  branch $($script:DuendeeBranch)$RST"
+  Write-UiLine ''
+  Write-UiLine "  [1]  Test Tüneli Başlat"
+  Write-UiLine "  [2]  Servis Durumunu Kontrol Et"
+  Write-UiLine "  [3]  Yayın Linkini Kopyala"
+  Write-UiLine "  [4]  Test Tünelini İptal Et"
+  Write-UiLine "  [5]  Proje yolu / port / branch"
+  Write-UiLine "  $DIM$BOLD[B]$RST  ${DIM}Ürün menüsüne dön$RST"
   Write-UiLine ''
   Write-Ui "$DIM   Seçim: $RST"
 }
@@ -2064,6 +2251,9 @@ function Get-DuendeeDepStamp([string]$Path) {
 }
 
 function Sync-DuendeeForPublish {
+  if ($script:ActiveProduct -eq 'duendee') {
+    return [bool](Sync-NeoDuendeeForTest)
+  }
   if (Test-IsDuendeeMainPath $Project) {
     Write-UiLine "  $RED$BOLD[HATA]$RST projectPath Duendee-main olamaz. Yayına yalnızca Duendee-fm alınır."
     return $false
@@ -2107,6 +2297,134 @@ function Sync-DuendeeForPublish {
     return $false
   }
   return $true
+}
+
+function Update-NeoDuendeeBranch([string]$Path, [string]$Branch) {
+  if (-not (Test-Path -LiteralPath (Join-Path $Path '.git'))) { return $false }
+  if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return $false }
+  $env:GIT_TERMINAL_PROMPT = '0'
+  try {
+    & git -C $Path fetch origin --prune 2>$null | Out-Null
+    $local = (& git -C $Path rev-parse --verify $Branch 2>$null)
+    $remote = (& git -C $Path rev-parse --verify "origin/$Branch" 2>$null)
+    if ($remote) {
+      & git -C $Path checkout $Branch 2>$null | Out-Null
+      if ($LASTEXITCODE -ne 0) {
+        & git -C $Path checkout -B $Branch "origin/$Branch" 2>$null | Out-Null
+      }
+      & git -C $Path pull --ff-only origin $Branch 2>$null | Out-Null
+      return $true
+    }
+    if ($local) {
+      & git -C $Path checkout $Branch 2>$null | Out-Null
+      return ($LASTEXITCODE -eq 0)
+    }
+    # Local-only neo-3d (not pushed yet): stay on it if already checked out
+    $cur = (& git -C $Path branch --show-current 2>$null)
+    if ($cur -eq $Branch) { return $true }
+    & git -C $Path checkout $Branch 2>$null | Out-Null
+    return ($LASTEXITCODE -eq 0)
+  } catch {
+    return $false
+  }
+}
+
+function Sync-NeoDuendeeForTest {
+  if ([string]::IsNullOrWhiteSpace($Project) -or -not (Test-Path -LiteralPath $Project)) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST Duendee projectPath ayarlı değil. Menüden [5] ile yol seçin."
+    return $false
+  }
+  if (-not (Test-LooksLikeNeoDuendeeRepo $Project)) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST Klasör Duendee (neo-3d) deposu değil: $Project"
+    return $false
+  }
+  Stop-DevServer
+  Stop-ListenersOnPort $Port
+  Start-Sleep -Milliseconds 300
+  if (Test-PortListening $Port) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST $Port portu boşaltılamadı."
+    return $false
+  }
+  $branch = if ($script:DuendeeBranch) { $script:DuendeeBranch } else { 'neo-3d' }
+  Write-UiLine "  $DIM   Duendee neo branch hazırlanıyor ($branch)...$RST"
+  $before = Get-DuendeeDepStamp $Project
+  if (-not (Update-NeoDuendeeBranch -Path $Project -Branch $branch)) {
+    Write-UiLine "  $YEL   Branch checkout/pull atlandı veya başarısız; mevcut working tree ile devam.$RST"
+  } else {
+    Write-UiLine "  $DIM   Branch: $branch$RST"
+  }
+  $after = Get-DuendeeDepStamp $Project
+  if (-not (Test-Path -LiteralPath (Join-Path $Project 'node_modules')) -or $before -ne $after) {
+    Write-UiLine "  $DIM   Bağımlılıklar kuruluyor (npm install)...$RST"
+    Push-Location $Project
+    try {
+      & npm install *>&1 | Out-Host
+      $npmCode = $LASTEXITCODE
+    } finally { Pop-Location }
+    if ($npmCode -ne 0) {
+      Write-UiLine "  $RED$BOLD   [HATA]$RST npm install başarısız."
+      return $false
+    }
+  }
+  return $true
+}
+
+function Invoke-ConfigureDuendeePath {
+  Clear-Host
+  Initialize-Utf8Console
+  Write-UiLine ''
+  Write-UiLine "$C5   --- Duendee (neo-3d) proje yolu ---$RST"
+  Write-UiLine ''
+  $found = @(Find-LocalNeoDuendeeRepos)
+  if ($found.Count -gt 0) {
+    for ($i = 0; $i -lt $found.Count; $i++) {
+      Write-UiLine ("  $DIM   [{0}] {1}$RST" -f ($i + 1), $found[$i])
+    }
+    Write-UiLine "  $DIM   Enter=[1]  numara  C=özel yol  B=klasör seç$RST"
+  } else {
+    Write-UiLine "  $YEL   Yerel Duendee-main bulunamadı.$RST"
+    Write-UiLine "  $DIM   C=özel yol  B=klasör seç$RST"
+  }
+  Write-Ui '  seçim> '
+  $choice = (Read-Host).Trim()
+  $picked = ''
+  if ([string]::IsNullOrWhiteSpace($choice) -and $found.Count -gt 0) {
+    $picked = $found[0]
+  } elseif ($choice -match '^\d+$' -and $found.Count -gt 0) {
+    $idx = [int]$choice - 1
+    if ($idx -ge 0 -and $idx -lt $found.Count) { $picked = $found[$idx] }
+  } elseif ($choice -match '^(?i)b$') {
+    $picked = Select-FolderBrowser 'Duendee (neo-3d) proje klasörünü seçin'
+  } elseif ($choice -match '^(?i)c$' -or $choice.Length -gt 1) {
+    if ($choice -match '^(?i)c$') {
+      Write-Ui '  yol> '
+      $picked = (Read-Host).Trim().Trim('"')
+    } else {
+      $picked = $choice.Trim('"')
+    }
+  }
+  if (-not $picked -or -not (Test-Path -LiteralPath $picked -PathType Container)) {
+    Write-UiLine "  $RED   Geçerli klasör seçilmedi.$RST"
+    Complete-Action
+    return
+  }
+  if (-not (Test-LooksLikeNeoDuendeeRepo $picked)) {
+    Write-UiLine "  $RED   Bu klasör Duendee neo deposu gibi görünmüyor.$RST"
+    Complete-Action
+    return
+  }
+  $script:DuendeeProject = (Resolve-Path -LiteralPath $picked).Path
+  Write-Ui ("  port [{0}]> " -f $script:DuendeePort)
+  $portIn = (Read-Host).Trim()
+  if ($portIn -match '^\d+$') { $script:DuendeePort = [int]$portIn }
+  Write-Ui ("  branch [{0}]> " -f $script:DuendeeBranch)
+  $brIn = (Read-Host).Trim()
+  if (-not [string]::IsNullOrWhiteSpace($brIn)) { $script:DuendeeBranch = $brIn }
+  Save-ToolConfig -ProjectPath $script:FmProject -PortNum $script:FmPort -AppPath $script:FmAppPath `
+    -DuendeeProjectPath $script:DuendeeProject -DuendeePortNum $script:DuendeePort -DuendeeBranch $script:DuendeeBranch
+  Bind-ProductState 'duendee'
+  Write-UiLine "  $GRN   Kaydedildi: $($script:DuendeeProject) :$($script:DuendeePort) [$($script:DuendeeBranch)]$RST"
+  Complete-Action
 }
 
 function Invoke-Start {
@@ -2161,7 +2479,11 @@ function Invoke-Start {
     Write-UiLine "  $GRN   Aktif tünel var.$RST"
     Set-Clipboard -Value $adoptUrl
     Write-UiLine "       $adoptUrl"
-    Start-CompanionApps -TunnelUrl $adoptUrl
+    if ($script:ActiveProduct -eq 'fm') {
+      Start-CompanionApps -TunnelUrl $adoptUrl
+    } else {
+      try { Start-Process $adoptUrl | Out-Null } catch {}
+    }
     Complete-Action
     return
   }
@@ -2178,7 +2500,8 @@ function Invoke-Start {
     Write-UiLine "  $GRN   Aktif tünel var.$RST"
     $existing = Recover-TunnelUrl
     if (-not $existing) { $existing = Get-TunnelUrl }
-    Write-UiLine "  ${C1}[2]$RST Güncel Duendee-fm yayına alınıyor..."
+    $syncLabel = if ($script:ActiveProduct -eq 'duendee') { 'Duendee neo-3d test yayını hazırlanıyor...' } else { 'Güncel Duendee-fm yayına alınıyor...' }
+    Write-UiLine "  ${C1}[2]$RST $syncLabel"
     if (-not (Sync-DuendeeForPublish)) {
       Complete-Action
       return
@@ -2197,7 +2520,11 @@ function Invoke-Start {
     }
     Set-Clipboard -Value $existing
     Write-UiLine "       $existing"
-    Start-CompanionApps -TunnelUrl $existing
+    if ($script:ActiveProduct -eq 'fm') {
+      Start-CompanionApps -TunnelUrl $existing
+    } else {
+      try { Start-Process $existing | Out-Null } catch {}
+    }
     Complete-Action
     return
   }
@@ -2211,7 +2538,8 @@ function Invoke-Start {
   if (Read-TunnelPid) { Remove-Item -LiteralPath $PidFile, $UrlFile -Force -ErrorAction SilentlyContinue }
 
   if (-not $script:NeedFreshTunnel) {
-    Write-UiLine "  ${C1}[2]$RST Güncel Duendee-fm yayına alınıyor..."
+    $syncLabel2 = if ($script:ActiveProduct -eq 'duendee') { 'Duendee neo-3d test yayını hazırlanıyor...' } else { 'Güncel Duendee-fm yayına alınıyor...' }
+    Write-UiLine "  ${C1}[2]$RST $syncLabel2"
     if (-not (Sync-DuendeeForPublish)) {
       Complete-Action
       return
@@ -2282,12 +2610,14 @@ function Invoke-Start {
     } else {
       Write-UiLine "  $DIM   Tarayıcı kapalı. [5] > [B].$RST"
     }
-    Start-CompanionApps -TunnelUrl $url
-    # Mobile APK caption already includes the tunnel URL — skip the extra link message.
-    if (-not $script:LastMobileApkSent) {
-      Send-TunnelWhatsApp -PublicUrl $url
-    } else {
-      Write-UiLine "  $DIM   WhatsApp: APK mesajı gönderildi (ayrı link mesajı yok).$RST"
+    if ($script:ActiveProduct -eq 'fm') {
+      Start-CompanionApps -TunnelUrl $url
+      # Mobile APK caption already includes the tunnel URL — skip the extra link message.
+      if (-not $script:LastMobileApkSent) {
+        Send-TunnelWhatsApp -PublicUrl $url
+      } else {
+        Write-UiLine "  $DIM   WhatsApp: APK mesajı gönderildi (ayrı link mesajı yok).$RST"
+      }
     }
   }
   if ($script:FleetClaimed -or $script:NeedFreshTunnel) {
@@ -3519,21 +3849,62 @@ try {
   }
 
   while ($true) {
-    Show-Menu
-    $choice = Get-Choice '123456'
+    Show-RootMenu
+    $product = Get-Choice '12X'
     Write-UiLine ''
-    try {
-      switch ($choice) {
-        '1' { Invoke-Start }
-        '2' { Invoke-Status }
-        '3' { Invoke-CopyLink }
-        '4' { Invoke-Cancel }
-        '5' { Invoke-Autostart }
-        '6' { Invoke-Uninstall }
+    if ($product -eq 'X') {
+      Invoke-ExitCleanup
+      exit 0
+    }
+    if ($product -eq '1') {
+      Bind-ProductState 'fm'
+      while ($true) {
+        Show-Menu
+        $choice = Get-Choice '123456B'
+        Write-UiLine ''
+        if ($choice -eq 'B') { break }
+        try {
+          switch ($choice) {
+            '1' { Invoke-Start }
+            '2' { Invoke-Status }
+            '3' { Invoke-CopyLink }
+            '4' { Invoke-Cancel }
+            '5' { Invoke-Autostart }
+            '6' { Invoke-Uninstall }
+          }
+        } catch {
+          Write-UiLine "  $RED$BOLD[HATA]$RST $($_.Exception.Message)"
+          Complete-Action
+        }
       }
-    } catch {
-      Write-UiLine "  $RED$BOLD[HATA]$RST $($_.Exception.Message)"
-      Complete-Action
+      continue
+    }
+    if ($product -eq '2') {
+      Bind-ProductState 'duendee'
+      if ([string]::IsNullOrWhiteSpace($script:DuendeeProject) -or -not (Test-Path -LiteralPath $script:DuendeeProject)) {
+        Write-UiLine "  $YEL   Duendee yolu henüz ayarlı değil — kurulum.$RST"
+        Write-UiLine ''
+        Invoke-ConfigureDuendeePath
+        Bind-ProductState 'duendee'
+      }
+      while ($true) {
+        Show-DuendeeMenu
+        $choice = Get-Choice '12345B'
+        Write-UiLine ''
+        if ($choice -eq 'B') { break }
+        try {
+          switch ($choice) {
+            '1' { Invoke-Start }
+            '2' { Invoke-Status }
+            '3' { Invoke-CopyLink }
+            '4' { Invoke-Cancel }
+            '5' { Invoke-ConfigureDuendeePath }
+          }
+        } catch {
+          Write-UiLine "  $RED$BOLD[HATA]$RST $($_.Exception.Message)"
+          Complete-Action
+        }
+      }
     }
   }
 } finally {
