@@ -781,7 +781,14 @@ $script:BootTunnel = ($Action -eq 'boot-tunnel')
 $script:RecoverTunnel = ($Action -eq 'recover-tunnel')
 $script:AutoMode = -not [string]::IsNullOrWhiteSpace($Action) -and -not $script:BootTunnel
 if ($script:RecoverTunnel) {
-  $env:DT_WA_TEMPLATE = 'Tünel zaman aşımına uğradı, yeni tünel linki: {url}'
+  # Helpers below are not defined yet — keep product-tagged recover copy inline.
+  if ($script:ActiveProduct -eq 'duendee') {
+    $env:DT_WA_TEMPLATE = "Duendee tüneli yenilendi (main)`n{url}"
+    $env:DT_WA_PRODUCT = 'duendee'
+  } else {
+    $env:DT_WA_TEMPLATE = "DuendeeFM tüneli yenilendi`n{url}"
+    $env:DT_WA_PRODUCT = 'fm'
+  }
   $env:DT_RECOVER = '1'
 }
 
@@ -964,6 +971,31 @@ function Get-WaSessionDir {
   Join-Path $env:LOCALAPPDATA 'DuendeeWhatsApp'
 }
 
+function Get-ProductDisplayName {
+  if ($script:ActiveProduct -eq 'duendee') { return 'Duendee' }
+  return 'DuendeeFM'
+}
+
+function Get-ProductWaTemplate {
+  if ($script:ActiveProduct -eq 'duendee') {
+    return "Duendee tüneli (main)`n{url}"
+  }
+  return "DuendeeFM tüneli`n{url}"
+}
+
+function Get-ProductWaRecoverTemplate {
+  if ($script:ActiveProduct -eq 'duendee') {
+    return "Duendee tüneli yenilendi (main)`n{url}"
+  }
+  return "DuendeeFM tüneli yenilendi`n{url}"
+}
+
+function Format-ProductTunnelLine([string]$Url) {
+  $name = Get-ProductDisplayName
+  if ([string]::IsNullOrWhiteSpace($Url)) { return "$name tüneli: (yok)" }
+  return "$name tüneli: $Url"
+}
+
 function Send-TunnelWhatsApp([string]$PublicUrl) {
   $waJs = Join-Path $Root 'scripts\send-whatsapp.js'
   $waCfg = Join-Path $Root 'scripts\whatsapp-config.json'
@@ -994,9 +1026,10 @@ function Send-TunnelWhatsApp([string]$PublicUrl) {
   }
   $phones = @($phones | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
   $phone = ($phones -join ',')
+  $productName = Get-ProductDisplayName
   $line = if ($phones.Count -gt 1) { "$($phones.Count) alici: $($phones -join ', ')" } elseif ($phone) { $phone } else { '5315162429' }
   Write-UiLine "  WhatsApp baglantisi kontrol ediliyor ($line)..."
-  Write-UiLine "  WhatsApp'a link gönderiliyor..."
+  Write-UiLine "  WhatsApp'a $productName linki gönderiliyor..."
   $prevEa = $ErrorActionPreference
   $ErrorActionPreference = 'Continue'
   $prevNative = $null
@@ -1008,6 +1041,9 @@ function Send-TunnelWhatsApp([string]$PublicUrl) {
     # Avoid PowerShell mangling leading '+' on phone; pass via env instead
     $env:DT_WA_PHONE = $phone
     $env:DT_WA_URL = $PublicUrl
+    $env:DT_WA_PRODUCT = if ($script:ActiveProduct -eq 'duendee') { 'duendee' } else { 'fm' }
+    $env:DT_WA_TEMPLATE = Get-ProductWaTemplate
+    $env:DT_WA_URL_FILE = $UrlFile
     & $node $waJs $PublicUrl $phone
     $ec = $LASTEXITCODE
     if ($ec -ne 0) {
@@ -1016,11 +1052,14 @@ function Send-TunnelWhatsApp([string]$PublicUrl) {
       Write-UiLine "  $DIM   Remove-Item -Recurse -Force `"$(Get-WaSessionDir)`"$RST"
       Write-UiLine "  $DIM   Manuel: node `"$waJs`" `"$PublicUrl`"$RST"
     } else {
-      Write-UiLine "  $GRN   WhatsApp mesaji gonderildi.$RST"
+      Write-UiLine "  $GRN   WhatsApp $productName mesaji gonderildi.$RST"
     }
   } finally {
     Remove-Item Env:DT_WA_PHONE -ErrorAction SilentlyContinue
     Remove-Item Env:DT_WA_URL -ErrorAction SilentlyContinue
+    Remove-Item Env:DT_WA_PRODUCT -ErrorAction SilentlyContinue
+    Remove-Item Env:DT_WA_TEMPLATE -ErrorAction SilentlyContinue
+    Remove-Item Env:DT_WA_URL_FILE -ErrorAction SilentlyContinue
     $ErrorActionPreference = $prevEa
     if ($null -ne $prevNative) { $PSNativeCommandUseErrorActionPreference = $prevNative }
   }
@@ -1035,7 +1074,8 @@ function Invoke-RetractWhatsApp {
   $node = Find-NodeExe
   if (-not $node) { return }
   if (-not (Ensure-WhatsAppDeps)) { return }
-  Write-UiLine "  Eski tunnel / APK WhatsApp mesajlari kaldiriliyor..."
+  $productName = Get-ProductDisplayName
+  Write-UiLine "  Eski $productName tunnel / APK WhatsApp mesajlari kaldiriliyor..."
   $prevEa = $ErrorActionPreference
   $ErrorActionPreference = 'Continue'
   $prevNative = $null
@@ -1045,16 +1085,20 @@ function Invoke-RetractWhatsApp {
   }
   try {
     $env:DT_WA_ACTION = 'retract'
+    $env:DT_WA_PRODUCT = if ($script:ActiveProduct -eq 'duendee') { 'duendee' } else { 'fm' }
+    $env:DT_WA_URL_FILE = $UrlFile
     if (-not $env:DT_WA_TIMEOUT_MS) { $env:DT_WA_TIMEOUT_MS = '90000' }
     & $node $waJs
     if ($LASTEXITCODE -ne 0) {
-      Write-UiLine "  $YEL   Eski WhatsApp tunnel/APK mesaji kaldirilamadi (çıkış $LASTEXITCODE).$RST"
+      Write-UiLine "  $YEL   Eski WhatsApp $productName mesaji kaldirilamadi (çıkış $LASTEXITCODE).$RST"
     } else {
-      Write-UiLine "  $GRN   Gecersiz tunnel / APK mesaji kaldirildi.$RST"
+      Write-UiLine "  $GRN   Gecersiz $productName tunnel / APK mesaji kaldirildi.$RST"
     }
   } finally {
     Remove-Item Env:DT_WA_ACTION -ErrorAction SilentlyContinue
     Remove-Item Env:DT_WA_TIMEOUT_MS -ErrorAction SilentlyContinue
+    Remove-Item Env:DT_WA_PRODUCT -ErrorAction SilentlyContinue
+    Remove-Item Env:DT_WA_URL_FILE -ErrorAction SilentlyContinue
     $ErrorActionPreference = $prevEa
     if ($null -ne $prevNative) { $PSNativeCommandUseErrorActionPreference = $prevNative }
   }
@@ -2002,15 +2046,17 @@ function Invoke-Status {
     if ($script:FleetExit -ne 0) { $fleetUrl = '' }
   }
   $url = if ($publicOk) { $localUrl } else { $fleetUrl }
+  $productName = Get-ProductDisplayName
+  Write-UiLine "  Ürün ............... $productName"
   if ($running -and $localUrl) {
     Write-UiLine "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR$RST"
-    Write-UiLine "  Yayın Linki ......... $localUrl"
+    Write-UiLine "  Yayın Linki ......... $(Format-ProductTunnelLine $localUrl)"
     if (-not $publicOk) {
       Write-UiLine "  $RED   Adres henüz dışarıdan yanıt vermiyor.$RST"
     }
   } elseif ($publicOk -or $fleetUrl) {
     Write-UiLine "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR$RST"
-    Write-UiLine "  Yayın Linki ......... $url"
+    Write-UiLine "  Yayın Linki ......... $(Format-ProductTunnelLine $url)"
   } elseif ($running) {
     Write-UiLine "  Tünel Servisi ..... ${GRN}ÇALIŞIYOR$RST"
     Write-UiLine "  $RED   Yayın linki okunamadı.$RST"
@@ -2051,7 +2097,7 @@ function Invoke-CopyLink {
   }
   Set-Clipboard -Value $url
   Write-UiLine "  $GRN   Yayın linki panoya kopyalandı:$RST"
-  Write-UiLine "       $url"
+  Write-UiLine ("  " + (Format-ProductTunnelLine $url))
   Complete-Action
 }
 
@@ -2511,8 +2557,9 @@ function Invoke-StartDuendeeIsolated {
         Write-UiLine "  $RED   Uygulama açılamadı. Tünel duruyor ama sayfa erişilemeyebilir.$RST"
       }
       Set-Clipboard -Value $existing
-      Write-UiLine "       $existing"
+      Write-UiLine ("  " + (Format-ProductTunnelLine $existing))
       try { Start-Process $existing | Out-Null } catch {}
+      Send-TunnelWhatsApp -PublicUrl $existing
       Complete-Action
       return
     }
@@ -2542,9 +2589,10 @@ function Invoke-StartDuendeeIsolated {
     if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     [IO.File]::WriteAllText($UrlFile, $url)
     Set-Clipboard -Value $url
-    Write-UiLine "       $url"
+    Write-UiLine ("  " + (Format-ProductTunnelLine $url))
     Write-UiLine "  $GRN   Link panoya kopyalandı.$RST"
     try { Start-Process $url | Out-Null } catch {}
+    Send-TunnelWhatsApp -PublicUrl $url
   }
   Start-TunnelWatchdog
   Complete-Action
@@ -2728,7 +2776,7 @@ function Invoke-Start {
   }
   if ($url) {
     Set-Clipboard -Value $url
-    Write-UiLine "       $url"
+    Write-UiLine ("  " + (Format-ProductTunnelLine $url))
     Write-UiLine "  $GRN   Link panoya kopyalandı.$RST  Gerekirse [3] ile yeniden kopyalayın."
     Write-UiLine ''
     if (Test-BrowserOpens -and $dnsReady) {
@@ -2745,7 +2793,7 @@ function Invoke-Start {
       if (-not $script:LastMobileApkSent) {
         Send-TunnelWhatsApp -PublicUrl $url
       } else {
-        Write-UiLine "  $DIM   WhatsApp: APK mesajı gönderildi (ayrı link mesajı yok).$RST"
+        Write-UiLine "  $DIM   WhatsApp: DuendeeFM APK mesajı gönderildi (ayrı link mesajı yok).$RST"
       }
     }
   }
@@ -3079,17 +3127,21 @@ function Send-WhatsAppApk([string]$ApkPath, [string]$PublicUrl) {
   try {
     $env:DT_WA_APK = $ApkPath
     $env:DT_WA_APK_ONLY = '1'
+    $env:DT_WA_PRODUCT = if ($script:ActiveProduct -eq 'duendee') { 'duendee' } else { 'fm' }
+    $env:DT_WA_URL_FILE = $UrlFile
     if ($PublicUrl) { $env:DT_WA_URL = $PublicUrl }
     & $node $waJs $(if ($PublicUrl) { $PublicUrl } else { 'apk' })
     if ($LASTEXITCODE -ne 0) {
       Write-UiLine "  $YEL   WhatsApp APK gönderimi başarısız (çıkış $LASTEXITCODE).$RST"
     } else {
-      Write-UiLine "  $GRN   WhatsApp APK gonderildi.$RST"
+      Write-UiLine "  $GRN   WhatsApp $(Get-ProductDisplayName) APK gonderildi.$RST"
     }
   } finally {
     Remove-Item Env:DT_WA_APK -ErrorAction SilentlyContinue
     Remove-Item Env:DT_WA_APK_ONLY -ErrorAction SilentlyContinue
     Remove-Item Env:DT_WA_URL -ErrorAction SilentlyContinue
+    Remove-Item Env:DT_WA_PRODUCT -ErrorAction SilentlyContinue
+    Remove-Item Env:DT_WA_URL_FILE -ErrorAction SilentlyContinue
     $ErrorActionPreference = $prevEa
   }
 }

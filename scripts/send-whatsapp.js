@@ -41,7 +41,16 @@ if (!fs.existsSync(configPath)) {
 }
 
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-const urlFile = path.join(toolRoot, '.tunnelstate', 'tunnel.url');
+const waProduct =
+  String(process.env.DT_WA_PRODUCT || '').trim().toLowerCase() === 'duendee' ? 'duendee' : 'fm';
+const productLabel = waProduct === 'duendee' ? 'Duendee' : 'DuendeeFM';
+const urlFile =
+  String(process.env.DT_WA_URL_FILE || '').trim() ||
+  path.join(
+    toolRoot,
+    waProduct === 'duendee' ? '.tunnelstate-duendee' : '.tunnelstate',
+    'tunnel.url'
+  );
 const action =
   String(process.env.DT_WA_ACTION || '').trim().toLowerCase() === 'retract' || process.argv.includes('--retract')
     ? 'retract'
@@ -59,6 +68,22 @@ function resolveUrl(raw) {
   }
   const value = fromFile || arg;
   return String(value || '').replace(/[\r\n\s]+/g, '').replace(/\/+$/, '');
+}
+
+function defaultMessageTemplate() {
+  if (waProduct === 'duendee') {
+    return config.messageTemplateDuendee || 'Duendee tüneli (main)\n{url}';
+  }
+  return config.messageTemplate || config.messageTemplateFm || 'DuendeeFM tüneli\n{url}';
+}
+
+function rowMatchesProduct(row) {
+  const p = String(row?.product || '').trim().toLowerCase();
+  if (!p) {
+    // Legacy untagged rows belong to DuendeeFM only.
+    return waProduct === 'fm';
+  }
+  return p === waProduct;
 }
 
 const url = action === 'retract' ? '' : resolveUrl(process.argv[2] || process.env.DT_WA_URL || '');
@@ -394,12 +419,17 @@ async function deleteStored(sock, keepUrl) {
   const keep = [];
   const targets = await revokeTargets(sock);
   for (const row of rows) {
+    // Never delete the other product's tunnel/APK messages.
+    if (!rowMatchesProduct(row)) {
+      keep.push(row);
+      continue;
+    }
     if (keepUrl && sameUrl(row.url, keepUrl)) {
       keep.push(row);
       continue;
     }
     if (await revokeMessage(sock, row, targets)) {
-      console.log('  Eski link mesaji kaldirildi: ' + (row.url || row.id));
+      console.log('  Eski ' + productLabel + ' link mesaji kaldirildi: ' + (row.url || row.id));
     } else {
       keep.push(row);
     }
@@ -437,6 +467,15 @@ function messageStampMs(msg) {
 }
 
 function activeTunnelUrl() {
+  if (fs.existsSync(urlFile)) {
+    const fromProductFile = String(fs.readFileSync(urlFile, 'utf8') || '')
+      .trim()
+      .replace(/\/+$/, '');
+    if (/^https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com$/i.test(fromProductFile)) {
+      return fromProductFile;
+    }
+  }
+  if (waProduct === 'duendee') return '';
   const script = path.join(toolRoot, 'scripts', 'fleet.js');
   if (!fs.existsSync(script)) return '';
   const out = spawnSync(process.execPath, [script, 'lookup', '--root', toolRoot], { encoding: 'utf8' });
@@ -515,13 +554,15 @@ async function purgeInactiveTunnelLinks(sock) {
   for (const row of fromChat) {
     if (row?.id) byId.set(row.id + '\n' + (row.jid || ''), row);
   }
-  // Include locally tracked APK / link sends (cancel must remove APK too).
+  // Include locally tracked APK / link sends for this product only.
   for (const row of loadSent()) {
+    if (!rowMatchesProduct(row)) continue;
     const key = (row.id || '') + '\n' + (row.jid || '');
     if (!row.id) continue;
     if (!byId.has(key)) byId.set(key, row);
   }
   const drop = [...byId.values()].filter((row) => {
+    if (!rowMatchesProduct(row)) return false;
     const u = String(row.url || '');
     if (!u) return !keepUrl;
     if (u.startsWith('apk:')) return !keepUrl;
@@ -541,7 +582,14 @@ async function purgeInactiveTunnelLinks(sock) {
 
 function rememberSent(id, jid, messageUrl, kind = 'link') {
   const rows = loadSent().filter((row) => row.id !== id);
-  rows.push({ id, jid, url: messageUrl, kind, at: new Date().toISOString() });
+  rows.push({
+    id,
+    jid,
+    url: messageUrl,
+    kind,
+    product: waProduct,
+    at: new Date().toISOString()
+  });
   saveSent(rows);
 }
 
@@ -604,9 +652,9 @@ async function deliver(sock) {
   if (
     !apkOnly &&
     process.env.DT_WA_KEEP_EXISTING === '1' &&
-    loadSent().some((row) => sameUrl(row.url, url))
+    loadSent().some((row) => rowMatchesProduct(row) && sameUrl(row.url, url))
   ) {
-    console.log('  Bu link zaten WhatsApp mesajinda.');
+    console.log('  Bu ' + productLabel + ' linki zaten WhatsApp mesajinda.');
     delivered = true;
     finish(0, 'Mevcut link mesaji duruyor.');
     return;
@@ -614,16 +662,17 @@ async function deliver(sock) {
   if (!apkOnly && url) {
     await deleteStored(sock, url);
   }
-  const message = String(process.env.DT_WA_TEMPLATE || config.messageTemplate || 'Duendee tunnel linki: {url}').replace(
+  const message = String(process.env.DT_WA_TEMPLATE || defaultMessageTemplate()).replace(
     '{url}',
     url || ''
   );
   const apkCaption =
     process.env.DT_WA_APK_CAPTION ||
     (url
-      ? 'DuendeeFM Android APK\nTünel: ' + url
-      : 'DuendeeFM Android APK');
+      ? productLabel + ' Android APK\nTünel: ' + url
+      : productLabel + ' Android APK');
   const deliveredRows = [];
+  console.log('  Ürün: ' + productLabel);
   for (const target of recipients) {
     let acked = false;
     try {
@@ -633,7 +682,7 @@ async function deliver(sock) {
       let last = null;
       for (const jid of targets) {
         if (!apkOnly && url) {
-          console.log('  Link gonderiliyor -> ' + target + ' (' + jid + ')');
+          console.log('  ' + productLabel + ' linki gonderiliyor -> ' + target + ' (' + jid + ')');
           last = await sendText(sock, jid, message);
           if (!last.acked) {
             console.log('  Sunucu onayi gelmedi, diger adres deneniyor...');
@@ -727,8 +776,8 @@ async function main() {
 
   const linkedNow = readLinkedId();
   const keepLinked = action === 'send' && keepExisting && hasSession && Boolean(linkedNow);
-  if (keepLinked && loadSent().some((row) => sameUrl(row.url, url))) {
-    console.log('  Bu link zaten WhatsApp mesajinda.');
+  if (keepLinked && loadSent().some((row) => rowMatchesProduct(row) && sameUrl(row.url, url))) {
+    console.log('  Bu ' + productLabel + ' linki zaten WhatsApp mesajinda.');
     return;
   }
   if (!keepLinked && action === 'send' && linkedNow && isPhoneAccount(linkedNow) && !phonesMatch(linkedNow, phone)) {

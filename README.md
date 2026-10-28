@@ -66,6 +66,12 @@ The Windows tool opens with a product picker:
 
 DuendeeFM and Duendee use **separate** ports, state dirs, and cloudflared processes so starting/stopping one does not kill the other.
 
+WhatsApp messages are product-tagged too:
+- **DuendeeFM tüneli** + URL
+- **Duendee tüneli (main)** + URL  
+
+Cancel/retract only removes that product’s messages.
+
 **Duendee** auto-detects `Duendee-main`, fetches origin, and publishes the **newest remote branch** (by committer date). There is no manual path/port/branch menu.
 
 ### First-run projectPath (DuendeeFM)

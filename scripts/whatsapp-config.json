@@ -1,6 +1,7 @@
 {
   "targetPhone": "+905315162429",
   "targetPhones": [],
-  "messageTemplate": "Duendee tunnel linki: {url}",
+  "messageTemplate": "DuendeeFM tüneli\n{url}",
+  "messageTemplateDuendee": "Duendee tüneli (main)\n{url}",
   "sessionDir": ".whatsapp-session"
 }
