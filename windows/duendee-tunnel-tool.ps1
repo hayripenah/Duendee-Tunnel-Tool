@@ -2117,15 +2117,19 @@ function Test-OriginBundleBroken {
 function Start-AppOrigin {
   $viteCmd = Join-Path $Project 'node_modules\vite\bin\vite.js'
   $node = Find-NodeExe
-  $usePreview = (Test-Path -LiteralPath $viteCmd) -and $node -and (
+  $hasVite = (Test-Path -LiteralPath $viteCmd) -and $node -and (
     (Test-Path -LiteralPath (Join-Path $Project 'vite.config.ts')) -or
     (Test-Path -LiteralPath (Join-Path $Project 'vite.config.js')) -or
     (Test-Path -LiteralPath (Join-Path $Project 'vite.config.mjs'))
   )
+  # Duendee (main) test tunnel: vite dev only — skip slow/fragile production build.
+  $useDevOnly = ($script:ActiveProduct -eq 'duendee')
+  $usePreview = $hasVite -and -not $useDevOnly
   $serverOut = Join-Path $StateDir 'server.out.log'
   $serverErr = Join-Path $StateDir 'server.err.log'
   $buildLog = Join-Path $StateDir 'server.build.log'
-  for ($attempt = 1; $attempt -le 2; $attempt++) {
+  $maxAttempts = if ($useDevOnly) { 1 } else { 2 }
+  for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
     Ensure-SupabaseEnv
     if ($usePreview -and (Test-AppBuildStale)) {
       Push-Location $Project
@@ -2139,19 +2143,24 @@ function Start-AppOrigin {
     } elseif ($usePreview) {
       Write-UiLine "  $DIM   Mevcut derleme kullanılacak.$RST"
     }
-    if ($usePreview) {
+    if ($useDevOnly -and $hasVite) {
+      Write-UiLine "  $DIM   Vite dev (port $Port) — build atlandı.$RST"
+      $cmd = "cd /d `"$Project`" & `"$node`" `"$viteCmd`" --host 127.0.0.1 --port $Port --strictPort > `"$serverOut`" 2> `"$serverErr`""
+    } elseif ($usePreview) {
       $cmd = "cd /d `"$Project`" & `"$node`" `"$viteCmd`" preview --host 127.0.0.1 --port $Port --strictPort > `"$serverOut`" 2> `"$serverErr`""
     } else {
-      $cmd = "cd /d `"$Project`" & npm run dev > `"$serverOut`" 2> `"$serverErr`""
+      $cmd = "cd /d `"$Project`" & npm run dev -- --host 127.0.0.1 --port $Port --strictPort > `"$serverOut`" 2> `"$serverErr`""
     }
     $p = Start-HiddenCmd $cmd
     if ($p) { Set-Content -LiteralPath $ServerPidFile -Value $p.Id -Encoding Ascii }
     $ready = $false
-    for ($i = 1; $i -le 80; $i++) {
+    $waitTicks = if ($useDevOnly) { 120 } else { 80 }
+    for ($i = 1; $i -le $waitTicks; $i++) {
       if (Test-PortListening $Port) { $ready = $true; break }
       Start-Sleep -Milliseconds 250
     }
     if (-not $ready) { return $false }
+    if ($useDevOnly) { return $true }
     if (-not (Test-OriginBundleBroken)) { return $true }
     Write-UiLine "  $DIM   Sunulan paket Supabase ayarı içermiyor, yeniden derleniyor.$RST"
     Stop-DevServer
@@ -2348,22 +2357,40 @@ function Sync-DuendeeForPublish {
   return $true
 }
 
-function Resolve-NewestNeoDuendeeBranch([string]$Path) {
+function Resolve-NewestNeoDuendeeBranch([string]$Path, [switch]$FetchRemote) {
   if (-not (Test-Path -LiteralPath (Join-Path $Path '.git'))) { return '' }
   if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return '' }
   $env:GIT_TERMINAL_PROMPT = '0'
+  if ($FetchRemote) {
+    try { & git -C $Path fetch origin --prune 2>$null | Out-Null } catch {}
+  }
+  $bestName = ''
+  $bestTs = -1
   try {
-    & git -C $Path fetch origin --prune 2>$null | Out-Null
-  } catch {}
-  try {
-    $refs = @(& git -C $Path for-each-ref --sort=-committerdate --format='%(refname:short)' refs/remotes/origin 2>$null)
-    foreach ($ref in $refs) {
-      $name = "$ref".Trim() -replace '^origin/', ''
+    # Trailing slash skips the bare refs/remotes/origin symbolic ref ("origin").
+    $lines = @(& git -C $Path for-each-ref --sort=-committerdate `
+        --format='%(committerdate:unix)|%(refname)' refs/remotes/origin/ refs/heads/ 2>$null)
+    foreach ($line in $lines) {
+      $raw = "$line".Trim()
+      if (-not $raw) { continue }
+      $parts = $raw.Split('|', 2)
+      if ($parts.Count -lt 2) { continue }
+      $ts = 0
+      if (-not [int64]::TryParse($parts[0], [ref]$ts)) { continue }
+      $ref = $parts[1]
+      $name = ''
+      if ($ref -match '^refs/remotes/origin/(.+)$') { $name = $Matches[1] }
+      elseif ($ref -match '^refs/heads/(.+)$') { $name = $Matches[1] }
+      else { continue }
       if ([string]::IsNullOrWhiteSpace($name)) { continue }
-      if ($name -eq 'HEAD' -or $name -match 'HEAD') { continue }
-      return $name
+      if ($name -eq 'HEAD' -or $name -eq 'origin') { continue }
+      if ($ts -gt $bestTs) {
+        $bestTs = $ts
+        $bestName = $name
+      }
     }
   } catch {}
+  if ($bestName) { return $bestName }
   try {
     $cur = (& git -C $Path branch --show-current 2>$null)
     if ($cur) { return "$cur".Trim() }
@@ -2374,6 +2401,7 @@ function Resolve-NewestNeoDuendeeBranch([string]$Path) {
 function Update-NeoDuendeeBranch([string]$Path, [string]$Branch) {
   if (-not (Test-Path -LiteralPath (Join-Path $Path '.git'))) { return $false }
   if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return $false }
+  if ([string]::IsNullOrWhiteSpace($Branch) -or $Branch -eq 'origin' -or $Branch -eq 'HEAD') { return $false }
   $env:GIT_TERMINAL_PROMPT = '0'
   try {
     & git -C $Path fetch origin --prune 2>$null | Out-Null
@@ -2391,16 +2419,14 @@ function Update-NeoDuendeeBranch([string]$Path, [string]$Branch) {
       & git -C $Path checkout $Branch 2>$null | Out-Null
       return ($LASTEXITCODE -eq 0)
     }
-    $cur = (& git -C $Path branch --show-current 2>$null)
-    if ($cur -eq $Branch) { return $true }
-    & git -C $Path checkout $Branch 2>$null | Out-Null
-    return ($LASTEXITCODE -eq 0)
+    return $false
   } catch {
     return $false
   }
 }
 
 function Ensure-NeoDuendeeAutoDetect {
+  # Fast path for menus: no git fetch (that runs only on tunnel start).
   $script:DuendeePort = 8081
   $found = @(Find-LocalNeoDuendeeRepos)
   if ($found.Count -gt 0) {
@@ -2412,11 +2438,9 @@ function Ensure-NeoDuendeeAutoDetect {
     $script:DuendeeBranch = '(bulunamadı)'
     return $false
   }
-  $newest = Resolve-NewestNeoDuendeeBranch $script:DuendeeProject
-  if ($newest) { $script:DuendeeBranch = $newest }
-  elseif (-not $script:DuendeeBranch) { $script:DuendeeBranch = 'main' }
-  Save-ToolConfig -ProjectPath $script:FmProject -PortNum $script:FmPort -AppPath $script:FmAppPath `
-    -DuendeeProjectPath $script:DuendeeProject -DuendeePortNum $script:DuendeePort -DuendeeBranch $script:DuendeeBranch
+  $hint = Resolve-NewestNeoDuendeeBranch $script:DuendeeProject
+  if ($hint) { $script:DuendeeBranch = $hint }
+  elseif (-not $script:DuendeeBranch -or $script:DuendeeBranch -eq 'origin') { $script:DuendeeBranch = 'main' }
   if ($script:ActiveProduct -eq 'duendee') { Bind-ProductState 'duendee' }
   return $true
 }
@@ -2437,7 +2461,9 @@ function Sync-NeoDuendeeForTest {
     Write-UiLine "  $RED$BOLD[HATA]$RST $Port portu boşaltılamadı."
     return $false
   }
-  $branch = if ($script:DuendeeBranch) { $script:DuendeeBranch } else { 'main' }
+  $branch = Resolve-NewestNeoDuendeeBranch -Path $Project -FetchRemote
+  if (-not $branch -or $branch -eq 'origin') { $branch = 'main' }
+  $script:DuendeeBranch = $branch
   Write-UiLine "  $DIM   En güncel Duendee branch hazırlanıyor ($branch)...$RST"
   $before = Get-DuendeeDepStamp $Project
   if (-not (Update-NeoDuendeeBranch -Path $Project -Branch $branch)) {
@@ -2445,6 +2471,8 @@ function Sync-NeoDuendeeForTest {
   } else {
     Write-UiLine "  $DIM   Branch: $branch$RST"
   }
+  Save-ToolConfig -ProjectPath $script:FmProject -PortNum $script:FmPort -AppPath $script:FmAppPath `
+    -DuendeeProjectPath $script:DuendeeProject -DuendeePortNum $script:DuendeePort -DuendeeBranch $script:DuendeeBranch
   $after = Get-DuendeeDepStamp $Project
   if (-not (Test-Path -LiteralPath (Join-Path $Project 'node_modules')) -or $before -ne $after) {
     Write-UiLine "  $DIM   Bağımlılıklar kuruluyor (npm install)...$RST"
