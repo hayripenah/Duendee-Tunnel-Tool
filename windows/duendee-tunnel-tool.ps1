@@ -1748,63 +1748,75 @@ function Wait-PublicTunnelReady([string]$Url, [int]$Seconds = 60) {
   return $false
 }
 
+function Test-EdgeDnsOk {
+  return (Test-NslookupHasA 'region1.v2.argotunnel.com' '') -or
+    (Test-NslookupHasA 'region1.v2.argotunnel.com' '8.8.8.8') -or
+    (Test-NslookupHasA 'region1.v2.argotunnel.com' '1.1.1.1')
+}
+
 function Repair-TunnelDns {
-  # Only touch adapter DNS when edge resolution actually fails.
-  # Forcing 1.1.1.1 on every start fought DHCP/router settings and felt like
-  # "DNS keeps breaking" — especially on flaky Wi-Fi / hotspot switches.
+  # Never rewrite adapter DNS. The old implementation forced 8.8.8.8/9.9.9.9
+  # on every start and never restored DHCP, which broke local/captive/corporate
+  # DNS on the whole machine. Only clear the cache and report.
   Write-UiLine "  $DIM   DNS kontrol ediliyor...$RST"
   try { Clear-DnsClientCache | Out-Null } catch {}
 
-  $edgeOk = (Test-NslookupHasA 'region1.v2.argotunnel.com' '') -or
-    (Test-NslookupHasA 'region1.v2.argotunnel.com' '8.8.8.8') -or
-    (Test-NslookupHasA 'region1.v2.argotunnel.com' '1.1.1.1')
-  if ($edgeOk) {
+  if (Test-EdgeDnsOk) {
     Write-UiLine "  $DIM   Edge DNS OK (region1.v2.argotunnel.com)$RST"
     return $true
   }
 
-  Write-UiLine "  $YEL   Edge DNS zayıf; genel çözümleyiciler deneniyor...$RST"
-  # Prefer Google/Quad9 first — some networks partially block Cloudflare anycast.
-  $wanted = @('8.8.8.8', '9.9.9.9', '1.1.1.1')
-  $changed = $false
-  $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {
-      $_.Status -eq 'Up' -and $_.HardwareInterface -and $_.InterfaceDescription -notmatch '(?i)virtual|hyper-v|vmware|loopback|bluetooth|tailscale|wintun|wireguard'
-    })
-  if ($adapters.Count -eq 0) {
-    $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {
-        $_.Status -eq 'Up' -and $_.InterfaceDescription -notmatch '(?i)tailscale|wintun|wireguard|loopback'
-      })
+  Write-UiLine "  $YEL   Edge DNS zayıf. Ağ/DNS ayarları DEĞİŞTİRİLMEDİ.$RST"
+  Write-UiLine "  $DIM   Gerekirse DNS'i elle 1.1.1.1 / 8.8.8.8 yapın; tünel yine de denenecek.$RST"
+  return $false
+}
+
+function Test-ToolStaticDns([string[]]$Servers) {
+  if (-not $Servers -or $Servers.Count -eq 0) { return $false }
+  $allowed = @('8.8.8.8', '9.9.9.9', '1.1.1.1')
+  foreach ($s in $Servers) {
+    if ($allowed -notcontains ([string]$s).Trim()) { return $false }
   }
+  return $true
+}
+
+function Reset-TunnelDns {
+  # Restore DHCP-provided DNS only on adapters this tool forced to its static
+  # resolver list. Custom/manual DNS settings are left untouched.
+  Write-UiLine "  $DIM   DNS ayarları kontrol ediliyor (DHCP'ye geri alma)...$RST"
+  $changed = 0
+  $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' })
   foreach ($adapter in $adapters) {
-    $ok = $false
+    $servers = @()
     try {
-      Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ServerAddresses $wanted -ErrorAction Stop
-      $ok = $true
+      $servers = @(Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction Stop |
+        ForEach-Object { $_.ServerAddresses } | Where-Object { $_ })
+    } catch { continue }
+    if (-not (Test-ToolStaticDns $servers)) { continue }
+    try {
+      Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ResetServerAddresses -ErrorAction Stop
+      $changed += 1
+      Write-UiLine "  $GRN   DNS DHCP'ye döndü: $($adapter.Name)$RST"
     } catch {
-      try {
-        & netsh.exe interface ipv4 set dnsservers name="$($adapter.Name)" static 8.8.8.8 primary | Out-Null
-        & netsh.exe interface ipv4 add dnsservers name="$($adapter.Name)" 9.9.9.9 index=2 | Out-Null
-        $ok = ($LASTEXITCODE -eq 0)
-      } catch { $ok = $false }
-    }
-    if ($ok) {
-      $changed = $true
-      Write-UiLine "  $GRN   DNS düzeltildi: $($adapter.Name) -> 8.8.8.8, 9.9.9.9$RST"
-    } else {
-      Write-UiLine "  $YEL   DNS yazılamadı ($($adapter.Name)). Yönetici olarak çalıştırmayı deneyin.$RST"
+      Write-UiLine "  $YEL   DNS geri alınamadı ($($adapter.Name)). Yönetici olarak çalıştırın.$RST"
     }
   }
-  if ($changed) {
-    try { Clear-DnsClientCache | Out-Null } catch {}
-    Start-Sleep -Milliseconds 500
-  }
-  $edgeOk = (Test-NslookupHasA 'region1.v2.argotunnel.com' '8.8.8.8') -or (Test-NslookupHasA 'region1.v2.argotunnel.com' '1.1.1.1')
-  if ($edgeOk) {
-    Write-UiLine "  $DIM   Edge DNS OK (region1.v2.argotunnel.com)$RST"
+  try { Clear-DnsClientCache | Out-Null } catch {}
+  if ($changed -eq 0) {
+    Write-UiLine "  $DIM   Araç tarafından sabitlenmiş DNS bulunmadı; değişiklik yapılmadı.$RST"
   } else {
-    Write-UiLine "  $YEL   Edge DNS hâlâ zayıf; tünel yine de denenecek.$RST"
+    Write-UiLine "  $GRN   $changed adaptör DHCP DNS'ine döndürüldü.$RST"
   }
-  return $edgeOk
+  return $changed
+}
+
+function Invoke-ResetDns {
+  Clear-Host
+  Write-UiLine ''
+  Write-UiLine "$C5   --- Ağ / DNS onarımı ---$RST"
+  Write-UiLine ''
+  [void](Reset-TunnelDns)
+  Complete-Action
 }
 
 function Get-CloudflaredTunnelArgs([string]$Target) {
@@ -2004,6 +2016,7 @@ function Show-RootMenu {
   Write-UiLine "  [2]  Duendee"
   Write-UiLine "       $DIM   Test tüneli (Duendee-main · port $($script:DuendeePort) · ayrı servis)$RST"
   Write-UiLine ''
+  Write-UiLine "  $DIM$BOLD[D]$RST  ${DIM}Ağ / DNS onarımı (DHCP'ye geri al)$RST"
   Write-UiLine "  $DIM$BOLD[X]$RST  ${DIM}Çıkış$RST"
   Write-UiLine ''
   Write-Ui "$DIM   Seçim: $RST"
@@ -4185,6 +4198,7 @@ try {
     '3' { Invoke-CopyLink; exit 0 }
     '4' { Invoke-Cancel; exit 0 }
     '5' { Invoke-Autostart; exit 0 }
+    'reset-dns' { [void](Reset-TunnelDns); exit 0 }
     'recover-tunnel' {
       if (Test-Path -LiteralPath (Join-Path $StateDir 'manual-stop')) { exit 0 }
       Invoke-Start
@@ -4198,11 +4212,15 @@ try {
 
   while ($true) {
     Show-RootMenu
-    $product = Get-Choice '12X'
+    $product = Get-Choice '12XD'
     Write-UiLine ''
     if ($product -eq 'X') {
       Invoke-ExitCleanup
       exit 0
+    }
+    if ($product -eq 'D') {
+      Invoke-ResetDns
+      continue
     }
     if ($product -eq '1') {
       Bind-ProductState 'fm'

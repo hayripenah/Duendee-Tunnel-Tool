@@ -1610,11 +1610,13 @@ cloudflared_pids_all() {
   for piddir in /proc/[0-9]*; do
     pid="${piddir#/proc/}"
     [[ "$pid" == "$$" ]] && continue
+    [[ -r "${piddir}/comm" ]] || continue
     comm="$(tr -d '\0' < "${piddir}/comm" 2>/dev/null || true)"
     if [[ "$comm" == "cloudflared" ]]; then
       printf '%s\n' "$pid"
       continue
     fi
+    [[ -r "${piddir}/cmdline" ]] || continue
     argv0="$(tr '\0' '\n' < "${piddir}/cmdline" 2>/dev/null | head -n 1 || true)"
     case "$argv0" in
       *cloudflared*) printf '%s\n' "$pid" ;;
@@ -1646,6 +1648,7 @@ path_boundary_match() {
 
 cloudflared_belongs_to_product() {
   local pid="$1" cmd=""
+  [[ -r "/proc/${pid}/cmdline" ]] || return 1
   cmd="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
   [[ -n "$cmd" ]] || return 1
   [[ "$cmd" == *"127.0.0.1:${PORT}"* ]] && return 0
@@ -1753,16 +1756,48 @@ kill_tunnel() {
   rm -f "$PID_FILE" "$URL_FILE"
 }
 
-free_listen_port() {
-  if command -v fuser >/dev/null 2>&1; then
-    fuser -k "${PORT}/tcp" >/dev/null 2>&1 || true
-  fi
+port_owner_pids() {
   if command -v lsof >/dev/null 2>&1; then
-    local p
-    for p in $(lsof -tiTCP:"${PORT}" -sTCP:LISTEN 2>/dev/null || true); do
-      kill -KILL "$p" 2>/dev/null || true
-    done
+    lsof -tiTCP:"${PORT}" -sTCP:LISTEN 2>/dev/null || true
+    return 0
   fi
+  if command -v fuser >/dev/null 2>&1; then
+    fuser "${PORT}/tcp" 2>/dev/null | tr -s ' ' '\n' | grep -E '^[0-9]+$' || true
+  fi
+}
+
+pid_belongs_to_project() {
+  local pid="$1" cmd="" spid=""
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  if [[ -n "${SERVER_PID:-}" && -f "$SERVER_PID" ]]; then
+    spid="$(tr -d '[:space:]' < "$SERVER_PID" 2>/dev/null || true)"
+    [[ -n "$spid" && "$pid" == "$spid" ]] && return 0
+  fi
+  [[ -r "/proc/${pid}/cmdline" ]] || return 1
+  cmd="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
+  [[ -n "$cmd" ]] || return 1
+  [[ -n "${PROJECT:-}" && "$cmd" == *"$PROJECT"* ]] && return 0
+  return 1
+}
+
+free_listen_port() {
+  # Never kill arbitrary listeners: 8080/8081 is often a local proxy/VPN.
+  # Only stop processes that belong to this project; otherwise refuse.
+  local pids p foreign=0
+  pids="$(port_owner_pids)"
+  for p in $pids; do
+    if pid_belongs_to_project "$p"; then
+      kill -KILL "$p" 2>/dev/null || true
+    else
+      foreign=1
+      echo -e "  ${YEL}   Port ${PORT} başka bir süreç tarafından kullanılıyor (PID ${p}); öldürülmedi.${RST}"
+    fi
+  done
+  if [[ "$foreign" -eq 1 ]]; then
+    echo -e "  ${DIM}   Portu boşaltın veya config'te başka bir port seçin.${RST}"
+    return 1
+  fi
+  return 0
 }
 
 origin_serves_broken_bundle() {
@@ -2062,7 +2097,9 @@ start_app_origin() {
     fi
     echo -e "  ${DIM}   Sunulan paket Supabase ayarı içermiyor, yeniden derleniyor.${RST}"
     kill_dev_server
-    free_listen_port
+    if ! free_listen_port; then
+      return 1
+    fi
     rm -rf "${PROJECT}/dist"
     sleep 0.3
   done
@@ -2413,12 +2450,24 @@ do_start() {
     fi
   fi
   if ! decision="$(fleet_node begin --root "$ROOT" --local-alive "$local_alive" --local-url "${local_url:--}" 2>"${STATE}/fleet-begin.err")"; then
-    echo -e "  ${RED}${BOLD}[HATA]${RST} Tünel kaydı okunamadı. Yeni tünel açılmadı."
+    local fleet_err=""
     if [[ -s "${STATE}/fleet-begin.err" ]]; then
-      echo -e "  ${DIM}   $(tr '\n' ' ' < "${STATE}/fleet-begin.err")${RST}"
+      fleet_err="$(tr '\n' ' ' < "${STATE}/fleet-begin.err")"
     fi
-    wait_key
-    return
+    # Fleet is cross-device coordination, not a tunnel requirement. If it is
+    # unreachable (offline/DNS/GitHub) open a local tunnel instead of aborting.
+    if [[ -z "$fleet_err" || "$fleet_err" == *"fetch failed"* || "$fleet_err" == *"ENOTFOUND"* ||
+      "$fleet_err" == *"EAI_AGAIN"* || "$fleet_err" == *"ETIMEDOUT"* || "$fleet_err" == *"ECONN"* ||
+      "$fleet_err" == *"getaddrinfo"* || "$fleet_err" == *"socket hang up"* || "$fleet_err" == *"timeout"* ]]; then
+      echo -e "  ${YEL}   Ortak tünel kaydına ulaşılamadı (ağ). Yerel tünel açılacak.${RST}"
+      [[ -n "$fleet_err" ]] && echo -e "  ${DIM}   $fleet_err${RST}"
+      decision="own-local"
+    else
+      echo -e "  ${RED}${BOLD}[HATA]${RST} Tünel kaydı okunamadı. Yeni tünel açılmadı."
+      [[ -n "$fleet_err" ]] && echo -e "  ${DIM}   $fleet_err${RST}"
+      wait_key
+      return
+    fi
   fi
   case "$decision" in
     adopt$'\t'*)
@@ -2450,6 +2499,10 @@ do_start() {
     own)
       : > "${STATE}/fleet-claimed"
       trap 'trap - RETURN; if [[ -f "${STATE}/fleet-claimed" ]]; then rm -f "${STATE}/fleet-claimed"; fleet_release; fi' RETURN
+      ;;
+    own-local)
+      # Offline fallback: no fleet claim/publish, tunnel stays local-only.
+      rm -f "${STATE}/fleet-claimed"
       ;;
     *)
       echo -e "  ${RED}${BOLD}[HATA]${RST} Tünel kaydı okunamadı. Yeni tünel açılmadı."
