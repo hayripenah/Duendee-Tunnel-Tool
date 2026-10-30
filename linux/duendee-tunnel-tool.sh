@@ -1162,6 +1162,22 @@ ensure_app_npm_deps() {
   (cd "$path" && npm install --omit=dev) || (cd "$path" && npm install) || return 1
 }
 
+ensure_desktop_build_npm_deps() {
+  local path="$1"
+  if [[ -f "$path/node_modules/electron/package.json" &&
+        -f "$path/node_modules/electron-builder/package.json" ]]; then
+    return 0
+  fi
+  command -v npm >/dev/null 2>&1 || {
+    echo -e "  ${RED}   Masaüstü derlemesi için npm bulunamadı.${RST}" >&2
+    return 1
+  }
+  echo -e "  ${DIM}   Masaüstü derleme bağımlılıkları kuruluyor (npm install)...${RST}" >&2
+  (cd "$path" && npm install) || return 1
+  [[ -f "$path/node_modules/electron/package.json" &&
+     -f "$path/node_modules/electron-builder/package.json" ]]
+}
+
 ensure_android_sdk_env() {
   local ensure="${OS_DIR}/scripts/ensure-android-sdk.sh" log out
   [[ -f "$ensure" ]] || {
@@ -1356,8 +1372,8 @@ install_duendee_desktop_app() {
   fi
   [[ -d "$app_dir" ]] || return 1
   echo -e "  ${DIM}   DuendeeFM masaüstü app kalıcı olarak derleniyor (electron-builder)...${RST}" >&2
-  ensure_app_npm_deps "$app_dir" || {
-    echo -e "  ${RED}   Duendee-app npm install başarısız.${RST}" >&2
+  ensure_desktop_build_npm_deps "$app_dir" || {
+    echo -e "  ${RED}   Duendee-app masaüstü derleme bağımlılıkları eksik.${RST}" >&2
     return 1
   }
   (cd "$app_dir" && npm run electron:pack) || {
