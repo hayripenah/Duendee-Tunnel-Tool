@@ -849,6 +849,124 @@ ensure_requirements() {
   ensure_whatsapp_deps || true
 }
 
+github_auth_ready() {
+  [[ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]] && return 0
+  command -v gh >/dev/null 2>&1 || return 1
+  gh auth status >/dev/null 2>&1
+}
+
+github_api_reachable() {
+  curl -fsSIL -A 'DuendeeTunnelTool-Doctor' --max-time 8 https://api.github.com >/dev/null 2>&1
+}
+
+do_doctor() {
+  # quiet_gate=1 → boot: sadece hard fail / tek satir uyari
+  local quiet_gate="${1:-0}"
+  local hard_fail=0
+  local auth_ok=0
+
+  if [[ "$quiet_gate" != "1" ]]; then
+    echo
+    echo -e "${BOLD}  Duendee Tunnel Tool — doctor${RST}"
+    echo -e "${DIM}  ────────────────────────────────────────${RST}"
+  fi
+
+  ensure_node || true
+  if command -v node >/dev/null 2>&1; then
+    if [[ "$quiet_gate" != "1" ]]; then
+      echo -e "  ${GRN}[OK]${RST}     Node.js  $(node -v 2>/dev/null)  $(command -v node)"
+    fi
+  else
+    echo -e "  ${RED}[HATA]${RST}   Node.js yok — installer'i tekrar çalıştırın."
+    hard_fail=1
+  fi
+
+  ensure_cloudflared_bin || true
+  if command -v cloudflared >/dev/null 2>&1 || [[ -x "${HOME}/.cloudflared/cloudflared" ]]; then
+    if [[ "$quiet_gate" != "1" ]]; then
+      local cfbin
+      cfbin="$(command -v cloudflared 2>/dev/null || echo "${HOME}/.cloudflared/cloudflared")"
+      echo -e "  ${GRN}[OK]${RST}     cloudflared  ${cfbin}"
+    fi
+  else
+    echo -e "  ${RED}[HATA]${RST}   cloudflared yok."
+    hard_fail=1
+  fi
+
+  ensure_whatsapp_deps || true
+  if [[ -f "${ROOT}/node_modules/@whiskeysockets/baileys/package.json" ]]; then
+    if [[ "$quiet_gate" != "1" ]]; then
+      echo -e "  ${GRN}[OK]${RST}     WhatsApp deps (baileys)"
+    fi
+  else
+    echo -e "  ${RED}[HATA]${RST}   WhatsApp bağımlılıkları eksik — cd \"${ROOT}\"; npm install"
+    hard_fail=1
+  fi
+
+  if [[ "$quiet_gate" == "1" ]]; then
+    if [[ "$hard_fail" -eq 1 ]]; then
+      return 1
+    fi
+    if ! github_auth_ready; then
+      echo -e "  ${DIM}   GitHub girişi yok — yerel tünel çalışır; filo/private: gh auth login${RST}"
+    fi
+    return 0
+  fi
+
+  ensure_gh || true
+  if command -v gh >/dev/null 2>&1; then
+    echo -e "  ${GRN}[OK]${RST}     GitHub CLI  $(command -v gh)"
+  else
+    echo -e "  ${YEL}[UYARI]${RST}  GitHub CLI (gh) yok — filo / private clone çalışmaz."
+    echo -e "  ${DIM}         Yerel tünel yine de Node+cloudflared ile açılır.${RST}"
+  fi
+
+  if github_auth_ready; then
+    auth_ok=1
+    echo -e "  ${GRN}[OK]${RST}     GitHub oturumu (gh auth / GH_TOKEN)"
+  else
+    echo -e "  ${YEL}[UYARI]${RST}  GitHub girişi yok."
+    echo -e "  ${DIM}         Yerel tünel: çalışır. Filo + private repo: gh auth login${RST}"
+    echo -e "  ${DIM}         veya GH_TOKEN / GITHUB_TOKEN ortam değişkeni.${RST}"
+  fi
+
+  if github_api_reachable; then
+    echo -e "  ${GRN}[OK]${RST}     GitHub API erişimi"
+  else
+    echo -e "  ${YEL}[UYARI]${RST}  GitHub API'ye ulaşılamıyor (ağ / proxy / DNS)."
+  fi
+
+  if [[ -f "${ROOT}/config.json" ]]; then
+    local proj=""
+    if command -v node >/dev/null 2>&1; then
+      proj="$(node -e 'try{const c=require(process.argv[1]);process.stdout.write(String(c.projectPath||""))}catch{}' "${ROOT}/config.json" 2>/dev/null || true)"
+    fi
+    if [[ -n "$proj" && -d "$proj" ]]; then
+      echo -e "  ${GRN}[OK]${RST}     config.json projectPath  ${proj}"
+    elif [[ -n "$proj" ]]; then
+      echo -e "  ${YEL}[UYARI]${RST}  config.json projectPath yok / hatalı: ${proj}"
+      echo -e "  ${DIM}         İlk açılışta tool yolu sorar veya klonlar.${RST}"
+    else
+      echo -e "  ${GRN}[OK]${RST}     config.json (projectPath boş — ilk açılışta ayarlanır)"
+    fi
+  else
+    echo -e "  ${YEL}[UYARI]${RST}  config.json yok — config.example.json kopyalanacak."
+  fi
+
+  echo -e "${DIM}  ────────────────────────────────────────${RST}"
+  if [[ "$hard_fail" -eq 1 ]]; then
+    echo -e "  ${RED}${BOLD}Sonuç: zorunlu bağımlılıklar eksik.${RST}"
+    echo -e "  ${DIM}   Tekrar: curl …/install-linux.sh | bash${RST}"
+    return 1
+  fi
+  echo -e "  ${GRN}${BOLD}Sonuç: zorunlu bağımlılıklar tamam.${RST}"
+  if [[ "$auth_ok" -ne 1 ]]; then
+    echo -e "  ${DIM}   Filo/private için: gh auth login${RST}"
+  fi
+  echo
+  return 0
+}
+
 find_cloudflared() {
   if [[ -n "${DT_CF:-}" ]]; then
     CF="$DT_CF"
@@ -3330,8 +3448,23 @@ if is_uninstall_arg "${1:-}"; then
   exit 0
 fi
 
+if [[ "${1:-}" == "doctor" ]]; then
+  # Do not run interactive projectPath setup — doctor is a health check only.
+  ensure_requirements
+  if do_doctor 0; then
+    exit 0
+  fi
+  exit 1
+fi
+
 load_config
 ensure_requirements
+if ! do_doctor 1; then
+  echo -e "  ${RED}${BOLD}[HATA]${RST} Zorunlu bağımlılıklar eksik; menü açılmıyor."
+  echo -e "  ${DIM}   Ayrıntı: duendee-tunnel doctor${RST}"
+  wait_key
+  exit 1
+fi
 sync_tool_copy "$@"
 trap cleanup_quiet EXIT INT TERM HUP
 register_stable_launch || true

@@ -44,16 +44,16 @@ function Invoke-NpmInstallSafe {
     $prevNative = $PSNativeCommandUseErrorActionPreference
     $PSNativeCommandUseErrorActionPreference = $false
   }
+  $ec = 1
   try {
     Push-Location $WorkDir
     try {
       Write-Host "npm install..."
       & cmd.exe /c "npm.cmd install --omit=dev"
-      if ($LASTEXITCODE -ne 0) {
+      $ec = $LASTEXITCODE
+      if ($ec -ne 0) {
         & cmd.exe /c "npm.cmd install"
-      }
-      if ($LASTEXITCODE -ne 0) {
-        Write-Host "WARNING: npm install failed ($LASTEXITCODE)."
+        $ec = $LASTEXITCODE
       }
     } finally {
       Pop-Location
@@ -63,6 +63,111 @@ function Invoke-NpmInstallSafe {
     if ($null -ne $prevNative) {
       $PSNativeCommandUseErrorActionPreference = $prevNative
     }
+  }
+  if ($ec -ne 0) {
+    throw "npm install basarisiz (cikis $ec). Ag/proxy veya Node kurulumunu kontrol edin."
+  }
+  $baileys = Join-Path $WorkDir 'node_modules\@whiskeysockets\baileys\package.json'
+  if (-not (Test-Path -LiteralPath $baileys)) {
+    throw "WhatsApp bagimliligi eksik (baileys). Tekrar: npm install  (in $WorkDir)"
+  }
+}
+
+function Test-InstallInteractive {
+  if ($env:CI -or $env:DT_SKIP_GH_AUTH -eq '1') { return $false }
+  try { return [Environment]::UserInteractive } catch { return $true }
+}
+
+function Find-InstallNode {
+  $cmd = Get-Command node -ErrorAction SilentlyContinue
+  if ($cmd) { return $cmd.Source }
+  $local = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'DuendeeTunnel\node') -Filter node.exe -Recurse -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+  if ($local) { return $local.FullName }
+  foreach ($c in @(
+      (Join-Path $env:ProgramFiles 'nodejs\node.exe'),
+      (Join-Path $env:LOCALAPPDATA 'Programs\nodejs\node.exe')
+    )) {
+    if ($c -and (Test-Path -LiteralPath $c)) { return $c }
+  }
+  return $null
+}
+
+function Find-InstallCloudflared {
+  $cmd = Get-Command cloudflared -ErrorAction SilentlyContinue
+  if ($cmd) { return $cmd.Source }
+  $cfExe = Join-Path $env:USERPROFILE '.cloudflared\cloudflared.exe'
+  if (Test-Path -LiteralPath $cfExe) { return $cfExe }
+  return $null
+}
+
+function Find-InstallGh {
+  $cmd = Get-Command gh -ErrorAction SilentlyContinue
+  if ($cmd) { return $cmd.Source }
+  $exe = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'DuendeeTunnel\gh') -Filter gh.exe -Recurse -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+  if ($exe) { return $exe.FullName }
+  return $null
+}
+
+function Assert-CoreRuntime {
+  param([string]$WorkDir)
+  if (-not (Find-InstallNode)) {
+    throw 'Node.js yok. Kurulum Node indirmeyi basaramadi.'
+  }
+  if (-not (Find-InstallCloudflared)) {
+    throw 'cloudflared yok. Kurulum cloudflared indirmeyi basaramadi.'
+  }
+  if (-not (Find-InstallGh)) {
+    throw 'GitHub CLI (gh) yok. Kurulum gh indirmeyi basaramadi.'
+  }
+  $baileys = Join-Path $WorkDir 'node_modules\@whiskeysockets\baileys\package.json'
+  if (-not (Test-Path -LiteralPath $baileys)) {
+    throw "WhatsApp bagimliliklari eksik. Calistirin: npm install  (in $WorkDir)"
+  }
+}
+
+function Ensure-GitHubLogin {
+  $gh = Find-InstallGh
+  if (-not $gh) { throw 'GitHub CLI (gh) bulunamadi.' }
+  $envTok = (($env:GH_TOKEN, $env:GITHUB_TOKEN) | Where-Object { $_ } | Select-Object -First 1)
+  if ($envTok) {
+    Write-Host "GitHub: GH_TOKEN / GITHUB_TOKEN kullanilacak."
+    return
+  }
+  & $gh auth status 1>$null 2>$null
+  if ($LASTEXITCODE -eq 0) {
+    Write-Host "GitHub: gh oturumu hazir."
+    return
+  }
+  if (-not (Test-InstallInteractive)) {
+    Write-Host "UYARI: GitHub girisi yok. Yerel tunel calisir; filo ve private clone icin sonra: gh auth login"
+    Write-Host "        veya GH_TOKEN / GITHUB_TOKEN ortam degiskeni verin."
+    return
+  }
+  Write-Host "GitHub girisi gerekli (filo + private repo). Tarayici acilacak..."
+  & $gh auth login --hostname github.com --git-protocol https --web
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "UYARI: GitHub girisi tamamlanmadi. Yerel tunel yine de calisir."
+    Write-Host "        Filo / private clone icin: gh auth login"
+  }
+}
+
+function Invoke-InstallDoctor {
+  param([string]$WorkDir)
+  $tool = Join-Path $WorkDir 'windows\duendee-tunnel-tool.ps1'
+  if (-not (Test-Path -LiteralPath $tool)) {
+    throw "doctor calistirilamadi: $tool yok"
+  }
+  if (-not (Select-String -LiteralPath $tool -Pattern 'function Invoke-Doctor' -Quiet)) {
+    Write-Host "UYARI: Bu paket henuz 'doctor' icermiyor; Assert-CoreRuntime ile dogrulandi."
+    return
+  }
+  Write-Host ""
+  Write-Host "Kurulum dogrulaniyor (doctor)..."
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $tool doctor
+  if ($LASTEXITCODE -eq 1) {
+    throw "Doctor basarisiz (zorunlu bagimliliklar eksik). Yukaridaki hatalari duzeltip kurunumu tekrarlayin."
   }
 }
 
@@ -201,7 +306,7 @@ try {
   if (Test-Path $InstallDir) {
     # Keep user config/session if present
     $keep = @{}
-    foreach ($name in @('config.json', '.whatsapp-session', '.tunnelstate')) {
+    foreach ($name in @('config.json', '.whatsapp-session', '.tunnelstate', '.tunnelstate-duendee')) {
       $p = Join-Path $InstallDir $name
       if (Test-Path $p) {
         $bak = Join-Path $tmp ("keep-" + $name.Replace('.', '_'))
@@ -210,7 +315,7 @@ try {
       }
     }
     Get-ChildItem -LiteralPath $InstallDir -Force | Where-Object {
-      $_.Name -notin @('config.json', '.whatsapp-session', '.tunnelstate', 'bin', 'node_modules')
+      $_.Name -notin @('config.json', '.whatsapp-session', '.tunnelstate', '.tunnelstate-duendee', 'bin', 'node_modules')
     } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
   } else {
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -264,7 +369,7 @@ try {
 
   $nodeZip = Join-Path $tmp 'node-win.zip'
   $nodeHome = Join-Path $env:LOCALAPPDATA 'DuendeeTunnel\node'
-  if (-not ((Get-Command node -ErrorAction SilentlyContinue) -or (Test-Path (Join-Path $env:ProgramFiles 'nodejs\node.exe')))) {
+  if (-not (Find-InstallNode)) {
     Write-Host "Node.js kuruluyor..."
     try {
       Invoke-WebRequest -Uri 'https://nodejs.org/dist/v22.14.0/node-v22.14.0-win-x64.zip' -OutFile $nodeZip -UseBasicParsing
@@ -274,23 +379,29 @@ try {
       $nodeBin = Get-ChildItem $nodeHome -Directory | Select-Object -First 1
       if ($nodeBin) { $env:Path = "$($nodeBin.FullName);$env:Path" }
     } catch {
-      Write-Host "WARNING: Node.js indirilemedi. $($_.Exception.Message)"
+      throw "Node.js indirilemedi: $($_.Exception.Message)"
     }
   }
+  if (-not (Find-InstallNode)) {
+    throw 'Node.js kurulduktan sonra bulunamadi.'
+  }
+
   $cfExe = Join-Path $env:USERPROFILE '.cloudflared\cloudflared.exe'
-  if (-not ((Get-Command cloudflared -ErrorAction SilentlyContinue) -or (Test-Path $cfExe))) {
+  if (-not (Find-InstallCloudflared)) {
     Write-Host "cloudflared kuruluyor..."
     try {
       New-Item -ItemType Directory -Force -Path (Split-Path $cfExe) | Out-Null
       $cfArch = if ($env:PROCESSOR_ARCHITECTURE -match 'ARM64') { 'arm64' } else { 'amd64' }
       Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-$cfArch.exe" -OutFile $cfExe -UseBasicParsing
     } catch {
-      Write-Host "WARNING: cloudflared indirilemedi. $($_.Exception.Message)"
+      throw "cloudflared indirilemedi: $($_.Exception.Message)"
     }
   }
+  if (-not (Find-InstallCloudflared)) {
+    throw 'cloudflared kurulduktan sonra bulunamadi.'
+  }
 
-  $ghCmd = Get-Command gh -ErrorAction SilentlyContinue
-  if (-not $ghCmd) {
+  if (-not (Find-InstallGh)) {
     Write-Host "GitHub CLI kuruluyor..."
     try {
       $ghVer = '2.102.0'
@@ -304,23 +415,27 @@ try {
       $ghExe = Get-ChildItem $ghHome -Filter gh.exe -Recurse | Select-Object -First 1
       if ($ghExe) { $env:Path = "$(Split-Path $ghExe.FullName);$env:Path" }
     } catch {
-      Write-Host "WARNING: GitHub CLI indirilemedi. $($_.Exception.Message)"
+      throw "GitHub CLI indirilemedi: $($_.Exception.Message)"
     }
+  }
+  if (-not (Find-InstallGh)) {
+    throw 'GitHub CLI (gh) kurulduktan sonra bulunamadi.'
   }
 
   if (-not $SkipNpm) {
-    if ((Get-Command npm.cmd -ErrorAction SilentlyContinue) -or (Get-Command npm -ErrorAction SilentlyContinue)) {
-      Invoke-NpmInstallSafe -WorkDir $InstallDir
-    } else {
-      Write-Host "npm not found - install Node.js, then run: npm install  (in $InstallDir)"
+    if (-not ((Get-Command npm.cmd -ErrorAction SilentlyContinue) -or (Get-Command npm -ErrorAction SilentlyContinue))) {
+      throw "npm bulunamadi. Node.js PATH'te olmali; sonra: npm install  (in $InstallDir)"
     }
+    Invoke-NpmInstallSafe -WorkDir $InstallDir
   }
+
+  Assert-CoreRuntime -WorkDir $InstallDir
 } finally {
-  # Shim + PATH must happen even if npm warnings aborted the install body
+  # Shim + PATH even when body throws (so a partial install is still launchable after fix)
   try {
     $shimInfo = Install-ShimAndUserPath -Root $InstallDir -Bin $BinDir
   } catch {
-    Write-Host "WARNING: shim/PATH setup failed: $($_.Exception.Message)"
+    Write-Host "HATA: shim/PATH kurulamadi: $($_.Exception.Message)"
   }
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
@@ -364,14 +479,32 @@ if (-not $NoDesktopShortcut) {
 
 # Ensure this session (irm|iex) can resolve the command immediately
 $env:Path = "$BinDir;$env:Path"
+# Bundled Node / gh may live under LOCALAPPDATA
+$nodeExe = Find-InstallNode
+if ($nodeExe) {
+  $nodeBin = Split-Path -Parent $nodeExe
+  if ($env:Path -notlike "*${nodeBin}*") { $env:Path = "$nodeBin;$env:Path" }
+}
+$ghExePath = Find-InstallGh
+if ($ghExePath) {
+  $ghBin = Split-Path -Parent $ghExePath
+  if ($env:Path -notlike "*${ghBin}*") { $env:Path = "$ghBin;$env:Path" }
+}
 $cmdCheck = Get-Command duendee-tunnel -ErrorAction SilentlyContinue
+
+Assert-CoreRuntime -WorkDir $InstallDir
+Ensure-GitHubLogin
+Invoke-InstallDoctor -WorkDir $InstallDir
 
 Write-Host ""
 Write-Host "Install OK ($($info.Tag))"
 Write-Host "  Location : $InstallDir"
 Write-Host "  Shim     : $(if ($shimInfo) { $shimInfo.Shim } else { Join-Path $BinDir 'duendee-tunnel.cmd' })"
 Write-Host "  Run      : duendee-tunnel"
+Write-Host "  Doctor   : duendee-tunnel doctor"
 if (-not $cmdCheck) {
   Write-Host "  PATH     : `$env:Path = '$BinDir;' + `$env:Path"
 }
 Write-Host "  Config   : $InstallDir\config.json"
+Write-Host "  Not      : Docker gerekmez. Yerel tunel Node+cloudflared ile calisir;"
+Write-Host "             filo / private repo icin GitHub girisi (gh auth login) gerekir."

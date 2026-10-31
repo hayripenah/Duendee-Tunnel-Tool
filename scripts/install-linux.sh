@@ -269,7 +269,7 @@ fi
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 
 # Preserve user state
-for name in config.json .whatsapp-session .tunnelstate; do
+for name in config.json .whatsapp-session .tunnelstate .tunnelstate-duendee; do
   if [[ -e "${INSTALL_DIR}/${name}" ]]; then
     cp -a "${INSTALL_DIR}/${name}" "${tmp}/keep-${name}"
   fi
@@ -277,12 +277,12 @@ done
 
 # Replace tree (except preserved paths handled after)
 find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 \
-  ! -name 'config.json' ! -name '.whatsapp-session' ! -name '.tunnelstate' ! -name 'node_modules' \
+  ! -name 'config.json' ! -name '.whatsapp-session' ! -name '.tunnelstate' ! -name '.tunnelstate-duendee' ! -name 'node_modules' \
   -exec rm -rf {} +
 
 cp -a "${extracted}/." "$INSTALL_DIR/"
 
-for name in config.json .whatsapp-session .tunnelstate; do
+for name in config.json .whatsapp-session .tunnelstate .tunnelstate-duendee; do
   if [[ -e "${tmp}/keep-${name}" && ! -e "${INSTALL_DIR}/${name}" ]]; then
     cp -a "${tmp}/keep-${name}" "${INSTALL_DIR}/${name}"
   fi
@@ -300,33 +300,96 @@ fi
 chmod +x "${INSTALL_DIR}/linux/duendee-tunnel-tool.sh" \
   "${INSTALL_DIR}/linux/scripts/"*.sh 2>/dev/null || true
 
-ensure_node || echo "WARNING: Node.js kurulamadı."
-ensure_cloudflared || echo "WARNING: cloudflared kurulamadı."
-ensure_gh || echo "WARNING: GitHub CLI kurulamadı."
+ensure_node || { echo "HATA: Node.js kurulamadı." >&2; exit 1; }
+ensure_cloudflared || { echo "HATA: cloudflared kurulamadı." >&2; exit 1; }
+ensure_gh || { echo "HATA: GitHub CLI kurulamadı." >&2; exit 1; }
 
 if [[ "$SKIP_NPM" != "1" ]]; then
-  if command -v npm >/dev/null 2>&1; then
-    echo "npm install..."
-    # npm warnings must not abort shim creation (set -e); ignore non-zero only after retry
-    set +e
-    (cd "$INSTALL_DIR" && npm install --omit=dev)
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "HATA: npm bulunamadı. Node.js PATH'te olmalı; sonra: npm install  (in ${INSTALL_DIR})" >&2
+    exit 1
+  fi
+  echo "npm install..."
+  set +e
+  (cd "$INSTALL_DIR" && npm install --omit=dev)
+  npm_ec=$?
+  if [[ $npm_ec -ne 0 ]]; then
+    (cd "$INSTALL_DIR" && npm install)
     npm_ec=$?
-    if [[ $npm_ec -ne 0 ]]; then
-      (cd "$INSTALL_DIR" && npm install)
-      npm_ec=$?
-    fi
-    set -e
-    if [[ $npm_ec -ne 0 ]]; then
-      echo "WARNING: npm install failed (${npm_ec})."
-    fi
-  else
-    echo "npm not found — install Node.js, then run: npm install  (in ${INSTALL_DIR})"
+  fi
+  set -e
+  if [[ $npm_ec -ne 0 ]]; then
+    echo "HATA: npm install başarısız (${npm_ec})." >&2
+    exit 1
+  fi
+  if [[ ! -f "${INSTALL_DIR}/node_modules/@whiskeysockets/baileys/package.json" ]]; then
+    echo "HATA: WhatsApp bağımlılığı eksik (baileys)." >&2
+    exit 1
   fi
 fi
 
 # Explicit shim now; trap also ensures it on exit
 install_shim_and_path
 SHIM_DONE=1
+
+assert_core_runtime() {
+  command -v node >/dev/null 2>&1 || { echo "HATA: node yok." >&2; return 1; }
+  command -v npm >/dev/null 2>&1 || { echo "HATA: npm yok." >&2; return 1; }
+  command -v cloudflared >/dev/null 2>&1 || [[ -x "${HOME}/.cloudflared/cloudflared" ]] || {
+    echo "HATA: cloudflared yok." >&2
+    return 1
+  }
+  command -v gh >/dev/null 2>&1 || { echo "HATA: gh yok." >&2; return 1; }
+  [[ -f "${INSTALL_DIR}/node_modules/@whiskeysockets/baileys/package.json" ]] || {
+    echo "HATA: baileys yok. npm install  (in ${INSTALL_DIR})" >&2
+    return 1
+  }
+  return 0
+}
+
+ensure_github_login() {
+  if [[ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]]; then
+    echo "GitHub: GH_TOKEN / GITHUB_TOKEN kullanılacak."
+    return 0
+  fi
+  if gh auth status >/dev/null 2>&1; then
+    echo "GitHub: gh oturumu hazır."
+    return 0
+  fi
+  if [[ "${CI:-}" == "true" || "${DT_SKIP_GH_AUTH:-}" == "1" || ! -t 0 ]]; then
+    echo "UYARI: GitHub girişi yok. Yerel tünel çalışır; filo ve private clone için sonra: gh auth login"
+    echo "        veya GH_TOKEN / GITHUB_TOKEN ortam değişkeni verin."
+    return 0
+  fi
+  echo "GitHub girişi gerekli (filo + private repo). Tarayıcı açılacak..."
+  if ! gh auth login --hostname github.com --git-protocol https --web; then
+    echo "UYARI: GitHub girişi tamamlanmadı. Yerel tünel yine de çalışır."
+    echo "        Filo / private clone için: gh auth login"
+  fi
+}
+
+run_install_doctor() {
+  local tool="${INSTALL_DIR}/linux/duendee-tunnel-tool.sh"
+  [[ -x "$tool" ]] || chmod +x "$tool" 2>/dev/null || true
+  if ! grep -q 'do_doctor()' "$tool" 2>/dev/null; then
+    echo "UYARI: Bu paket henüz 'doctor' içermiyor; assert_core_runtime ile doğrulandı."
+    return 0
+  fi
+  echo
+  echo "Kurulum doğrulanıyor (doctor)..."
+  set +e
+  "$tool" doctor
+  local ec=$?
+  set -e
+  if [[ $ec -eq 1 ]]; then
+    echo "HATA: Doctor başarısız (zorunlu bağımlılıklar eksik)." >&2
+    exit 1
+  fi
+}
+
+assert_core_runtime
+ensure_github_login
+run_install_doctor
 
 write_desktop_shortcut() {
   local desk icon launcher dest
@@ -377,7 +440,10 @@ echo "  Location : ${INSTALL_DIR}"
 echo "  Shim     : ${SHIM_PRIMARY:-${BIN_DIR}/duendee-tunnel}"
 [[ -n "${SHIM_EXTRA:-}" ]] && echo "  Shim+    : ${SHIM_EXTRA}"
 echo "  Run      : duendee-tunnel"
+echo "  Doctor   : duendee-tunnel doctor"
 echo "  Config   : ${INSTALL_DIR}/config.json"
+echo "  Not      : Docker gerekmez. Yerel tünel Node+cloudflared ile çalışır;"
+echo "             filo / private repo için GitHub girişi (gh auth login) gerekir."
 print_path_help
 
 if [[ "$_DT_SOURCED" == "1" ]]; then

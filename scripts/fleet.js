@@ -69,7 +69,11 @@ function ghToken(interactive) {
   if (envTok) return envTok
   const gh = findExe('gh')
   if (!gh) {
-    if (interactive) throw new Error('GitHub CLI yok')
+    if (interactive) {
+      throw new Error(
+        'Filo için GitHub CLI yok. Yerel tünel yine de açılabilir. Kurulum: duendee-tunnel doctor — sonra gh auth login'
+      )
+    }
     return ''
   }
   const read = () => {
@@ -81,10 +85,18 @@ function ghToken(interactive) {
     const login = spawnSync(gh, ['auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web'], {
       stdio: 'inherit',
     })
-    if (login.status !== 0) throw new Error('GitHub girişi tamamlanmadı')
+    if (login.status !== 0) {
+      throw new Error(
+        'Filo için GitHub girişi tamamlanmadı. Yerel tünel çalışır; filo/private: gh auth login veya GH_TOKEN'
+      )
+    }
     token = read()
   }
-  if (!token && interactive) throw new Error('GitHub girişi yok')
+  if (!token && interactive) {
+    throw new Error(
+      'Filo için GitHub girişi yok. Yerel tünel çalışır; filo/private clone: gh auth login veya GH_TOKEN'
+    )
+  }
   return token
 }
 

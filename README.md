@@ -15,7 +15,7 @@ All releases: https://github.com/hayripenah/Duendee-Tunnel-Tool/releases
 
 ## Install + run (same terminal)
 
-Requires [Node.js](https://nodejs.org/) and [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation/).
+**Docker is not recommended** (and not supported). This tool needs a real desktop session: WhatsApp QR, `gh auth login --web`, Electron shortcuts, host localhost ports, and cloudflared. Use the one-liner installers instead — they download Node, cloudflared, GitHub CLI, and npm deps, then refuse to say “Install OK” until `doctor` passes.
 
 After install, the universal command on both OSes is:
 
@@ -23,13 +23,22 @@ After install, the universal command on both OSes is:
 duendee-tunnel
 ```
 
+Health check anytime:
+
+```text
+duendee-tunnel doctor
+```
+
+- **Hard fail** (exit 1): missing Node, cloudflared, or WhatsApp npm deps — menu will not open.
+- **Soft warning**: no GitHub login — **local tunnel still works**; fleet sync and private repo clone need `gh auth login` or `GH_TOKEN` / `GITHUB_TOKEN`.
+
 ### Windows 11 (PowerShell) — install then run in the same session
 
 ```powershell
 irm https://raw.githubusercontent.com/hayripenah/Duendee-Tunnel-Tool/main/scripts/install-windows.ps1 | iex; duendee-tunnel
 ```
 
-Installs to `%LOCALAPPDATA%\DuendeeTunnelTool`, writes a `duendee-tunnel` shim, updates **User PATH** and **`$env:Path` in the current session**, and creates a desktop shortcut. New terminals pick up User PATH automatically.
+Installs to `%LOCALAPPDATA%\DuendeeTunnelTool`, writes a `duendee-tunnel` shim, updates **User PATH** and **`$env:Path` in the current session**, installs Node / cloudflared / `gh`, runs `npm install`, prompts for GitHub login when interactive, runs `doctor`, and creates a desktop shortcut. New terminals pick up User PATH automatically.
 
 ### Linux (bash) — install then run in the same session
 
@@ -39,7 +48,7 @@ Installs to `%LOCALAPPDATA%\DuendeeTunnelTool`, writes a `duendee-tunnel` shim, 
 curl -fsSL https://raw.githubusercontent.com/hayripenah/Duendee-Tunnel-Tool/main/scripts/install-linux.sh | bash; export PATH="$HOME/.local/bin:$PATH"; hash -r; duendee-tunnel
 ```
 
-Installs to `~/.local/share/duendee-tunnel-tool`, creates `~/.local/bin/duendee-tunnel` (and `/usr/local/bin/duendee-tunnel` when writable), and appends `~/.local/bin` to `~/.bashrc` / `~/.zshrc` / `~/.profile` when missing.
+Installs to `~/.local/share/duendee-tunnel-tool`, creates `~/.local/bin/duendee-tunnel` (and `/usr/local/bin/duendee-tunnel` when writable), appends `~/.local/bin` to `~/.bashrc` / `~/.zshrc` / `~/.profile` when missing, installs core deps fail-hard, prompts for GitHub login when interactive, and runs `doctor`.
 
 **Alternative (source — PATH applies immediately):**
 
@@ -131,11 +140,12 @@ Shared pieces (repo root):
 
 ## Quick start (from source)
 
-1. Install [Node.js](https://nodejs.org/) and [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation/).
+1. Prefer the one-liner installers above (they pull Node / cloudflared / `gh` for you). From a clone: install [Node.js](https://nodejs.org/), [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation/), and [GitHub CLI](https://cli.github.com/).
 2. Clone this repo.
 3. `cp config.example.json config.json` and edit `projectPath`.
 4. `npm install`
-5. Run the entry point for your OS (see **Run** above).
+5. `gh auth login` (needed for fleet + private repos; local tunnel works without it).
+6. Run `duendee-tunnel doctor`, then the entry point for your OS (see **Run** above).
 
 ## Menu
 

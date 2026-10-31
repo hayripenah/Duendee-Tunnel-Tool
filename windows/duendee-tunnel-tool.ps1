@@ -704,11 +704,22 @@ function Test-UninstallAction([string]$Name) {
   return $Name -match '^(?i)(6|uninstall|kaldir|kaldır|remove)$'
 }
 
+function Test-DoctorAction([string]$Name) {
+  return $Name -match '^(?i)doctor$'
+}
+
 $script:UninstallCli = Test-UninstallAction $Action
-if ($script:UninstallCli) {
+$script:DoctorCli = Test-DoctorAction $Action
+if ($script:UninstallCli -or $script:DoctorCli) {
   $Project = ''
   $Port = 8080
   $AppPath = ''
+  $script:FmProject = ''
+  $script:FmPort = 8080
+  $script:FmAppPath = ''
+  $script:DuendeeProject = ''
+  $script:DuendeePort = 8081
+  $script:DuendeeBranch = 'neo-3d'
 } else {
   $boot = Ensure-ToolConfig
   $Project = [string]$boot.Project
@@ -765,7 +776,7 @@ function Bind-ProductState {
 }
 
 # Default: DuendeeFM context (autostart / CLI actions stay on FM)
-if ($script:UninstallCli) {
+if ($script:UninstallCli -or $script:DoctorCli) {
   $StateDir = $script:FmStateDir
   $PidFile = Join-Path $StateDir 'tunnel.pid'
   $UrlFile = Join-Path $StateDir 'tunnel.url'
@@ -1162,6 +1173,144 @@ function Ensure-RuntimeRequirements {
   [void](Install-UserNode)
   [void](Install-UserCloudflared)
   [void](Ensure-WhatsAppDeps)
+}
+
+function Test-GitHubAuthReady {
+  if (($env:GH_TOKEN, $env:GITHUB_TOKEN) | Where-Object { $_ }) { return $true }
+  $gh = Install-UserGh
+  if (-not $gh) { return $false }
+  & $gh auth status 1>$null 2>$null
+  return ($LASTEXITCODE -eq 0)
+}
+
+function Test-GitHubApiReachable {
+  try {
+    $req = [System.Net.HttpWebRequest]::Create('https://api.github.com')
+    $req.Method = 'HEAD'
+    $req.UserAgent = 'DuendeeTunnelTool-Doctor'
+    $req.Timeout = 8000
+    $resp = $req.GetResponse()
+    $resp.Close()
+    return $true
+  } catch {
+    try {
+      Invoke-WebRequest -Uri 'https://api.github.com' -Method Head -UseBasicParsing -TimeoutSec 8 | Out-Null
+      return $true
+    } catch {
+      return $false
+    }
+  }
+}
+
+function Invoke-Doctor {
+  param([switch]$QuietGate)
+  # Exit 0 = zorunlu bagimliliklar tamam (GitHub uyarisi soft olabilir)
+  # Exit 1 = Node / cloudflared / WhatsApp deps eksik
+  $hardFail = $false
+  $authOk = $false
+  if (-not $QuietGate) {
+    Write-UiLine ''
+    Write-UiLine "$BOLD  Duendee Tunnel Tool — doctor$RST"
+    Write-UiLine "$DIM  ────────────────────────────────────────$RST"
+  }
+
+  $node = Find-NodeExe
+  if (-not $node) { [void](Install-UserNode); $node = Find-NodeExe }
+  if ($node) {
+    if (-not $QuietGate) {
+      $ver = ''
+      try { $ver = (& $node -v 2>$null) } catch {}
+      Write-UiLine ("  {0}[OK]{1}     Node.js  {2}  {3}" -f $GRN, $RST, $ver, $node)
+    }
+  } else {
+    Write-UiLine "  $RED[HATA]$RST   Node.js yok — tekrar kurun veya installer'i calistirin."
+    $hardFail = $true
+  }
+
+  $cf = Find-Cloudflared
+  if (-not $cf) { [void](Install-UserCloudflared); $cf = Find-Cloudflared }
+  if ($cf) {
+    if (-not $QuietGate) {
+      Write-UiLine ("  {0}[OK]{1}     cloudflared  {2}" -f $GRN, $RST, $cf)
+    }
+  } else {
+    Write-UiLine "  $RED[HATA]$RST   cloudflared yok — installer Node/cloudflared indirmeli."
+    $hardFail = $true
+  }
+
+  $baileys = Join-Path $Root 'node_modules\@whiskeysockets\baileys\package.json'
+  if (-not (Test-Path -LiteralPath $baileys)) { [void](Ensure-WhatsAppDeps) }
+  if (Test-Path -LiteralPath $baileys) {
+    if (-not $QuietGate) {
+      Write-UiLine ("  {0}[OK]{1}     WhatsApp deps (baileys)" -f $GRN, $RST)
+    }
+  } else {
+    Write-UiLine "  $RED[HATA]$RST   WhatsApp bagimliliklari eksik — cd `"$Root`"; npm install"
+    $hardFail = $true
+  }
+
+  if ($QuietGate) {
+    if ($hardFail) { return 1 }
+    if (-not (Test-GitHubAuthReady)) {
+      Write-UiLine "  $DIM   GitHub girisi yok — yerel tunel calisir; filo/private: gh auth login$RST"
+    }
+    return 0
+  }
+
+  $gh = Install-UserGh
+  if ($gh) {
+    Write-UiLine ("  {0}[OK]{1}     GitHub CLI  {2}" -f $GRN, $RST, $gh)
+  } else {
+    Write-UiLine "  $YEL[UYARI]$RST  GitHub CLI (gh) yok — filo / private clone calismaz."
+    Write-UiLine "  $DIM         Yerel tunel yine de Node+cloudflared ile acilir.$RST"
+  }
+
+  $authOk = Test-GitHubAuthReady
+  if ($authOk) {
+    Write-UiLine ("  {0}[OK]{1}     GitHub oturumu (gh auth / GH_TOKEN)" -f $GRN, $RST)
+  } else {
+    Write-UiLine "  $YEL[UYARI]$RST  GitHub girisi yok."
+    Write-UiLine "  $DIM         Yerel tunel: calisir. Filo + private repo: gh auth login$RST"
+    Write-UiLine "  $DIM         veya GH_TOKEN / GITHUB_TOKEN ortam degiskeni.$RST"
+  }
+
+  if (Test-GitHubApiReachable) {
+    Write-UiLine ("  {0}[OK]{1}     GitHub API erisimi" -f $GRN, $RST)
+  } else {
+    Write-UiLine "  $YEL[UYARI]$RST  GitHub API'ye ulasilamiyor (ag / proxy / DNS)."
+  }
+
+  $cfg = Join-Path $Root 'config.json'
+  if (Test-Path -LiteralPath $cfg) {
+    $proj = ''
+    try {
+      $j = Get-Content -LiteralPath $cfg -Raw -Encoding UTF8 | ConvertFrom-Json
+      $proj = [string]$j.projectPath
+    } catch {}
+    if ($proj -and (Test-Path -LiteralPath $proj)) {
+      Write-UiLine ("  {0}[OK]{1}     config.json projectPath  {2}" -f $GRN, $RST, $proj)
+    } elseif ($proj) {
+      Write-UiLine "  $YEL[UYARI]$RST  config.json projectPath yok / hatali: $proj"
+      Write-UiLine "  $DIM         Ilk acilista tool yolu sorar veya klonlar.$RST"
+    } else {
+      Write-UiLine ("  {0}[OK]{1}     config.json (projectPath bos — ilk acilista ayarlanir)" -f $GRN, $RST)
+    }
+  } else {
+    Write-UiLine "  $YEL[UYARI]$RST  config.json yok — config.example.json kopyalanacak."
+  }
+
+  Write-UiLine "$DIM  ────────────────────────────────────────$RST"
+  if ($hardFail) {
+    Write-UiLine "  $RED$BOLD Sonuc: zorunlu bagimliliklar eksik.$RST"
+    Write-UiLine "  $DIM   Tekrar: irm .../install-windows.ps1 | iex$RST"
+    return 1
+  }
+  Write-UiLine "  $GRN$BOLD Sonuc: zorunlu bagimliliklar tamam.$RST"
+  if (-not $authOk) {
+    Write-UiLine "  $DIM   Filo/private icin: gh auth login$RST"
+  }
+  Write-UiLine ''
+  return 0
 }
 
 function Find-Cloudflared {
@@ -4187,7 +4336,19 @@ try {
     Invoke-Uninstall -Mode $UninstallChoice
     exit 0
   }
+  if ($Action -match '^(?i)doctor$') {
+    $script:CleanupDone = $true
+    $code = Invoke-Doctor
+    exit $code
+  }
   Ensure-RuntimeRequirements
+  $doctorCode = Invoke-Doctor -QuietGate
+  if ($doctorCode -eq 1) {
+    Write-UiLine "  $RED$BOLD[HATA]$RST Zorunlu bagimliliklar eksik; menu acilmiyor."
+    Write-UiLine "  $DIM   Ayrinti: duendee-tunnel doctor$RST"
+    Pause-Enter
+    exit 1
+  }
   Update-ToolCopy
   if ($script:BootTunnel) {
     Invoke-Start
